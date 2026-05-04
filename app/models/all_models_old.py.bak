@@ -1,0 +1,2335 @@
+#carepoint_hms/app/models/all_models
+from __future__ import annotations
+
+"""
+carepoint_hms.app.models.all_models
+
+Comprehensive SQLAlchemy ORM models for Carepoint HMS.
+
+This module centralizes the database models for:
+- authentication and RBAC
+- patient registration and records
+- appointments, visits, queue, and flexible visit flow
+- clinical documentation
+- laboratory
+- pharmacy
+- billing, payments, insurance, and loyalty
+- admission, wards, beds, discharge
+- inventory and stock
+- ambulance and dispatch operations
+- employee HR and workforce records
+- messaging and notifications
+- compliance, accreditation, incidents, infection control, and quality improvement
+
+Design Notes
+------------
+1. All major business tables inherit from BaseTable.
+2. Enums are imported from app.core.enums.
+3. The visit flow remains dynamic at runtime.
+4. Each service delivery point can maintain its own queue/workspace.
+5. Relationships are designed to support gradual expansion of repositories/services.
+"""
+
+from datetime import date, datetime
+from decimal import Decimal
+from typing import Optional
+
+from sqlalchemy import (
+    Boolean,
+    Date,
+    DateTime,
+    Enum,
+    ForeignKey,
+    Index,
+    Integer,
+    JSON,
+    Numeric,
+    String,
+    Text,
+    UniqueConstraint,
+)
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+from app.models.base import BaseTable
+from app.core.enums import (
+    AccreditationStatus,
+    AdmissionStatus,
+    AmbulanceDispatchStatus,
+    AmbulanceStatus,
+    AppointmentStatus,
+    ApprovalStatus,
+    BedStatus,
+    BloodGroup,
+    ComplianceStatus,
+    DisciplinaryActionStatus,
+    DispenseStatus,
+    EmployeeScheduleStatus,
+    EncounterStatus,
+    Gender,
+    Genotype,
+    IncidentSeverity,
+    InsurancePolicyStatus,
+    InventoryItemType,
+    InvoiceStatus,
+    LabResultStatus,
+    LeaveStatus,
+    LoyaltyTransactionType,
+    MaintenanceStatus,
+    MaritalStatus,
+    MessageStatus,
+    NotificationChannel,
+    NotificationStatus,
+    OrderStatus,
+    PatientType,
+    PaymentStatus,
+    PerformanceStatus,
+    PrescriptionStatus,
+    QualityProjectStatus,
+    QueueStatus,
+    ServicePointType,
+    ShiftStatus,
+    StockMovementType,
+    TwoFactorPurpose,
+    TwoFactorType,
+    UserStatus,
+    VisitFlowStepStatus,
+    VisitPriority,
+    VisitStatus,
+)
+
+
+# ============================================================
+# SECURITY / AUTH / RBAC / 2FA
+# ============================================================
+
+
+class Role(BaseTable):
+    """System role for access control."""
+
+    name: Mapped[str] = mapped_column(String(100), unique=True, nullable=False, index=True)
+    code: Mapped[str] = mapped_column(String(100), unique=True, nullable=False, index=True)
+    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    user_roles: Mapped[list["UserRoleAssociation"]] = relationship(
+        back_populates="role",
+        cascade="all, delete-orphan",
+    )
+    role_permissions: Mapped[list["RolePermissionAssociation"]] = relationship(
+        back_populates="role",
+        cascade="all, delete-orphan",
+    )
+
+
+class Permission(BaseTable):
+    """Fine-grained permission record."""
+
+    name: Mapped[str] = mapped_column(String(150), unique=True, nullable=False, index=True)
+    code: Mapped[str] = mapped_column(String(150), unique=True, nullable=False, index=True)
+    module: Mapped[Optional[str]] = mapped_column(String(100), nullable=True, index=True)
+    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    permission_roles: Mapped[list["RolePermissionAssociation"]] = relationship(
+        back_populates="permission",
+        cascade="all, delete-orphan",
+    )
+
+
+class User(BaseTable):
+    """Application user."""
+
+    username: Mapped[str] = mapped_column(String(100), unique=True, nullable=False, index=True)
+    email: Mapped[str] = mapped_column(String(255), unique=True, nullable=False, index=True)
+    phone_number: Mapped[Optional[str]] = mapped_column(String(30), unique=True, nullable=True, index=True)
+    password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+
+    first_name: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    last_name: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    middle_name: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+
+    status: Mapped[UserStatus] = mapped_column(
+        Enum(UserStatus),
+        default=UserStatus.ACTIVE,
+        nullable=False,
+        index=True,
+    )
+
+    is_superuser: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    is_email_verified: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    is_phone_verified: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    is_two_factor_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+
+    last_login_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    password_changed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    staff_profile: Mapped[Optional["StaffProfile"]] = relationship(
+        back_populates="user",
+        uselist=False,
+    )
+    user_roles: Mapped[list["UserRoleAssociation"]] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )
+    sessions: Mapped[list["UserSession"]] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )
+    two_factor_challenges: Mapped[list["TwoFactorChallenge"]] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )
+
+
+class UserRoleAssociation(BaseTable):
+    """Join table between users and roles."""
+
+    user_id: Mapped[int] = mapped_column(ForeignKey("user.id"), nullable=False, index=True)
+    role_id: Mapped[int] = mapped_column(ForeignKey("role.id"), nullable=False, index=True)
+
+    user: Mapped["User"] = relationship(back_populates="user_roles")
+    role: Mapped["Role"] = relationship(back_populates="user_roles")
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "role_id", name="uq_user_role_association"),
+    )
+
+
+class RolePermissionAssociation(BaseTable):
+    """Join table between roles and permissions."""
+
+    role_id: Mapped[int] = mapped_column(ForeignKey("role.id"), nullable=False, index=True)
+    permission_id: Mapped[int] = mapped_column(ForeignKey("permission.id"), nullable=False, index=True)
+
+    role: Mapped["Role"] = relationship(back_populates="role_permissions")
+    permission: Mapped["Permission"] = relationship(back_populates="permission_roles")
+
+    __table_args__ = (
+        UniqueConstraint("role_id", "permission_id", name="uq_role_permission_association"),
+    )
+
+
+class UserSession(BaseTable):
+    """Tracks authenticated sessions."""
+
+    user_id: Mapped[int] = mapped_column(ForeignKey("user.id"), nullable=False, index=True)
+    session_token_jti: Mapped[str] = mapped_column(String(255), nullable=False, unique=True, index=True)
+    refresh_token_jti: Mapped[Optional[str]] = mapped_column(String(255), nullable=True, unique=True)
+
+    ip_address: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    user_agent: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    login_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    revoked_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    is_current: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+
+    user: Mapped["User"] = relationship(back_populates="sessions")
+
+
+class TwoFactorChallenge(BaseTable):
+    """Stores OTP/challenge records for login and verification flows."""
+
+    user_id: Mapped[int] = mapped_column(ForeignKey("user.id"), nullable=False, index=True)
+    challenge_type: Mapped[TwoFactorType] = mapped_column(Enum(TwoFactorType), nullable=False, index=True)
+    purpose: Mapped[TwoFactorPurpose] = mapped_column(Enum(TwoFactorPurpose), nullable=False, index=True)
+
+    destination: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    code_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    max_attempts: Mapped[int] = mapped_column(Integer, default=5, nullable=False)
+
+    is_verified: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    verified_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    user: Mapped["User"] = relationship(back_populates="two_factor_challenges")
+
+    __table_args__ = (
+        Index("ix_two_factor_user_purpose_verified", "user_id", "purpose", "is_verified"),
+    )
+
+
+# ============================================================
+# ORGANIZATION / DEPARTMENTS / STAFF / SERVICE POINTS
+# ============================================================
+
+
+class Department(BaseTable):
+    """Hospital department."""
+
+    name: Mapped[str] = mapped_column(String(150), unique=True, nullable=False, index=True)
+    code: Mapped[str] = mapped_column(String(50), unique=True, nullable=False, index=True)
+    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    service_delivery_points: Mapped[list["ServiceDeliveryPoint"]] = relationship(
+        back_populates="department"
+    )
+    staff_profiles: Mapped[list["StaffProfile"]] = relationship(
+        back_populates="department"
+    )
+    employee_schedules: Mapped[list["EmployeeSchedule"]] = relationship(
+        back_populates="department"
+    )
+
+
+class ServiceDeliveryPoint(BaseTable):
+    """
+    Physical or logical care point where service is delivered and queue is managed.
+
+    Each service delivery point can maintain its own queue and workflow interface.
+    """
+
+    name: Mapped[str] = mapped_column(String(150), nullable=False, index=True)
+    code: Mapped[str] = mapped_column(String(50), unique=True, nullable=False, index=True)
+
+    service_point_type: Mapped[ServicePointType] = mapped_column(
+        Enum(ServicePointType),
+        nullable=False,
+        index=True,
+    )
+
+    department_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("department.id"),
+        nullable=True,
+        index=True,
+    )
+    location_description: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    queue_prefix: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+
+    supports_appointments: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    supports_walk_in: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+
+    department: Mapped[Optional["Department"]] = relationship(back_populates="service_delivery_points")
+    assigned_staff: Mapped[list["StaffProfile"]] = relationship(back_populates="service_delivery_point")
+    queue_tickets: Mapped[list["QueueTicket"]] = relationship(back_populates="service_delivery_point")
+    visit_flow_steps: Mapped[list["VisitFlowStep"]] = relationship(back_populates="service_delivery_point")
+    employee_shifts: Mapped[list["EmployeeShift"]] = relationship(back_populates="service_delivery_point")
+
+
+class StaffProfile(BaseTable):
+    """Staff profile linked to a system user."""
+
+    user_id: Mapped[int] = mapped_column(ForeignKey("user.id"), nullable=False, unique=True, index=True)
+    department_id: Mapped[Optional[int]] = mapped_column(ForeignKey("department.id"), nullable=True, index=True)
+    service_delivery_point_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("service_delivery_point.id"),
+        nullable=True,
+        index=True,
+    )
+
+    staff_no: Mapped[str] = mapped_column(String(100), unique=True, nullable=False, index=True)
+    job_title: Mapped[Optional[str]] = mapped_column(String(150), nullable=True)
+    professional_license_no: Mapped[Optional[str]] = mapped_column(String(100), nullable=True, index=True)
+    specialty: Mapped[Optional[str]] = mapped_column(String(150), nullable=True)
+
+    user: Mapped["User"] = relationship(back_populates="staff_profile")
+    department: Mapped[Optional["Department"]] = relationship(back_populates="staff_profiles")
+    service_delivery_point: Mapped[Optional["ServiceDeliveryPoint"]] = relationship(back_populates="assigned_staff")
+
+
+# # ============================================================
+# # PATIENTS / REGISTRATION
+# # ============================================================
+
+
+# class Patient(BaseTable):
+#     """Master patient record."""
+
+#     hospital_number: Mapped[str] = mapped_column(String(100), unique=True, nullable=False, index=True)
+
+#     first_name: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+#     last_name: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+#     middle_name: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+
+#     date_of_birth: Mapped[Optional[date]] = mapped_column(Date, nullable=True, index=True)
+#     gender: Mapped[Optional[Gender]] = mapped_column(Enum(Gender), nullable=True, index=True)
+#     marital_status: Mapped[Optional[MaritalStatus]] = mapped_column(Enum(MaritalStatus), nullable=True)
+
+#     phone_number: Mapped[Optional[str]] = mapped_column(String(30), nullable=True, index=True)
+#     alternate_phone_number: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)
+#     email: Mapped[Optional[str]] = mapped_column(String(255), nullable=True, index=True)
+
+#     address: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+#     city: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+#     state: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+#     country: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+
+#     blood_group: Mapped[Optional[BloodGroup]] = mapped_column(Enum(BloodGroup), nullable=True)
+#     genotype: Mapped[Optional[Genotype]] = mapped_column(Enum(Genotype), nullable=True)
+#     allergies: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+#     emergency_contact_name: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+#     emergency_contact_phone: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)
+#     emergency_contact_relationship: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+
+#     patient_type: Mapped[PatientType] = mapped_column(
+#         Enum(PatientType),
+#         default=PatientType.OUTPATIENT,
+#         nullable=False,
+#         index=True,
+#     )
+
+#     registrations: Mapped[list["PatientRegistration"]] = relationship(back_populates="patient")
+#     appointments: Mapped[list["Appointment"]] = relationship(back_populates="patient")
+#     visits: Mapped[list["Visit"]] = relationship(back_populates="patient")
+#     admissions: Mapped[list["Admission"]] = relationship(back_populates="patient")
+#     billings: Mapped[list["Billing"]] = relationship(back_populates="patient")
+#     invoices: Mapped[list["Invoice"]] = relationship(back_populates="patient")
+#     notifications: Mapped[list["Notification"]] = relationship(back_populates="patient")
+#     insurance_records: Mapped[list["PatientInsurance"]] = relationship(back_populates="patient")
+#     loyalty_memberships: Mapped[list["PatientLoyalty"]] = relationship(back_populates="patient")
+
+
+# class PatientRegistration(BaseTable):
+#     """Logs patient registration events."""
+
+#     patient_id: Mapped[int] = mapped_column(ForeignKey("patient.id"), nullable=False, index=True)
+#     registered_by_id: Mapped[Optional[int]] = mapped_column(ForeignKey("user.id"), nullable=True, index=True)
+
+#     registration_date: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+#     notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+#     patient: Mapped["Patient"] = relationship(back_populates="registrations")
+#     registered_by: Mapped[Optional["User"]] = relationship()
+
+
+# ============================================================
+# PATIENTS / REGISTRATION / MPI / IDENTIFIERS / CONSENTS
+# ============================================================
+
+
+class Patient(BaseTable):
+    """Master patient record."""
+
+    # Core MRN / MPI
+    hospital_number: Mapped[str] = mapped_column(
+        String(100),
+        unique=True,
+        nullable=False,
+        index=True,
+    )
+
+    # Names / demographics
+    first_name: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    last_name: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    middle_name: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+
+    date_of_birth: Mapped[Optional[date]] = mapped_column(Date, nullable=True, index=True)
+    gender: Mapped[Optional[Gender]] = mapped_column(Enum(Gender), nullable=True, index=True)
+    marital_status: Mapped[Optional[MaritalStatus]] = mapped_column(Enum(MaritalStatus), nullable=True)
+
+    # Contact details
+    phone_number: Mapped[Optional[str]] = mapped_column(String(30), nullable=True, index=True)
+    alternate_phone_number: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)
+    email: Mapped[Optional[str]] = mapped_column(String(255), nullable=True, index=True)
+
+    address: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    city: Mapped[Optional[str]] = mapped_column(String(100), nullable=True, index=True)
+    state: Mapped[Optional[str]] = mapped_column(String(100), nullable=True, index=True)
+    country: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+
+    # Clinical profile
+    blood_group: Mapped[Optional[BloodGroup]] = mapped_column(Enum(BloodGroup), nullable=True)
+    genotype: Mapped[Optional[Genotype]] = mapped_column(Enum(Genotype), nullable=True)
+    allergies: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    # Existing emergency contact (keep)
+    emergency_contact_name: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    emergency_contact_phone: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)
+    emergency_contact_relationship: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+
+    # Explicit next-of-kin fields (new)
+    next_of_kin_name: Mapped[Optional[str]] = mapped_column(String(200), nullable=True, index=True)
+    next_of_kin_phone: Mapped[Optional[str]] = mapped_column(String(30), nullable=True, index=True)
+    next_of_kin_relationship: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    next_of_kin_address: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    # Patient classification
+    patient_type: Mapped[PatientType] = mapped_column(
+        Enum(PatientType),
+        default=PatientType.OUTPATIENT,
+        nullable=False,
+        index=True,
+    )
+
+    # Billing / payer preference
+    preferred_payer_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("payer.id"),
+        nullable=True,
+        index=True,
+    )
+    payer_type: Mapped[Optional[str]] = mapped_column(
+        String(100),
+        nullable=True,
+        index=True,
+        doc="Optional quick payer-type snapshot, e.g. SELF_PAY, HMO, SPONSOR.",
+    )
+
+    # Generic identity summary
+    national_identifier: Mapped[Optional[str]] = mapped_column(
+        String(100),
+        nullable=True,
+        unique=True,
+        index=True,
+    )
+    national_identifier_type: Mapped[Optional[str]] = mapped_column(
+        String(50),
+        nullable=True,
+        index=True,
+        doc="Examples: NIN, PASSPORT, DRIVER_LICENSE, VOTER_CARD.",
+    )
+    identification_details: Mapped[Optional[dict]] = mapped_column(
+        JSON,
+        nullable=True,
+        doc="Flexible JSON for additional identification details if needed.",
+    )
+
+    # Patient photo convenience fields
+    photo_file_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    photo_file_key: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    photo_file_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    registrations: Mapped[list["PatientRegistration"]] = relationship(
+        back_populates="patient",
+        cascade="all, delete-orphan",
+    )
+    identifiers: Mapped[list["PatientIdentifier"]] = relationship(
+        back_populates="patient",
+        cascade="all, delete-orphan",
+    )
+    attachments: Mapped[list["PatientAttachment"]] = relationship(
+        back_populates="patient",
+        cascade="all, delete-orphan",
+    )
+    consent_records: Mapped[list["PatientConsent"]] = relationship(
+        back_populates="patient",
+        cascade="all, delete-orphan",
+    )
+    scanned_forms: Mapped[list["PatientScannedForm"]] = relationship(
+        back_populates="patient",
+        cascade="all, delete-orphan",
+    )
+    demographic_audits: Mapped[list["PatientDemographicAudit"]] = relationship(
+        back_populates="patient",
+        cascade="all, delete-orphan",
+        order_by="PatientDemographicAudit.changed_at.desc()",
+    )
+
+    appointments: Mapped[list["Appointment"]] = relationship(back_populates="patient")
+    visits: Mapped[list["Visit"]] = relationship(back_populates="patient")
+    admissions: Mapped[list["Admission"]] = relationship(back_populates="patient")
+    billings: Mapped[list["Billing"]] = relationship(back_populates="patient")
+    invoices: Mapped[list["Invoice"]] = relationship(back_populates="patient")
+    notifications: Mapped[list["Notification"]] = relationship(back_populates="patient")
+    insurance_records: Mapped[list["PatientInsurance"]] = relationship(back_populates="patient")
+    loyalty_memberships: Mapped[list["PatientLoyalty"]] = relationship(back_populates="patient")
+
+    preferred_payer: Mapped[Optional["Payer"]] = relationship(
+        foreign_keys=[preferred_payer_id]
+    )
+
+    # __table_args__ = (
+    #     Index("ix_patient_name_dob", "last_name", "first_name", "date_of_birth"),
+    #     Index("ix_patient_phone_dob", "phone_number", "date_of_birth"),
+    #     Index("ix_patient_next_of_kin_phone", "next_of_kin_phone"),
+    # )
+    __table_args__ = (
+        Index("ix_patient_name_dob", "last_name", "first_name", "date_of_birth"),
+        Index("ix_patient_phone_dob", "phone_number", "date_of_birth"),
+    )    
+
+
+class PatientRegistration(BaseTable):
+    """Logs patient registration events."""
+
+    patient_id: Mapped[int] = mapped_column(ForeignKey("patient.id"), nullable=False, index=True)
+    registered_by_id: Mapped[Optional[int]] = mapped_column(ForeignKey("user.id"), nullable=True, index=True)
+
+    registration_date: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    patient: Mapped["Patient"] = relationship(back_populates="registrations")
+    registered_by: Mapped[Optional["User"]] = relationship()
+
+
+class PatientIdentifier(BaseTable):
+    """
+    Flexible patient identifier record.
+
+    Supports:
+    - national identifiers
+    - previous hospital numbers
+    - payer/member IDs
+    - external/reference identifiers
+    """
+
+    patient_id: Mapped[int] = mapped_column(ForeignKey("patient.id"), nullable=False, index=True)
+
+    identifier_type: Mapped[str] = mapped_column(
+        String(50),
+        nullable=False,
+        index=True,
+        doc="Examples: NATIONAL_ID, PREVIOUS_RECORD_ID, PASSPORT, INSURANCE_MEMBER_ID, EXTERNAL_MRN.",
+    )
+    identifier_value: Mapped[str] = mapped_column(String(150), nullable=False, index=True)
+    issuing_authority: Mapped[Optional[str]] = mapped_column(String(150), nullable=True)
+    is_primary: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    patient: Mapped["Patient"] = relationship(back_populates="identifiers")
+
+    __table_args__ = (
+        UniqueConstraint(
+            "identifier_type",
+            "identifier_value",
+            name="uq_patient_identifier_type_value",
+        ),
+        Index("ix_patient_identifier_patient_type", "patient_id", "identifier_type"),
+    )
+
+
+class PatientAttachment(BaseTable):
+    """
+    Document/photo attachment linked to a patient.
+
+    Covers:
+    - registration documents
+    - ID cards
+    - referrals
+    - photographs
+    - scanned paperwork
+    """
+
+    patient_id: Mapped[int] = mapped_column(ForeignKey("patient.id"), nullable=False, index=True)
+    uploaded_by_id: Mapped[Optional[int]] = mapped_column(ForeignKey("user.id"), nullable=True, index=True)
+
+    attachment_type: Mapped[str] = mapped_column(
+        String(50),
+        nullable=False,
+        index=True,
+        doc="Examples: PHOTO, ID_DOCUMENT, REFERRAL, REGISTRATION_FORM, CLINICAL_FORM, OTHER.",
+    )
+    title: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    file_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    file_key: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    file_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    content_type: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    checksum: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    is_primary: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    patient: Mapped["Patient"] = relationship(back_populates="attachments")
+    uploaded_by: Mapped[Optional["User"]] = relationship()
+
+    __table_args__ = (
+        Index("ix_patient_attachment_patient_type", "patient_id", "attachment_type"),
+    )
+
+
+class PatientConsent(BaseTable):
+    """
+    Patient consent record.
+
+    Covers:
+    - treatment consent
+    - privacy/data use consent
+    - photo consent
+    - billing/payment consent
+    """
+
+    patient_id: Mapped[int] = mapped_column(ForeignKey("patient.id"), nullable=False, index=True)
+    recorded_by_id: Mapped[Optional[int]] = mapped_column(ForeignKey("user.id"), nullable=True, index=True)
+
+    consent_type: Mapped[str] = mapped_column(
+        String(100),
+        nullable=False,
+        index=True,
+    )
+    consent_status: Mapped[str] = mapped_column(
+        String(50),
+        nullable=False,
+        index=True,
+        doc="Examples: GRANTED, DECLINED, WITHDRAWN, EXPIRED.",
+    )
+    consent_date: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    expiry_date: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    document_file_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    document_file_key: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    document_file_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    patient: Mapped["Patient"] = relationship(back_populates="consent_records")
+    recorded_by: Mapped[Optional["User"]] = relationship()
+
+    __table_args__ = (
+        Index("ix_patient_consent_patient_type_status", "patient_id", "consent_type", "consent_status"),
+    )
+
+
+class PatientScannedForm(BaseTable):
+    """
+    Scanned form or externally sourced clinical/registration form.
+    """
+
+    patient_id: Mapped[int] = mapped_column(ForeignKey("patient.id"), nullable=False, index=True)
+    uploaded_by_id: Mapped[Optional[int]] = mapped_column(ForeignKey("user.id"), nullable=True, index=True)
+
+    form_type: Mapped[str] = mapped_column(
+        String(100),
+        nullable=False,
+        index=True,
+        doc="Examples: REGISTRATION_FORM, CLINICAL_FORM, CONSENT_FORM, REFERRAL_FORM.",
+    )
+    file_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    file_key: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    file_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    content_type: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    checksum: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    patient: Mapped["Patient"] = relationship(back_populates="scanned_forms")
+    uploaded_by: Mapped[Optional["User"]] = relationship()
+
+    __table_args__ = (
+        Index("ix_patient_scanned_form_patient_type", "patient_id", "form_type"),
+    )
+
+
+class PatientDemographicAudit(BaseTable):
+    """
+    Audit log for demographic changes on the patient master record.
+    """
+
+    patient_id: Mapped[int] = mapped_column(ForeignKey("patient.id"), nullable=False, index=True)
+    changed_by_id: Mapped[Optional[int]] = mapped_column(ForeignKey("user.id"), nullable=True, index=True)
+
+    change_source: Mapped[Optional[str]] = mapped_column(
+        String(100),
+        nullable=True,
+        doc="Examples: REGISTRATION_DESK, MPI_UPDATE, MERGE, API, BULK_IMPORT.",
+    )
+    changed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+
+    before_snapshot: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    after_snapshot: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    changed_fields: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
+
+    note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    patient: Mapped["Patient"] = relationship(back_populates="demographic_audits")
+    changed_by: Mapped[Optional["User"]] = relationship()
+
+    __table_args__ = (
+        Index("ix_patient_demographic_audit_patient_changed_at", "patient_id", "changed_at"),
+    )
+
+
+# ============================================================
+# APPOINTMENTS / VISITS / DYNAMIC VISIT FLOW / QUEUES
+# ============================================================
+
+
+class Appointment(BaseTable):
+    """Patient appointment."""
+
+    patient_id: Mapped[int] = mapped_column(ForeignKey("patient.id"), nullable=False, index=True)
+    service_delivery_point_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("service_delivery_point.id"),
+        nullable=True,
+        index=True,
+    )
+    staff_profile_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("staff_profile.id"),
+        nullable=True,
+        index=True,
+    )
+
+    appointment_code: Mapped[str] = mapped_column(String(100), unique=True, nullable=False, index=True)
+    scheduled_start_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    scheduled_end_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    status: Mapped[AppointmentStatus] = mapped_column(
+        Enum(AppointmentStatus),
+        default=AppointmentStatus.SCHEDULED,
+        nullable=False,
+        index=True,
+    )
+
+    patient: Mapped["Patient"] = relationship(back_populates="appointments")
+    service_delivery_point: Mapped[Optional["ServiceDeliveryPoint"]] = relationship()
+    staff_profile: Mapped[Optional["StaffProfile"]] = relationship()
+
+
+class Visit(BaseTable):
+    """
+    Patient visit record.
+
+    New patient flow:
+        registration -> visit initiation -> visit code -> queue
+
+    Existing patient flow:
+        visit initiation -> queue
+
+    The actual visit flow is dynamic and can be changed at runtime depending on
+    patient condition.
+    """
+
+    patient_id: Mapped[int] = mapped_column(ForeignKey("patient.id"), nullable=False, index=True)
+    appointment_id: Mapped[Optional[int]] = mapped_column(ForeignKey("appointment.id"), nullable=True, index=True)
+
+    visit_code: Mapped[str] = mapped_column(String(100), unique=True, nullable=False, index=True)
+    visit_date: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+
+    status: Mapped[VisitStatus] = mapped_column(
+        Enum(VisitStatus),
+        default=VisitStatus.INITIATED,
+        nullable=False,
+        index=True,
+    )
+    priority: Mapped[VisitPriority] = mapped_column(
+        Enum(VisitPriority),
+        default=VisitPriority.NORMAL,
+        nullable=False,
+        index=True,
+    )
+
+    first_service_delivery_point_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("service_delivery_point.id"),
+        nullable=True,
+        index=True,
+    )
+    current_service_delivery_point_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("service_delivery_point.id"),
+        nullable=True,
+        index=True,
+    )
+
+    referred_from: Mapped[Optional[str]] = mapped_column(String(150), nullable=True)
+    visit_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    check_in_time: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    check_out_time: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    patient: Mapped["Patient"] = relationship(back_populates="visits")
+    appointment: Mapped[Optional["Appointment"]] = relationship()
+    first_service_delivery_point: Mapped[Optional["ServiceDeliveryPoint"]] = relationship(
+        foreign_keys=[first_service_delivery_point_id]
+    )
+    current_service_delivery_point: Mapped[Optional["ServiceDeliveryPoint"]] = relationship(
+        foreign_keys=[current_service_delivery_point_id]
+    )
+
+    flow_steps: Mapped[list["VisitFlowStep"]] = relationship(
+        back_populates="visit",
+        cascade="all, delete-orphan",
+        order_by="VisitFlowStep.step_order",
+    )
+    queue_tickets: Mapped[list["QueueTicket"]] = relationship(
+        back_populates="visit",
+        cascade="all, delete-orphan",
+    )
+    triage_assessments: Mapped[list["TriageAssessment"]] = relationship(back_populates="visit")
+    vital_signs: Mapped[list["VitalSign"]] = relationship(back_populates="visit")
+    consultations: Mapped[list["Consultation"]] = relationship(back_populates="visit")
+    diagnoses: Mapped[list["Diagnosis"]] = relationship(back_populates="visit")
+    procedure_orders: Mapped[list["ProcedureOrder"]] = relationship(back_populates="visit")
+    lab_orders: Mapped[list["LabOrder"]] = relationship(back_populates="visit")
+    prescriptions: Mapped[list["Prescription"]] = relationship(back_populates="visit")
+    billings: Mapped[list["Billing"]] = relationship(back_populates="visit")
+    invoices: Mapped[list["Invoice"]] = relationship(back_populates="visit")
+    admissions: Mapped[list["Admission"]] = relationship(back_populates="visit")
+
+
+class VisitFlowTemplate(BaseTable):
+    """Reusable visit flow template."""
+
+    name: Mapped[str] = mapped_column(String(150), nullable=False, unique=True)
+    code: Mapped[str] = mapped_column(String(100), nullable=False, unique=True, index=True)
+    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    steps: Mapped[list["VisitFlowTemplateStep"]] = relationship(
+        back_populates="template",
+        cascade="all, delete-orphan",
+        order_by="VisitFlowTemplateStep.step_order",
+    )
+
+
+class VisitFlowTemplateStep(BaseTable):
+    """Step definition inside a reusable visit flow template."""
+
+    template_id: Mapped[int] = mapped_column(ForeignKey("visit_flow_template.id"), nullable=False, index=True)
+    service_delivery_point_id: Mapped[int] = mapped_column(
+        ForeignKey("service_delivery_point.id"),
+        nullable=False,
+        index=True,
+    )
+
+    step_order: Mapped[int] = mapped_column(Integer, nullable=False)
+    is_required: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    template: Mapped["VisitFlowTemplate"] = relationship(back_populates="steps")
+    service_delivery_point: Mapped["ServiceDeliveryPoint"] = relationship()
+
+    __table_args__ = (
+        UniqueConstraint("template_id", "step_order", name="uq_visit_flow_template_step_order"),
+    )
+
+
+class VisitFlowStep(BaseTable):
+    """
+    Runtime visit flow step for a specific visit.
+
+    Supports insertion, repetition, skipping, and rerouting.
+    """
+
+    visit_id: Mapped[int] = mapped_column(ForeignKey("visit.id"), nullable=False, index=True)
+    service_delivery_point_id: Mapped[int] = mapped_column(
+        ForeignKey("service_delivery_point.id"),
+        nullable=False,
+        index=True,
+    )
+
+    step_order: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    status: Mapped[VisitFlowStepStatus] = mapped_column(
+        Enum(VisitFlowStepStatus),
+        default=VisitFlowStepStatus.PENDING,
+        nullable=False,
+        index=True,
+    )
+
+    is_current: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    is_required: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    is_skipped: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+
+    routed_by_id: Mapped[Optional[int]] = mapped_column(ForeignKey("user.id"), nullable=True, index=True)
+    started_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    visit: Mapped["Visit"] = relationship(back_populates="flow_steps")
+    service_delivery_point: Mapped["ServiceDeliveryPoint"] = relationship(back_populates="visit_flow_steps")
+    routed_by: Mapped[Optional["User"]] = relationship()
+    queue_ticket: Mapped[Optional["QueueTicket"]] = relationship(
+        back_populates="visit_flow_step",
+        uselist=False,
+    )
+
+    __table_args__ = (
+        UniqueConstraint("visit_id", "step_order", name="uq_visit_flow_step_visit_order"),
+        Index("ix_visit_flow_visit_current", "visit_id", "is_current"),
+    )
+
+
+class QueueTicket(BaseTable):
+    """
+    Queue record for a visit at a specific service delivery point.
+
+    Every service delivery point can maintain its own queue.
+    """
+
+    visit_id: Mapped[int] = mapped_column(ForeignKey("visit.id"), nullable=False, index=True)
+    visit_flow_step_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("visit_flow_step.id"),
+        nullable=True,
+        unique=True,
+        index=True,
+    )
+    patient_id: Mapped[int] = mapped_column(ForeignKey("patient.id"), nullable=False, index=True)
+    service_delivery_point_id: Mapped[int] = mapped_column(
+        ForeignKey("service_delivery_point.id"),
+        nullable=False,
+        index=True,
+    )
+
+    queue_number: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    queue_position: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+
+    status: Mapped[QueueStatus] = mapped_column(
+        Enum(QueueStatus),
+        default=QueueStatus.WAITING,
+        nullable=False,
+        index=True,
+    )
+
+    called_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    service_started_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    service_ended_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    transferred_from_ticket_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("queue_ticket.id"),
+        nullable=True,
+    )
+
+    visit: Mapped["Visit"] = relationship(back_populates="queue_tickets")
+    visit_flow_step: Mapped[Optional["VisitFlowStep"]] = relationship(back_populates="queue_ticket")
+    patient: Mapped["Patient"] = relationship()
+    service_delivery_point: Mapped["ServiceDeliveryPoint"] = relationship(back_populates="queue_tickets")
+    transferred_from_ticket: Mapped[Optional["QueueTicket"]] = relationship(remote_side="QueueTicket.id")
+
+    __table_args__ = (
+        Index("ix_queue_sdp_status_position", "service_delivery_point_id", "status", "queue_position"),
+    )
+
+
+# ============================================================
+# CLINICAL DOMAIN
+# ============================================================
+
+
+class TriageAssessment(BaseTable):
+    """Triage record for a visit."""
+
+    visit_id: Mapped[int] = mapped_column(ForeignKey("visit.id"), nullable=False, index=True)
+    assessed_by_staff_id: Mapped[Optional[int]] = mapped_column(ForeignKey("staff_profile.id"), nullable=True)
+
+    chief_complaint: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    triage_note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    priority: Mapped[VisitPriority] = mapped_column(
+        Enum(VisitPriority),
+        default=VisitPriority.NORMAL,
+        nullable=False,
+    )
+
+    assessed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    visit: Mapped["Visit"] = relationship(back_populates="triage_assessments")
+    assessed_by_staff: Mapped[Optional["StaffProfile"]] = relationship()
+
+
+class VitalSign(BaseTable):
+    """Vital signs captured during a visit."""
+
+    visit_id: Mapped[int] = mapped_column(ForeignKey("visit.id"), nullable=False, index=True)
+    recorded_by_staff_id: Mapped[Optional[int]] = mapped_column(ForeignKey("staff_profile.id"), nullable=True)
+
+    temperature_celsius: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2), nullable=True)
+    pulse_rate: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    respiratory_rate: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    systolic_bp: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    diastolic_bp: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    oxygen_saturation: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2), nullable=True)
+    weight_kg: Mapped[Optional[Decimal]] = mapped_column(Numeric(8, 2), nullable=True)
+    height_cm: Mapped[Optional[Decimal]] = mapped_column(Numeric(8, 2), nullable=True)
+    bmi: Mapped[Optional[Decimal]] = mapped_column(Numeric(8, 2), nullable=True)
+    pain_score: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+
+    recorded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    visit: Mapped["Visit"] = relationship(back_populates="vital_signs")
+    recorded_by_staff: Mapped[Optional["StaffProfile"]] = relationship()
+
+
+class Consultation(BaseTable):
+    """Clinical consultation note for a visit."""
+
+    visit_id: Mapped[int] = mapped_column(ForeignKey("visit.id"), nullable=False, index=True)
+    clinician_staff_id: Mapped[Optional[int]] = mapped_column(ForeignKey("staff_profile.id"), nullable=True, index=True)
+
+    status: Mapped[EncounterStatus] = mapped_column(
+        Enum(EncounterStatus),
+        default=EncounterStatus.OPEN,
+        nullable=False,
+    )
+
+    subjective_note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    objective_note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    assessment_note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    plan_note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    consultation_started_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    consultation_ended_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    visit: Mapped["Visit"] = relationship(back_populates="consultations")
+    clinician_staff: Mapped[Optional["StaffProfile"]] = relationship()
+
+
+class Diagnosis(BaseTable):
+    """Diagnosis attached to a visit."""
+
+    visit_id: Mapped[int] = mapped_column(ForeignKey("visit.id"), nullable=False, index=True)
+    consultation_id: Mapped[Optional[int]] = mapped_column(ForeignKey("consultation.id"), nullable=True, index=True)
+
+    diagnosis_code: Mapped[Optional[str]] = mapped_column(String(50), nullable=True, index=True)
+    diagnosis_name: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    diagnosis_type: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    diagnosis_note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    visit: Mapped["Visit"] = relationship(back_populates="diagnoses")
+    consultation: Mapped[Optional["Consultation"]] = relationship()
+
+
+class ProcedureCatalog(BaseTable):
+    """Master list of procedures offered by the hospital."""
+
+    code: Mapped[str] = mapped_column(String(100), nullable=False, unique=True, index=True)
+    name: Mapped[str] = mapped_column(String(255), nullable=False, unique=True, index=True)
+    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    default_price: Mapped[Optional[Decimal]] = mapped_column(Numeric(14, 2), nullable=True)
+
+
+class ProcedureOrder(BaseTable):
+    """Ordered procedure for a visit."""
+
+    visit_id: Mapped[int] = mapped_column(ForeignKey("visit.id"), nullable=False, index=True)
+    consultation_id: Mapped[Optional[int]] = mapped_column(ForeignKey("consultation.id"), nullable=True, index=True)
+    procedure_catalog_id: Mapped[int] = mapped_column(ForeignKey("procedure_catalog.id"), nullable=False, index=True)
+
+    ordered_by_staff_id: Mapped[Optional[int]] = mapped_column(ForeignKey("staff_profile.id"), nullable=True)
+    performed_by_staff_id: Mapped[Optional[int]] = mapped_column(ForeignKey("staff_profile.id"), nullable=True)
+
+    status: Mapped[OrderStatus] = mapped_column(
+        Enum(OrderStatus),
+        default=OrderStatus.ORDERED,
+        nullable=False,
+    )
+
+    findings: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    ordered_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    performed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    visit: Mapped["Visit"] = relationship(back_populates="procedure_orders")
+    consultation: Mapped[Optional["Consultation"]] = relationship()
+    procedure_catalog: Mapped["ProcedureCatalog"] = relationship()
+    ordered_by_staff: Mapped[Optional["StaffProfile"]] = relationship(foreign_keys=[ordered_by_staff_id])
+    performed_by_staff: Mapped[Optional["StaffProfile"]] = relationship(foreign_keys=[performed_by_staff_id])
+
+
+# ============================================================
+# LABORATORY
+# ============================================================
+
+
+class LabTestCatalog(BaseTable):
+    """Master list of laboratory tests."""
+
+    code: Mapped[str] = mapped_column(String(100), nullable=False, unique=True, index=True)
+    name: Mapped[str] = mapped_column(String(255), nullable=False, unique=True, index=True)
+    sample_type: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    unit_of_measure: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    reference_range: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    default_price: Mapped[Optional[Decimal]] = mapped_column(Numeric(14, 2), nullable=True)
+    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+
+class LabOrder(BaseTable):
+    """Laboratory order header for a visit."""
+
+    visit_id: Mapped[int] = mapped_column(ForeignKey("visit.id"), nullable=False, index=True)
+    consultation_id: Mapped[Optional[int]] = mapped_column(ForeignKey("consultation.id"), nullable=True, index=True)
+    ordered_by_staff_id: Mapped[Optional[int]] = mapped_column(ForeignKey("staff_profile.id"), nullable=True)
+
+    order_no: Mapped[str] = mapped_column(String(100), nullable=False, unique=True, index=True)
+    status: Mapped[OrderStatus] = mapped_column(
+        Enum(OrderStatus),
+        default=OrderStatus.ORDERED,
+        nullable=False,
+        index=True,
+    )
+
+    clinical_note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    ordered_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    visit: Mapped["Visit"] = relationship(back_populates="lab_orders")
+    consultation: Mapped[Optional["Consultation"]] = relationship()
+    ordered_by_staff: Mapped[Optional["StaffProfile"]] = relationship()
+
+    items: Mapped[list["LabOrderItem"]] = relationship(
+        back_populates="lab_order",
+        cascade="all, delete-orphan",
+    )
+
+
+class LabOrderItem(BaseTable):
+    """Individual test item within a lab order."""
+
+    lab_order_id: Mapped[int] = mapped_column(ForeignKey("lab_order.id"), nullable=False, index=True)
+    lab_test_catalog_id: Mapped[int] = mapped_column(ForeignKey("lab_test_catalog.id"), nullable=False, index=True)
+
+    status: Mapped[OrderStatus] = mapped_column(
+        Enum(OrderStatus),
+        default=OrderStatus.ORDERED,
+        nullable=False,
+    )
+
+    specimen_id: Mapped[Optional[str]] = mapped_column(String(100), nullable=True, index=True)
+    sample_collected_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    collected_by_staff_id: Mapped[Optional[int]] = mapped_column(ForeignKey("staff_profile.id"), nullable=True)
+
+    lab_order: Mapped["LabOrder"] = relationship(back_populates="items")
+    lab_test_catalog: Mapped["LabTestCatalog"] = relationship()
+    collected_by_staff: Mapped[Optional["StaffProfile"]] = relationship()
+
+    result: Mapped[Optional["LabResult"]] = relationship(
+        back_populates="lab_order_item",
+        uselist=False,
+        cascade="all, delete-orphan",
+    )
+
+
+class LabResult(BaseTable):
+    """Result for a lab order item."""
+
+    lab_order_item_id: Mapped[int] = mapped_column(
+        ForeignKey("lab_order_item.id"),
+        nullable=False,
+        unique=True,
+        index=True,
+    )
+    entered_by_staff_id: Mapped[Optional[int]] = mapped_column(ForeignKey("staff_profile.id"), nullable=True)
+    verified_by_staff_id: Mapped[Optional[int]] = mapped_column(ForeignKey("staff_profile.id"), nullable=True)
+
+    result_status: Mapped[LabResultStatus] = mapped_column(
+        Enum(LabResultStatus),
+        default=LabResultStatus.PENDING,
+        nullable=False,
+        index=True,
+    )
+
+    result_value: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    result_text: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    unit_of_measure: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    reference_range: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    interpretation: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    entered_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    verified_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    released_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    lab_order_item: Mapped["LabOrderItem"] = relationship(back_populates="result")
+    entered_by_staff: Mapped[Optional["StaffProfile"]] = relationship(foreign_keys=[entered_by_staff_id])
+    verified_by_staff: Mapped[Optional["StaffProfile"]] = relationship(foreign_keys=[verified_by_staff_id])
+
+
+# ============================================================
+# PHARMACY
+# ============================================================
+
+
+class DrugCategory(BaseTable):
+    """Drug grouping/category."""
+
+    name: Mapped[str] = mapped_column(String(150), unique=True, nullable=False)
+    code: Mapped[Optional[str]] = mapped_column(String(100), unique=True, nullable=True)
+    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    drugs: Mapped[list["Drug"]] = relationship(back_populates="category")
+
+
+class Drug(BaseTable):
+    """Drug master."""
+
+    drug_category_id: Mapped[Optional[int]] = mapped_column(ForeignKey("drug_category.id"), nullable=True, index=True)
+
+    name: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    generic_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True, index=True)
+    brand_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    strength: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    dosage_form: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    pack_size: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    sku: Mapped[Optional[str]] = mapped_column(String(100), nullable=True, unique=True, index=True)
+
+    unit_price: Mapped[Optional[Decimal]] = mapped_column(Numeric(14, 2), nullable=True)
+    reorder_level: Mapped[Optional[Decimal]] = mapped_column(Numeric(14, 2), nullable=True)
+    is_controlled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+
+    category: Mapped[Optional["DrugCategory"]] = relationship(back_populates="drugs")
+    prescription_items: Mapped[list["PrescriptionItem"]] = relationship(back_populates="drug")
+    stock_items: Mapped[list["InventoryStockItem"]] = relationship(back_populates="drug")
+
+
+class Prescription(BaseTable):
+    """Prescription header for a visit."""
+
+    visit_id: Mapped[int] = mapped_column(ForeignKey("visit.id"), nullable=False, index=True)
+    consultation_id: Mapped[Optional[int]] = mapped_column(ForeignKey("consultation.id"), nullable=True, index=True)
+    prescribed_by_staff_id: Mapped[Optional[int]] = mapped_column(ForeignKey("staff_profile.id"), nullable=True)
+
+    prescription_no: Mapped[str] = mapped_column(String(100), nullable=False, unique=True, index=True)
+
+    status: Mapped[PrescriptionStatus] = mapped_column(
+        Enum(PrescriptionStatus),
+        default=PrescriptionStatus.PRESCRIBED,
+        nullable=False,
+    )
+
+    note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    prescribed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    visit: Mapped["Visit"] = relationship(back_populates="prescriptions")
+    consultation: Mapped[Optional["Consultation"]] = relationship()
+    prescribed_by_staff: Mapped[Optional["StaffProfile"]] = relationship()
+
+    items: Mapped[list["PrescriptionItem"]] = relationship(
+        back_populates="prescription",
+        cascade="all, delete-orphan",
+    )
+    dispenses: Mapped[list["Dispense"]] = relationship(back_populates="prescription")
+
+
+class PrescriptionItem(BaseTable):
+    """Drug line inside a prescription."""
+
+    prescription_id: Mapped[int] = mapped_column(ForeignKey("prescription.id"), nullable=False, index=True)
+    drug_id: Mapped[int] = mapped_column(ForeignKey("drug.id"), nullable=False, index=True)
+
+    dosage: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    frequency: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    duration: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    route: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+
+    quantity_prescribed: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)
+    quantity_dispensed: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)
+
+    instructions: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    prescription: Mapped["Prescription"] = relationship(back_populates="items")
+    drug: Mapped["Drug"] = relationship(back_populates="prescription_items")
+
+
+class Dispense(BaseTable):
+    """Pharmacy dispense transaction."""
+
+    prescription_id: Mapped[int] = mapped_column(ForeignKey("prescription.id"), nullable=False, index=True)
+    dispensed_by_staff_id: Mapped[Optional[int]] = mapped_column(ForeignKey("staff_profile.id"), nullable=True)
+
+    dispense_no: Mapped[str] = mapped_column(String(100), unique=True, nullable=False, index=True)
+
+    status: Mapped[DispenseStatus] = mapped_column(
+        Enum(DispenseStatus),
+        default=DispenseStatus.PENDING,
+        nullable=False,
+    )
+
+    dispensed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    prescription: Mapped["Prescription"] = relationship(back_populates="dispenses")
+    dispensed_by_staff: Mapped[Optional["StaffProfile"]] = relationship()
+
+    items: Mapped[list["DispenseItem"]] = relationship(
+        back_populates="dispense",
+        cascade="all, delete-orphan",
+    )
+
+
+class DispenseItem(BaseTable):
+    """Dispensed item line."""
+
+    dispense_id: Mapped[int] = mapped_column(ForeignKey("dispense.id"), nullable=False, index=True)
+    prescription_item_id: Mapped[int] = mapped_column(ForeignKey("prescription_item.id"), nullable=False, index=True)
+
+    quantity_dispensed: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)
+    note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    dispense: Mapped["Dispense"] = relationship(back_populates="items")
+    prescription_item: Mapped["PrescriptionItem"] = relationship()
+
+
+# ============================================================
+# BILLING / INVOICES / PAYMENTS / INSURANCE / LOYALTY
+# ============================================================
+
+
+class InsuranceProvider(BaseTable):
+    """Insurance or HMO provider."""
+
+    name: Mapped[str] = mapped_column(String(255), unique=True, nullable=False, index=True)
+    code: Mapped[Optional[str]] = mapped_column(String(100), unique=True, nullable=True, index=True)
+    contact_person: Mapped[Optional[str]] = mapped_column(String(150), nullable=True)
+    phone_number: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)
+    email: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    address: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    patient_insurance_records: Mapped[list["PatientInsurance"]] = relationship(
+        back_populates="insurance_provider"
+    )
+
+
+class PatientInsurance(BaseTable):
+    """Insurance enrollment record for a patient."""
+
+    patient_id: Mapped[int] = mapped_column(ForeignKey("patient.id"), nullable=False, index=True)
+    insurance_provider_id: Mapped[int] = mapped_column(
+        ForeignKey("insurance_provider.id"),
+        nullable=False,
+        index=True,
+    )
+
+    policy_number: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    member_id: Mapped[Optional[str]] = mapped_column(String(100), nullable=True, index=True)
+    plan_name: Mapped[Optional[str]] = mapped_column(String(150), nullable=True)
+    coverage_start_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+    coverage_end_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+
+    policy_status: Mapped[InsurancePolicyStatus] = mapped_column(
+        Enum(InsurancePolicyStatus),
+        default=InsurancePolicyStatus.ACTIVE,
+        nullable=False,
+        index=True,
+    )
+
+    is_primary: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+
+    patient: Mapped["Patient"] = relationship(back_populates="insurance_records")
+    insurance_provider: Mapped["InsuranceProvider"] = relationship(back_populates="patient_insurance_records")
+
+
+class Payer(BaseTable):
+    """Payer or sponsor."""
+
+    name: Mapped[str] = mapped_column(String(255), nullable=False, unique=True, index=True)
+    payer_type: Mapped[Optional[str]] = mapped_column(String(100), nullable=True, index=True)
+    contact_person: Mapped[Optional[str]] = mapped_column(String(150), nullable=True)
+    phone_number: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)
+    email: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    address: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+
+class BillableService(BaseTable):
+    """Master catalog of billable services."""
+
+    code: Mapped[str] = mapped_column(String(100), unique=True, nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(255), unique=True, nullable=False, index=True)
+    category: Mapped[Optional[str]] = mapped_column(String(100), nullable=True, index=True)
+
+    default_price: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)
+    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+
+class Billing(BaseTable):
+    """
+    Billing header/workflow record.
+
+    This can be used before invoice issuance or as the billing workbench record
+    that later results in one or more invoices.
+    """
+
+    patient_id: Mapped[int] = mapped_column(ForeignKey("patient.id"), nullable=False, index=True)
+    visit_id: Mapped[Optional[int]] = mapped_column(ForeignKey("visit.id"), nullable=True, index=True)
+    patient_insurance_id: Mapped[Optional[int]] = mapped_column(ForeignKey("patient_insurance.id"), nullable=True, index=True)
+
+    billing_no: Mapped[str] = mapped_column(String(100), unique=True, nullable=False, index=True)
+    billing_date: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    status: Mapped[Optional[str]] = mapped_column(String(100), nullable=True, index=True)
+
+    gross_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)
+    discount_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)
+    net_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)
+
+    notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    patient: Mapped["Patient"] = relationship(back_populates="billings")
+    visit: Mapped[Optional["Visit"]] = relationship(back_populates="billings")
+    patient_insurance: Mapped[Optional["PatientInsurance"]] = relationship()
+
+    items: Mapped[list["BillingItem"]] = relationship(
+        back_populates="billing",
+        cascade="all, delete-orphan",
+    )
+    invoices: Mapped[list["Invoice"]] = relationship(back_populates="billing")
+
+
+class BillingItem(BaseTable):
+    """Individual charge line on a billing record."""
+
+    billing_id: Mapped[int] = mapped_column(ForeignKey("billing.id"), nullable=False, index=True)
+    billable_service_id: Mapped[Optional[int]] = mapped_column(ForeignKey("billable_service.id"), nullable=True, index=True)
+
+    service_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    service_code: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    quantity: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=1)
+    unit_price: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)
+    discount_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)
+    line_total: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)
+    source_reference: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+
+    billing: Mapped["Billing"] = relationship(back_populates="items")
+    billable_service: Mapped[Optional["BillableService"]] = relationship()
+
+
+class Invoice(BaseTable):
+    """Billing invoice for a patient and/or visit."""
+
+    patient_id: Mapped[int] = mapped_column(ForeignKey("patient.id"), nullable=False, index=True)
+    visit_id: Mapped[Optional[int]] = mapped_column(ForeignKey("visit.id"), nullable=True, index=True)
+    billing_id: Mapped[Optional[int]] = mapped_column(ForeignKey("billing.id"), nullable=True, index=True)
+    payer_id: Mapped[Optional[int]] = mapped_column(ForeignKey("payer.id"), nullable=True, index=True)
+
+    invoice_no: Mapped[str] = mapped_column(String(100), nullable=False, unique=True, index=True)
+
+    status: Mapped[InvoiceStatus] = mapped_column(
+        Enum(InvoiceStatus),
+        default=InvoiceStatus.DRAFT,
+        nullable=False,
+        index=True,
+    )
+
+    invoice_date: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    due_date: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    subtotal_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)
+    discount_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)
+    tax_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)
+    total_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)
+    amount_paid: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)
+    balance_due: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)
+
+    note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    patient: Mapped["Patient"] = relationship(back_populates="invoices")
+    visit: Mapped[Optional["Visit"]] = relationship(back_populates="invoices")
+    billing: Mapped[Optional["Billing"]] = relationship(back_populates="invoices")
+    payer: Mapped[Optional["Payer"]] = relationship()
+
+    items: Mapped[list["InvoiceItem"]] = relationship(
+        back_populates="invoice",
+        cascade="all, delete-orphan",
+    )
+    payments: Mapped[list["Payment"]] = relationship(back_populates="invoice")
+    loyalty_transactions: Mapped[list["LoyaltyTransaction"]] = relationship(back_populates="invoice")
+
+
+class InvoiceItem(BaseTable):
+    """Individual charge line on an invoice."""
+
+    invoice_id: Mapped[int] = mapped_column(ForeignKey("invoice.id"), nullable=False, index=True)
+    billable_service_id: Mapped[Optional[int]] = mapped_column(ForeignKey("billable_service.id"), nullable=True, index=True)
+
+    service_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    service_code: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    quantity: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=1)
+    unit_price: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)
+    discount_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)
+    line_total: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)
+    source_reference: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+
+    invoice: Mapped["Invoice"] = relationship(back_populates="items")
+    billable_service: Mapped[Optional["BillableService"]] = relationship()
+
+
+class Payment(BaseTable):
+    """Payment transaction against an invoice."""
+
+    invoice_id: Mapped[int] = mapped_column(ForeignKey("invoice.id"), nullable=False, index=True)
+    received_by_staff_id: Mapped[Optional[int]] = mapped_column(ForeignKey("staff_profile.id"), nullable=True)
+
+    payment_reference: Mapped[str] = mapped_column(String(100), nullable=False, unique=True, index=True)
+    payment_method: Mapped[Optional[str]] = mapped_column(String(100), nullable=True, index=True)
+
+    payment_status: Mapped[PaymentStatus] = mapped_column(
+        Enum(PaymentStatus),
+        default=PaymentStatus.PENDING,
+        nullable=False,
+        index=True,
+    )
+
+    amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    currency: Mapped[str] = mapped_column(String(10), nullable=False, default="NGN")
+    paid_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    transaction_metadata: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    invoice: Mapped["Invoice"] = relationship(back_populates="payments")
+    received_by_staff: Mapped[Optional["StaffProfile"]] = relationship()
+
+
+class LoyaltyProgram(BaseTable):
+    """Hospital loyalty program definition."""
+
+    name: Mapped[str] = mapped_column(String(150), unique=True, nullable=False)
+    code: Mapped[str] = mapped_column(String(100), unique=True, nullable=False, index=True)
+    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    points_per_currency_unit: Mapped[Optional[Decimal]] = mapped_column(Numeric(14, 4), nullable=True)
+    minimum_redemption_points: Mapped[Optional[Decimal]] = mapped_column(Numeric(14, 2), nullable=True)
+    is_auto_enroll: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+
+    patient_loyalties: Mapped[list["PatientLoyalty"]] = relationship(back_populates="loyalty_program")
+
+
+class PatientLoyalty(BaseTable):
+    """Patient membership in a loyalty program."""
+
+    patient_id: Mapped[int] = mapped_column(ForeignKey("patient.id"), nullable=False, index=True)
+    loyalty_program_id: Mapped[int] = mapped_column(ForeignKey("loyalty_program.id"), nullable=False, index=True)
+
+    membership_no: Mapped[str] = mapped_column(String(100), unique=True, nullable=False, index=True)
+    points_balance: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)
+    joined_date: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    patient: Mapped["Patient"] = relationship(back_populates="loyalty_memberships")
+    loyalty_program: Mapped["LoyaltyProgram"] = relationship(back_populates="patient_loyalties")
+
+    transactions: Mapped[list["LoyaltyTransaction"]] = relationship(
+        back_populates="patient_loyalty",
+        cascade="all, delete-orphan",
+    )
+
+
+class LoyaltyTransaction(BaseTable):
+    """Points earning, redemption, or adjustment transaction."""
+
+    patient_loyalty_id: Mapped[int] = mapped_column(ForeignKey("patient_loyalty.id"), nullable=False, index=True)
+    invoice_id: Mapped[Optional[int]] = mapped_column(ForeignKey("invoice.id"), nullable=True, index=True)
+
+    transaction_type: Mapped[LoyaltyTransactionType] = mapped_column(
+        Enum(LoyaltyTransactionType),
+        nullable=False,
+        index=True,
+    )
+
+    points: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    transaction_date: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    patient_loyalty: Mapped["PatientLoyalty"] = relationship(back_populates="transactions")
+    invoice: Mapped[Optional["Invoice"]] = relationship(back_populates="loyalty_transactions")
+
+    redemption_approval: Mapped[Optional["LoyaltyRedemptionApproval"]] = relationship(
+        back_populates="loyalty_transaction",
+        uselist=False,
+        cascade="all, delete-orphan",
+    )
+
+
+class LoyaltyRedemptionApproval(BaseTable):
+    """Approval record for loyalty redemption requiring authorization."""
+
+    loyalty_transaction_id: Mapped[int] = mapped_column(
+        ForeignKey("loyalty_transaction.id"),
+        nullable=False,
+        unique=True,
+        index=True,
+    )
+    requested_by_id: Mapped[Optional[int]] = mapped_column(ForeignKey("user.id"), nullable=True)
+    approved_by_id: Mapped[Optional[int]] = mapped_column(ForeignKey("user.id"), nullable=True)
+
+    approval_status: Mapped[ApprovalStatus] = mapped_column(
+        Enum(ApprovalStatus),
+        default=ApprovalStatus.PENDING,
+        nullable=False,
+        index=True,
+    )
+
+    request_note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    decision_note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    approved_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    loyalty_transaction: Mapped["LoyaltyTransaction"] = relationship(back_populates="redemption_approval")
+    requested_by: Mapped[Optional["User"]] = relationship(foreign_keys=[requested_by_id])
+    approved_by: Mapped[Optional["User"]] = relationship(foreign_keys=[approved_by_id])
+
+
+# ============================================================
+# ADMISSION / WARDS / BEDS / DISCHARGE
+# ============================================================
+
+
+class Ward(BaseTable):
+    """Inpatient ward."""
+
+    name: Mapped[str] = mapped_column(String(150), nullable=False, unique=True, index=True)
+    code: Mapped[str] = mapped_column(String(100), nullable=False, unique=True, index=True)
+    ward_type: Mapped[Optional[str]] = mapped_column(String(100), nullable=True, index=True)
+    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    beds: Mapped[list["Bed"]] = relationship(back_populates="ward")
+    admissions: Mapped[list["Admission"]] = relationship(back_populates="ward")
+
+
+class Bed(BaseTable):
+    """Bed inside a ward."""
+
+    ward_id: Mapped[int] = mapped_column(ForeignKey("ward.id"), nullable=False, index=True)
+
+    bed_no: Mapped[str] = mapped_column(String(100), nullable=False)
+    bed_status: Mapped[BedStatus] = mapped_column(
+        Enum(BedStatus),
+        default=BedStatus.AVAILABLE,
+        nullable=False,
+        index=True,
+    )
+    bed_type: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    ward: Mapped["Ward"] = relationship(back_populates="beds")
+    admissions: Mapped[list["Admission"]] = relationship(back_populates="bed")
+
+    __table_args__ = (
+        UniqueConstraint("ward_id", "bed_no", name="uq_ward_bed_no"),
+    )
+
+
+class Admission(BaseTable):
+    """Admission record for inpatient management."""
+
+    patient_id: Mapped[int] = mapped_column(ForeignKey("patient.id"), nullable=False, index=True)
+    visit_id: Mapped[Optional[int]] = mapped_column(ForeignKey("visit.id"), nullable=True, index=True)
+    ward_id: Mapped[Optional[int]] = mapped_column(ForeignKey("ward.id"), nullable=True, index=True)
+    bed_id: Mapped[Optional[int]] = mapped_column(ForeignKey("bed.id"), nullable=True, index=True)
+    admitted_by_staff_id: Mapped[Optional[int]] = mapped_column(ForeignKey("staff_profile.id"), nullable=True)
+
+    admission_no: Mapped[str] = mapped_column(String(100), unique=True, nullable=False, index=True)
+
+    admission_status: Mapped[AdmissionStatus] = mapped_column(
+        Enum(AdmissionStatus),
+        default=AdmissionStatus.PENDING,
+        nullable=False,
+        index=True,
+    )
+
+    admission_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    admitted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    expected_discharge_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    actual_discharge_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    patient: Mapped["Patient"] = relationship(back_populates="admissions")
+    visit: Mapped[Optional["Visit"]] = relationship(back_populates="admissions")
+    ward: Mapped[Optional["Ward"]] = relationship(back_populates="admissions")
+    bed: Mapped[Optional["Bed"]] = relationship(back_populates="admissions")
+    admitted_by_staff: Mapped[Optional["StaffProfile"]] = relationship()
+
+    discharge: Mapped[Optional["Discharge"]] = relationship(
+        back_populates="admission",
+        uselist=False,
+        cascade="all, delete-orphan",
+    )
+
+
+class Discharge(BaseTable):
+    """Discharge summary/event for an admission."""
+
+    admission_id: Mapped[int] = mapped_column(
+        ForeignKey("admission.id"),
+        nullable=False,
+        unique=True,
+        index=True,
+    )
+    discharged_by_staff_id: Mapped[Optional[int]] = mapped_column(ForeignKey("staff_profile.id"), nullable=True)
+
+    discharge_date: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    discharge_condition: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    discharge_summary: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    follow_up_instruction: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    admission: Mapped["Admission"] = relationship(back_populates="discharge")
+    discharged_by_staff: Mapped[Optional["StaffProfile"]] = relationship()
+
+
+# ============================================================
+# INVENTORY / STOCK
+# ============================================================
+
+
+class InventoryStore(BaseTable):
+    """Physical or logical inventory store."""
+
+    name: Mapped[str] = mapped_column(String(150), nullable=False, unique=True, index=True)
+    code: Mapped[str] = mapped_column(String(100), nullable=False, unique=True, index=True)
+    location_description: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    stock_items: Mapped[list["InventoryStockItem"]] = relationship(back_populates="store")
+    stock_movements: Mapped[list["StockMovement"]] = relationship(back_populates="store")
+
+
+class InventoryStockItem(BaseTable):
+    """Inventory item record for stock-tracked items."""
+
+    store_id: Mapped[int] = mapped_column(ForeignKey("inventory_store.id"), nullable=False, index=True)
+    drug_id: Mapped[Optional[int]] = mapped_column(ForeignKey("drug.id"), nullable=True, index=True)
+
+    item_type: Mapped[InventoryItemType] = mapped_column(
+        Enum(InventoryItemType),
+        nullable=False,
+        index=True,
+    )
+
+    item_name: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    sku: Mapped[Optional[str]] = mapped_column(String(100), nullable=True, index=True)
+    unit_of_measure: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+
+    quantity_on_hand: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)
+    reorder_level: Mapped[Optional[Decimal]] = mapped_column(Numeric(14, 2), nullable=True)
+    unit_cost: Mapped[Optional[Decimal]] = mapped_column(Numeric(14, 2), nullable=True)
+
+    expiry_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True, index=True)
+    batch_no: Mapped[Optional[str]] = mapped_column(String(100), nullable=True, index=True)
+
+    store: Mapped["InventoryStore"] = relationship(back_populates="stock_items")
+    drug: Mapped[Optional["Drug"]] = relationship(back_populates="stock_items")
+    stock_movements: Mapped[list["StockMovement"]] = relationship(back_populates="stock_item")
+
+
+class StockMovement(BaseTable):
+    """Tracks stock inflow/outflow events."""
+
+    store_id: Mapped[int] = mapped_column(ForeignKey("inventory_store.id"), nullable=False, index=True)
+    stock_item_id: Mapped[int] = mapped_column(ForeignKey("inventory_stock_item.id"), nullable=False, index=True)
+    performed_by_staff_id: Mapped[Optional[int]] = mapped_column(ForeignKey("staff_profile.id"), nullable=True)
+
+    movement_type: Mapped[StockMovementType] = mapped_column(
+        Enum(StockMovementType),
+        nullable=False,
+        index=True,
+    )
+
+    reference_no: Mapped[Optional[str]] = mapped_column(String(100), nullable=True, index=True)
+    quantity: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    balance_after: Mapped[Optional[Decimal]] = mapped_column(Numeric(14, 2), nullable=True)
+    movement_date: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+
+    note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    store: Mapped["InventoryStore"] = relationship(back_populates="stock_movements")
+    stock_item: Mapped["InventoryStockItem"] = relationship(back_populates="stock_movements")
+    performed_by_staff: Mapped[Optional["StaffProfile"]] = relationship()
+
+
+# ============================================================
+# AMBULANCE / EMERGENCY TRANSPORT
+# ============================================================
+
+
+class Ambulance(BaseTable):
+    """Ambulance master record."""
+
+    code: Mapped[str] = mapped_column(String(100), unique=True, nullable=False, index=True)
+    plate_number: Mapped[str] = mapped_column(String(100), unique=True, nullable=False, index=True)
+    model: Mapped[Optional[str]] = mapped_column(String(150), nullable=True)
+    manufacturer: Mapped[Optional[str]] = mapped_column(String(150), nullable=True)
+    year_of_manufacture: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    color: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+
+    status: Mapped[AmbulanceStatus] = mapped_column(
+        Enum(AmbulanceStatus),
+        default=AmbulanceStatus.AVAILABLE,
+        nullable=False,
+        index=True,
+    )
+
+    current_mileage: Mapped[Optional[Decimal]] = mapped_column(Numeric(14, 2), nullable=True)
+    notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    dispatches: Mapped[list["AmbulanceDispatch"]] = relationship(back_populates="ambulance")
+    maintenance_records: Mapped[list["AmbulanceMaintenance"]] = relationship(back_populates="ambulance")
+    equipment_items: Mapped[list["AmbulanceEquipment"]] = relationship(back_populates="ambulance")
+    drivers: Mapped[list["AmbulanceDriver"]] = relationship(back_populates="ambulance")
+
+
+class AmbulanceDriver(BaseTable):
+    """Driver assignment and qualification record for ambulance operations."""
+
+    staff_profile_id: Mapped[int] = mapped_column(ForeignKey("staff_profile.id"), nullable=False, index=True)
+    ambulance_id: Mapped[Optional[int]] = mapped_column(ForeignKey("ambulance.id"), nullable=True, index=True)
+
+    driver_license_no: Mapped[str] = mapped_column(String(100), nullable=False, unique=True, index=True)
+    license_expiry_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+    is_primary_driver: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    emergency_response_certified: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+
+    notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    staff_profile: Mapped["StaffProfile"] = relationship()
+    ambulance: Mapped[Optional["Ambulance"]] = relationship(back_populates="drivers")
+    dispatches: Mapped[list["AmbulanceDispatch"]] = relationship(back_populates="driver")
+
+
+class AmbulanceDispatch(BaseTable):
+    """Dispatch event for an ambulance call."""
+
+    ambulance_id: Mapped[int] = mapped_column(ForeignKey("ambulance.id"), nullable=False, index=True)
+    driver_id: Mapped[Optional[int]] = mapped_column(ForeignKey("ambulance_driver.id"), nullable=True, index=True)
+    patient_id: Mapped[Optional[int]] = mapped_column(ForeignKey("patient.id"), nullable=True, index=True)
+    visit_id: Mapped[Optional[int]] = mapped_column(ForeignKey("visit.id"), nullable=True, index=True)
+
+    dispatch_no: Mapped[str] = mapped_column(String(100), unique=True, nullable=False, index=True)
+
+    dispatch_status: Mapped[AmbulanceDispatchStatus] = mapped_column(
+        Enum(AmbulanceDispatchStatus),
+        default=AmbulanceDispatchStatus.PENDING,
+        nullable=False,
+        index=True,
+    )
+
+    pickup_location: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    destination_location: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    incident_description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    assigned_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    departed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    arrived_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    ambulance: Mapped["Ambulance"] = relationship(back_populates="dispatches")
+    driver: Mapped[Optional["AmbulanceDriver"]] = relationship(back_populates="dispatches")
+    patient: Mapped[Optional["Patient"]] = relationship()
+    visit: Mapped[Optional["Visit"]] = relationship()
+
+    incident_reports: Mapped[list["AmbulanceIncidentReport"]] = relationship(
+        back_populates="dispatch",
+        cascade="all, delete-orphan",
+    )
+
+
+class AmbulanceMaintenance(BaseTable):
+    """Maintenance log for ambulances."""
+
+    ambulance_id: Mapped[int] = mapped_column(ForeignKey("ambulance.id"), nullable=False, index=True)
+
+    maintenance_status: Mapped[MaintenanceStatus] = mapped_column(
+        Enum(MaintenanceStatus),
+        default=MaintenanceStatus.SCHEDULED,
+        nullable=False,
+        index=True,
+    )
+
+    maintenance_type: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    issue_description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    service_provider: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+
+    maintenance_date: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    completed_date: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    cost: Mapped[Optional[Decimal]] = mapped_column(Numeric(14, 2), nullable=True)
+    mileage_at_service: Mapped[Optional[Decimal]] = mapped_column(Numeric(14, 2), nullable=True)
+
+    ambulance: Mapped["Ambulance"] = relationship(back_populates="maintenance_records")
+
+
+class AmbulanceEquipment(BaseTable):
+    """Equipment assigned to an ambulance."""
+
+    ambulance_id: Mapped[int] = mapped_column(ForeignKey("ambulance.id"), nullable=False, index=True)
+
+    equipment_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    equipment_code: Mapped[Optional[str]] = mapped_column(String(100), nullable=True, index=True)
+    quantity: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=1)
+    condition_status: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    expiry_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+    notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    ambulance: Mapped["Ambulance"] = relationship(back_populates="equipment_items")
+
+
+class AmbulanceIncidentReport(BaseTable):
+    """Incident report generated during or after an ambulance dispatch."""
+
+    dispatch_id: Mapped[int] = mapped_column(ForeignKey("ambulance_dispatch.id"), nullable=False, index=True)
+    reported_by_staff_id: Mapped[Optional[int]] = mapped_column(ForeignKey("staff_profile.id"), nullable=True)
+
+    severity: Mapped[IncidentSeverity] = mapped_column(
+        Enum(IncidentSeverity),
+        default=IncidentSeverity.MEDIUM,
+        nullable=False,
+        index=True,
+    )
+
+    incident_date: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    summary: Mapped[str] = mapped_column(Text, nullable=False)
+    action_taken: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    follow_up_required: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+
+    dispatch: Mapped["AmbulanceDispatch"] = relationship(back_populates="incident_reports")
+    reported_by_staff: Mapped[Optional["StaffProfile"]] = relationship()
+
+
+# ============================================================
+# EMPLOYEE HR / DEVELOPMENT / PERFORMANCE
+# ============================================================
+
+
+class EmployeeCertification(BaseTable):
+    """Professional certification held by a staff member."""
+
+    staff_profile_id: Mapped[int] = mapped_column(ForeignKey("staff_profile.id"), nullable=False, index=True)
+
+    certification_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    issuing_body: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    certificate_no: Mapped[Optional[str]] = mapped_column(String(100), nullable=True, index=True)
+    issue_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+    expiry_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+    notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    staff_profile: Mapped["StaffProfile"] = relationship()
+
+
+class EmployeeTraining(BaseTable):
+    """Training attended or assigned to a staff member."""
+
+    staff_profile_id: Mapped[int] = mapped_column(ForeignKey("staff_profile.id"), nullable=False, index=True)
+
+    training_title: Mapped[str] = mapped_column(String(255), nullable=False)
+    provider_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    start_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+    end_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+    certificate_received: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    staff_profile: Mapped["StaffProfile"] = relationship()
+
+
+class EmployeeSchedule(BaseTable):
+    """Published schedule period for employee duty planning."""
+
+    department_id: Mapped[Optional[int]] = mapped_column(ForeignKey("department.id"), nullable=True, index=True)
+
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    start_date: Mapped[date] = mapped_column(Date, nullable=False)
+    end_date: Mapped[date] = mapped_column(Date, nullable=False)
+
+    status: Mapped[EmployeeScheduleStatus] = mapped_column(
+        Enum(EmployeeScheduleStatus),
+        default=EmployeeScheduleStatus.DRAFT,
+        nullable=False,
+        index=True,
+    )
+
+    notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    department: Mapped[Optional["Department"]] = relationship(back_populates="employee_schedules")
+    shifts: Mapped[list["EmployeeShift"]] = relationship(
+        back_populates="employee_schedule",
+        cascade="all, delete-orphan",
+    )
+
+
+class EmployeeShift(BaseTable):
+    """Individual employee shift inside a schedule."""
+
+    employee_schedule_id: Mapped[int] = mapped_column(ForeignKey("employee_schedule.id"), nullable=False, index=True)
+    staff_profile_id: Mapped[int] = mapped_column(ForeignKey("staff_profile.id"), nullable=False, index=True)
+    service_delivery_point_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("service_delivery_point.id"),
+        nullable=True,
+        index=True,
+    )
+
+    shift_name: Mapped[Optional[str]] = mapped_column(String(150), nullable=True)
+    shift_start: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    shift_end: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    status: Mapped[ShiftStatus] = mapped_column(
+        Enum(ShiftStatus),
+        default=ShiftStatus.SCHEDULED,
+        nullable=False,
+        index=True,
+    )
+
+    notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    employee_schedule: Mapped["EmployeeSchedule"] = relationship(back_populates="shifts")
+    staff_profile: Mapped["StaffProfile"] = relationship()
+    service_delivery_point: Mapped[Optional["ServiceDeliveryPoint"]] = relationship(back_populates="employee_shifts")
+
+
+class EmployeeLeave(BaseTable):
+    """Employee leave application and tracking."""
+
+    staff_profile_id: Mapped[int] = mapped_column(ForeignKey("staff_profile.id"), nullable=False, index=True)
+    approved_by_id: Mapped[Optional[int]] = mapped_column(ForeignKey("user.id"), nullable=True)
+
+    leave_type: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    start_date: Mapped[date] = mapped_column(Date, nullable=False)
+    end_date: Mapped[date] = mapped_column(Date, nullable=False)
+    reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    status: Mapped[LeaveStatus] = mapped_column(
+        Enum(LeaveStatus),
+        default=LeaveStatus.PENDING,
+        nullable=False,
+        index=True,
+    )
+
+    approved_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    staff_profile: Mapped["StaffProfile"] = relationship()
+    approved_by: Mapped[Optional["User"]] = relationship()
+
+
+class EmployeePerformance(BaseTable):
+    """Performance review record for a staff member."""
+
+    staff_profile_id: Mapped[int] = mapped_column(ForeignKey("staff_profile.id"), nullable=False, index=True)
+    reviewer_id: Mapped[Optional[int]] = mapped_column(ForeignKey("user.id"), nullable=True)
+
+    review_period_start: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+    review_period_end: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+    performance_score: Mapped[Optional[Decimal]] = mapped_column(Numeric(8, 2), nullable=True)
+    strengths: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    improvement_areas: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    recommendation: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    status: Mapped[PerformanceStatus] = mapped_column(
+        Enum(PerformanceStatus),
+        default=PerformanceStatus.DRAFT,
+        nullable=False,
+        index=True,
+    )
+
+    staff_profile: Mapped["StaffProfile"] = relationship()
+    reviewer: Mapped[Optional["User"]] = relationship()
+
+
+class EmployeeDisciplinaryAction(BaseTable):
+    """Disciplinary action record for an employee."""
+
+    staff_profile_id: Mapped[int] = mapped_column(ForeignKey("staff_profile.id"), nullable=False, index=True)
+    reported_by_id: Mapped[Optional[int]] = mapped_column(ForeignKey("user.id"), nullable=True)
+
+    action_type: Mapped[str] = mapped_column(String(150), nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    action_date: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    status: Mapped[DisciplinaryActionStatus] = mapped_column(
+        Enum(DisciplinaryActionStatus),
+        default=DisciplinaryActionStatus.OPEN,
+        nullable=False,
+        index=True,
+    )
+
+    resolution_note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    staff_profile: Mapped["StaffProfile"] = relationship()
+    reported_by: Mapped[Optional["User"]] = relationship()
+
+
+# ============================================================
+# MESSAGING / NOTIFICATIONS / AUDIT
+# ============================================================
+
+
+class Message(BaseTable):
+    """Direct or system-generated message record."""
+
+    sender_user_id: Mapped[Optional[int]] = mapped_column(ForeignKey("user.id"), nullable=True, index=True)
+    recipient_user_id: Mapped[Optional[int]] = mapped_column(ForeignKey("user.id"), nullable=True, index=True)
+
+    subject: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+
+    status: Mapped[MessageStatus] = mapped_column(
+        Enum(MessageStatus),
+        default=MessageStatus.DRAFT,
+        nullable=False,
+        index=True,
+    )
+
+    sent_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    read_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    sender_user: Mapped[Optional["User"]] = relationship(foreign_keys=[sender_user_id])
+    recipient_user: Mapped[Optional["User"]] = relationship(foreign_keys=[recipient_user_id])
+
+
+class NotificationTemplate(BaseTable):
+    """Reusable notification template."""
+
+    name: Mapped[str] = mapped_column(String(150), nullable=False, unique=True)
+    code: Mapped[str] = mapped_column(String(100), nullable=False, unique=True, index=True)
+
+    channel: Mapped[NotificationChannel] = mapped_column(
+        Enum(NotificationChannel),
+        nullable=False,
+        index=True,
+    )
+
+    subject_template: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    body_template: Mapped[str] = mapped_column(Text, nullable=False)
+
+
+class Notification(BaseTable):
+    """Notification record for in-app, email, SMS, or WhatsApp."""
+
+    user_id: Mapped[Optional[int]] = mapped_column(ForeignKey("user.id"), nullable=True, index=True)
+    patient_id: Mapped[Optional[int]] = mapped_column(ForeignKey("patient.id"), nullable=True, index=True)
+    template_id: Mapped[Optional[int]] = mapped_column(ForeignKey("notification_template.id"), nullable=True)
+
+    channel: Mapped[NotificationChannel] = mapped_column(
+        Enum(NotificationChannel),
+        nullable=False,
+        index=True,
+    )
+    status: Mapped[NotificationStatus] = mapped_column(
+        Enum(NotificationStatus),
+        default=NotificationStatus.PENDING,
+        nullable=False,
+        index=True,
+    )
+
+    recipient_address: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    subject: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+
+    payload_metadata: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+
+    scheduled_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    sent_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    delivered_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    read_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    failure_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    user: Mapped[Optional["User"]] = relationship()
+    patient: Mapped[Optional["Patient"]] = relationship(back_populates="notifications")
+    template: Mapped[Optional["NotificationTemplate"]] = relationship()
+
+
+class AuditLog(BaseTable):
+    """Generic audit trail for sensitive actions."""
+
+    actor_user_id: Mapped[Optional[int]] = mapped_column(ForeignKey("user.id"), nullable=True, index=True)
+
+    action: Mapped[str] = mapped_column(String(150), nullable=False, index=True)
+    entity_name: Mapped[str] = mapped_column(String(150), nullable=False, index=True)
+    entity_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
+
+    request_id: Mapped[Optional[str]] = mapped_column(String(100), nullable=True, index=True)
+    ip_address: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    user_agent: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    before_data: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    after_data: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    extra_metadata: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+
+    actor_user: Mapped[Optional["User"]] = relationship()
+
+
+# ============================================================
+# COMPLIANCE / ACCREDITATION / INCIDENTS / QUALITY
+# ============================================================
+
+
+class ComplianceRecord(BaseTable):
+    """Compliance obligation or review record."""
+
+    department_id: Mapped[Optional[int]] = mapped_column(ForeignKey("department.id"), nullable=True, index=True)
+    owner_staff_id: Mapped[Optional[int]] = mapped_column(ForeignKey("staff_profile.id"), nullable=True)
+
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    compliance_area: Mapped[Optional[str]] = mapped_column(String(150), nullable=True, index=True)
+    reference_code: Mapped[Optional[str]] = mapped_column(String(100), nullable=True, index=True)
+    due_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+    review_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+
+    status: Mapped[ComplianceStatus] = mapped_column(
+        Enum(ComplianceStatus),
+        default=ComplianceStatus.IN_PROGRESS,
+        nullable=False,
+        index=True,
+    )
+
+    findings: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    action_plan: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    department: Mapped[Optional["Department"]] = relationship()
+    owner_staff: Mapped[Optional["StaffProfile"]] = relationship()
+
+
+class Accreditation(BaseTable):
+    """Hospital or departmental accreditation record."""
+
+    department_id: Mapped[Optional[int]] = mapped_column(ForeignKey("department.id"), nullable=True, index=True)
+
+    accreditation_body: Mapped[str] = mapped_column(String(255), nullable=False)
+    accreditation_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    certificate_no: Mapped[Optional[str]] = mapped_column(String(100), nullable=True, index=True)
+
+    issue_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+    expiry_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+
+    status: Mapped[AccreditationStatus] = mapped_column(
+        Enum(AccreditationStatus),
+        default=AccreditationStatus.PENDING,
+        nullable=False,
+        index=True,
+    )
+
+    notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    department: Mapped[Optional["Department"]] = relationship()
+
+
+class IncidentReport(BaseTable):
+    """General operational or patient safety incident report."""
+
+    reported_by_staff_id: Mapped[Optional[int]] = mapped_column(ForeignKey("staff_profile.id"), nullable=True)
+    patient_id: Mapped[Optional[int]] = mapped_column(ForeignKey("patient.id"), nullable=True, index=True)
+    visit_id: Mapped[Optional[int]] = mapped_column(ForeignKey("visit.id"), nullable=True, index=True)
+    department_id: Mapped[Optional[int]] = mapped_column(ForeignKey("department.id"), nullable=True, index=True)
+
+    incident_no: Mapped[str] = mapped_column(String(100), unique=True, nullable=False, index=True)
+    incident_date: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    severity: Mapped[IncidentSeverity] = mapped_column(
+        Enum(IncidentSeverity),
+        default=IncidentSeverity.MEDIUM,
+        nullable=False,
+        index=True,
+    )
+
+    category: Mapped[Optional[str]] = mapped_column(String(150), nullable=True, index=True)
+    summary: Mapped[str] = mapped_column(Text, nullable=False)
+    immediate_action_taken: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    follow_up_required: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+
+    reported_by_staff: Mapped[Optional["StaffProfile"]] = relationship()
+    patient: Mapped[Optional["Patient"]] = relationship()
+    visit: Mapped[Optional["Visit"]] = relationship()
+    department: Mapped[Optional["Department"]] = relationship()
+
+
+class InfectionControlLog(BaseTable):
+    """Infection control surveillance and response log."""
+
+    department_id: Mapped[Optional[int]] = mapped_column(ForeignKey("department.id"), nullable=True, index=True)
+    recorded_by_staff_id: Mapped[Optional[int]] = mapped_column(ForeignKey("staff_profile.id"), nullable=True)
+
+    log_date: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    infection_type: Mapped[Optional[str]] = mapped_column(String(150), nullable=True, index=True)
+    affected_area: Mapped[Optional[str]] = mapped_column(String(150), nullable=True)
+
+    details: Mapped[str] = mapped_column(Text, nullable=False)
+    action_taken: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    outcome: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    department: Mapped[Optional["Department"]] = relationship()
+    recorded_by_staff: Mapped[Optional["StaffProfile"]] = relationship()
+
+
+class QualityImprovementProject(BaseTable):
+    """Quality improvement initiative or project."""
+
+    department_id: Mapped[Optional[int]] = mapped_column(ForeignKey("department.id"), nullable=True, index=True)
+    project_lead_staff_id: Mapped[Optional[int]] = mapped_column(ForeignKey("staff_profile.id"), nullable=True)
+
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    objective: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    problem_statement: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    start_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+    end_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+
+    status: Mapped[QualityProjectStatus] = mapped_column(
+        Enum(QualityProjectStatus),
+        default=QualityProjectStatus.PLANNED,
+        nullable=False,
+        index=True,
+    )
+
+    outcome_summary: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    recommendations: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    department: Mapped[Optional["Department"]] = relationship()
+    project_lead_staff: Mapped[Optional["StaffProfile"]] = relationship()

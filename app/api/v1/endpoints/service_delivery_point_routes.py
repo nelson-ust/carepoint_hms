@@ -1,0 +1,300 @@
+from __future__ import annotations
+
+"""
+app.api.v1.endpoints.service_delivery_routes
+
+FastAPI routes for service delivery point configuration and retrieval.
+
+Purpose
+-------
+This module exposes API endpoints for:
+
+- creating service delivery points
+- retrieving service delivery points
+- listing and filtering service delivery points
+- listing active service delivery points
+- updating service delivery points
+- activating/deactivating service delivery points
+- soft-deleting service delivery points
+
+Security
+--------
+These endpoints are intended for authorized administrative/configuration users
+and are protected with the admin dependency.
+"""
+
+from typing import Annotated, Any, Optional
+
+from fastapi import APIRouter, Depends, Query, status
+from sqlalchemy.orm import Session
+
+from app.core.database import get_db
+from app.core.dependencies import AdminUser
+from app.schemas.service_delivery_point_schemas import (
+    ServiceDeliveryPointActionResponseSchema,
+    ServiceDeliveryPointCreateSchema,
+    ServiceDeliveryPointListResponseSchema,
+    ServiceDeliveryPointReadSchema,
+    ServiceDeliveryPointStatusToggleSchema,
+    ServiceDeliveryPointUpdateSchema,
+)
+from app.services.service_delivery_point_service import ServiceDeliveryService
+from app.utils.pagination import paginate_response
+
+router = APIRouter(
+    prefix="/service-delivery-points",
+    tags=["Service Delivery Points"],
+)
+
+
+def get_service_delivery_service(
+    db: Annotated[Session, Depends(get_db)],
+) -> ServiceDeliveryService:
+    """
+    Dependency provider for the service delivery service.
+    """
+    return ServiceDeliveryService(db)
+
+
+# ============================================================
+# SERIALIZATION HELPERS
+# ============================================================
+
+def _safe_enum(value) -> Optional[str]:
+    """
+    Convert enum-like values to strings safely.
+    """
+    if value is None:
+        return None
+    return str(value)
+
+
+def _serialize_service_delivery_point(record) -> dict[str, Any]:
+    """
+    Serialize a service delivery point ORM object into the response shape
+    expected by ServiceDeliveryPointReadSchema.
+    """
+    return {
+        "id": record.id,
+        "name": record.name,
+        "code": record.code,
+        "service_point_type": _safe_enum(record.service_point_type),
+        "department_id": getattr(record, "department_id", None),
+        "location_description": getattr(record, "location_description", None),
+        "queue_prefix": getattr(record, "queue_prefix", None),
+        "supports_appointments": getattr(record, "supports_appointments", False),
+        "supports_walk_in": getattr(record, "supports_walk_in", False),
+        "is_active": getattr(record, "is_active", True),
+        "created_at": getattr(record, "created_at", None),
+        "updated_at": getattr(record, "updated_at", None),
+    }
+
+
+def _serialize_service_delivery_point_list_item(record) -> dict[str, Any]:
+    """
+    Serialize a service delivery point ORM object into list-item shape.
+    """
+    return {
+        "id": record.id,
+        "name": record.name,
+        "code": record.code,
+        "service_point_type": _safe_enum(record.service_point_type),
+        "department_id": getattr(record, "department_id", None),
+        "queue_prefix": getattr(record, "queue_prefix", None),
+        "supports_appointments": getattr(record, "supports_appointments", False),
+        "supports_walk_in": getattr(record, "supports_walk_in", False),
+        "is_active": getattr(record, "is_active", True),
+    }
+
+
+# ============================================================
+# ROUTES
+# ============================================================
+
+@router.post(
+    "/",
+    response_model=ServiceDeliveryPointReadSchema,
+    status_code=status.HTTP_201_CREATED,
+    summary="Create service delivery point",
+)
+def create_service_delivery_point(
+    payload: ServiceDeliveryPointCreateSchema,
+    _: AdminUser,
+    service: Annotated[ServiceDeliveryService, Depends(get_service_delivery_service)],
+):
+    """
+    Create a new service delivery point.
+    """
+    record = service.create_service_delivery_point(payload)
+    return _serialize_service_delivery_point(record)
+
+
+@router.get(
+    "/",
+    response_model=ServiceDeliveryPointListResponseSchema,
+    status_code=status.HTTP_200_OK,
+    summary="List service delivery points",
+)
+def list_service_delivery_points(
+    _: AdminUser,
+    service: Annotated[ServiceDeliveryService, Depends(get_service_delivery_service)],
+    skip: int = Query(0, ge=0, description="Pagination offset."),
+    limit: int = Query(20, ge=1, le=100, description="Pagination size."),
+    name: Optional[str] = Query(None),
+    code: Optional[str] = Query(None),
+    service_point_type: Optional[str] = Query(None),
+    department_id: Optional[int] = Query(None),
+    supports_appointments: Optional[bool] = Query(None),
+    supports_walk_in: Optional[bool] = Query(None),
+    is_active: Optional[bool] = Query(None),
+):
+    """
+    Return a paginated list of service delivery points with optional filters.
+    """
+    items, total = service.list_service_delivery_points(
+        skip=skip,
+        limit=limit,
+        name=name,
+        code=code,
+        service_point_type=service_point_type,
+        department_id=department_id,
+        supports_appointments=supports_appointments,
+        supports_walk_in=supports_walk_in,
+        is_active=is_active,
+    )
+
+    return paginate_response(
+        items=[_serialize_service_delivery_point_list_item(item) for item in items],
+        total=total,
+        skip=skip,
+        limit=limit,
+        message="Service delivery points fetched successfully.",
+    )
+
+
+@router.get(
+    "/active",
+    response_model=ServiceDeliveryPointListResponseSchema,
+    status_code=status.HTTP_200_OK,
+    summary="List active service delivery points",
+)
+def list_active_service_delivery_points(
+    _: AdminUser,
+    service: Annotated[ServiceDeliveryService, Depends(get_service_delivery_service)],
+    skip: int = Query(0, ge=0, description="Pagination offset."),
+    limit: int = Query(100, ge=1, le=200, description="Pagination size."),
+    service_point_type: Optional[str] = Query(None),
+    department_id: Optional[int] = Query(None),
+):
+    """
+    Return a paginated list of active service delivery points.
+    """
+    items, total = service.list_active_service_delivery_points(
+        skip=skip,
+        limit=limit,
+        service_point_type=service_point_type,
+        department_id=department_id,
+    )
+
+    return paginate_response(
+        items=[_serialize_service_delivery_point_list_item(item) for item in items],
+        total=total,
+        skip=skip,
+        limit=limit,
+        message="Active service delivery points fetched successfully.",
+    )
+
+
+@router.get(
+    "/by-code/{code}",
+    response_model=ServiceDeliveryPointReadSchema,
+    status_code=status.HTTP_200_OK,
+    summary="Get service delivery point by code",
+)
+def get_service_delivery_point_by_code(
+    code: str,
+    _: AdminUser,
+    service: Annotated[ServiceDeliveryService, Depends(get_service_delivery_service)],
+):
+    """
+    Return a service delivery point by code.
+    """
+    record = service.get_service_delivery_point_by_code(code)
+    return _serialize_service_delivery_point(record)
+
+
+@router.get(
+    "/{service_delivery_point_id}",
+    response_model=ServiceDeliveryPointReadSchema,
+    status_code=status.HTTP_200_OK,
+    summary="Get service delivery point",
+)
+def get_service_delivery_point(
+    service_delivery_point_id: int,
+    _: AdminUser,
+    service: Annotated[ServiceDeliveryService, Depends(get_service_delivery_service)],
+):
+    """
+    Return a single service delivery point by ID.
+    """
+    record = service.get_service_delivery_point(service_delivery_point_id)
+    return _serialize_service_delivery_point(record)
+
+
+@router.put(
+    "/{service_delivery_point_id}",
+    response_model=ServiceDeliveryPointReadSchema,
+    status_code=status.HTTP_200_OK,
+    summary="Update service delivery point",
+)
+def update_service_delivery_point(
+    service_delivery_point_id: int,
+    payload: ServiceDeliveryPointUpdateSchema,
+    _: AdminUser,
+    service: Annotated[ServiceDeliveryService, Depends(get_service_delivery_service)],
+):
+    """
+    Update a service delivery point.
+    """
+    record = service.update_service_delivery_point(service_delivery_point_id, payload)
+    return _serialize_service_delivery_point(record)
+
+
+@router.patch(
+    "/{service_delivery_point_id}/status",
+    response_model=ServiceDeliveryPointReadSchema,
+    status_code=status.HTTP_200_OK,
+    summary="Activate or deactivate service delivery point",
+)
+def set_service_delivery_point_status(
+    service_delivery_point_id: int,
+    payload: ServiceDeliveryPointStatusToggleSchema,
+    _: AdminUser,
+    service: Annotated[ServiceDeliveryService, Depends(get_service_delivery_service)],
+):
+    """
+    Activate or deactivate a service delivery point.
+    """
+    record = service.set_active_status(service_delivery_point_id, payload)
+    return _serialize_service_delivery_point(record)
+
+
+@router.delete(
+    "/{service_delivery_point_id}",
+    response_model=ServiceDeliveryPointActionResponseSchema,
+    status_code=status.HTTP_200_OK,
+    summary="Delete service delivery point",
+)
+def delete_service_delivery_point(
+    service_delivery_point_id: int,
+    _: AdminUser,
+    service: Annotated[ServiceDeliveryService, Depends(get_service_delivery_service)],
+):
+    """
+    Soft-delete a service delivery point.
+    """
+    record = service.delete_service_delivery_point(service_delivery_point_id)
+    return {
+        "success": True,
+        "message": f"Service delivery point '{record.code}' deleted successfully.",
+    }
