@@ -2,15 +2,15 @@
 from __future__ import annotations
 
 """
-Service layer for queue ticket lifecycle and service-point worklists.
+    Service layer for queue ticket lifecycle and service-point worklists.
 
-Lifecycle
----------
-WAITING  -> CALLED  -> SERVING  -> SERVED
-                                \-> MISSED
-                                \-> TRANSFERRED
-WAITING  -> CANCELLED
-CALLED   -> CANCELLED
+    Lifecycle
+    ---------
+    WAITING  -> CALLED  -> SERVING  -> SERVED
+                                    \-> MISSED
+                                    \-> TRANSFERRED
+    WAITING  -> CANCELLED
+    CALLED   -> CANCELLED
 """
 
 from datetime import datetime, timezone

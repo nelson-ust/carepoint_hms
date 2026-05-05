@@ -971,43 +971,110 @@ def seed_all(db: Session, *, create_default_admin: bool = True) -> None:
 # Initialization orchestration
 # =============================================================================
 
-def run_master_initialization(recreate: bool = False) -> None:
+def run_master_initialization(
+    recreate: bool = True,
+    *,
+    physical_recreate: bool = False,
+) -> None:
     """
-    Initialize the shared/master database.
+    Initialise the shared/master database.
+
+    Reset modes
+    -----------
+    ``recreate=True`` (default) performs a **schema-level reset**:
+    ``DROP SCHEMA public CASCADE; CREATE SCHEMA public;`` is executed on
+    the master DB, then ``MasterBase.metadata.create_all`` rebuilds the
+    16 master tables from scratch and the seed pass writes default
+    subscription plans + the default SaaS admin
+    (``superadmin@carepointhms.com`` / ``SuperAdmin123!``). This works
+    on any PostgreSQL deployment because it only needs ownership of the
+    ``public`` schema — it does NOT need superuser. Use this on managed
+    Postgres providers (Render, RDS, Cloud SQL, Neon, Supabase, ...) and
+    locally.
+
+    ``physical_recreate=True`` performs a **database-level reset**:
+    connects to the ``postgres`` admin DB, terminates active sessions,
+    and issues ``DROP DATABASE`` / ``CREATE DATABASE``. This requires
+    superuser-equivalent privileges and is typically NOT available on
+    managed Postgres. Reach for it only on bare-metal local Postgres.
+
+    Pass both flags False (e.g. ``--no-recreate-master``) to skip the
+    destructive reset entirely; ``sync_master_schema`` will still run
+    as an idempotent forward-migrate that preserves existing rows.
     """
-    check_production_safety(destructive=recreate)
+    check_production_safety(destructive=recreate or physical_recreate)
 
     if not MASTER_DATABASE_URL:
         logger.warning("MASTER_DATABASE_URL not set. Skipping master DB initialization.")
         return
 
-    if recreate:
-        recreate_database(MASTER_DATABASE_URL)
+    # Database-level reset (rare; needs superuser).
+    if physical_recreate:
+        try:
+            recreate_database(MASTER_DATABASE_URL)
+        except Exception as exc:
+            logger.error(
+                "Physical database recreate failed: %s. On managed Postgres "
+                "(Render, RDS, Cloud SQL, ...) the application user is "
+                "usually not allowed to DROP/CREATE DATABASE. Re-run with "
+                "--recreate-master (schema-level reset) or "
+                "--no-recreate-master (forward-migrate only) instead.",
+                exc,
+            )
+            raise
 
     logger.info(f"Initializing Master Database: {MASTER_DATABASE_URL}")
     master_engine = create_engine(MASTER_DATABASE_URL, future=True)
 
-    # Forward-migrate the master schema:
-    #   - create any new tables / new enum types,
-    #   - add any model columns missing from existing tables,
-    #   - extend any pre-existing enums with new values.
-    # This makes ``python -m app.init_db`` idempotent and safe to run
-    # against an already-populated master database.
     try:
-        from app.db_sync import sync_master_schema
+        # Schema-level reset (default destructive mode). Skipped when
+        # we just did a physical recreate (the database is already
+        # empty), and skipped entirely when the operator passed
+        # --no-recreate-master.
+        if recreate and not physical_recreate:
+            logger.info(
+                "Resetting master schema (DROP SCHEMA public CASCADE; "
+                "CREATE SCHEMA public)..."
+            )
+            try:
+                drop_tables(bind_engine=master_engine, is_master=True)
+            except Exception as exc:
+                logger.error(
+                    "Schema-level reset failed: %s. The database user "
+                    "must own the 'public' schema. If this database is "
+                    "shared and you cannot drop the schema, re-run with "
+                    "--no-recreate-master to do an idempotent forward-"
+                    "migrate that preserves existing rows.",
+                    exc,
+                )
+                raise
 
-        summary = sync_master_schema(engine=master_engine)
-        if summary:
-            logger.info("Master schema sync applied: %s", summary)
-    except Exception as exc:
-        logger.exception("Master schema sync failed: %s", exc)
-        raise
+        # Forward-migrate the master schema:
+        #   - create any new tables / new enum types,
+        #   - add any model columns missing from existing tables,
+        #   - extend any pre-existing enums with new values.
+        # After a destructive reset above, this is what actually creates
+        # the 16 master tables. Without a reset it just adds anything
+        # that's missing and is idempotent.
+        try:
+            from app.db_sync import sync_master_schema
 
-    # Seed plans and SaaS Admin
-    with Session(master_engine) as db:
-        seed_plans(db)
-        seed_saas_admin(db)
-        db.commit()
+            summary = sync_master_schema(engine=master_engine)
+            if summary:
+                logger.info("Master schema sync applied: %s", summary)
+        except Exception as exc:
+            logger.exception("Master schema sync failed: %s", exc)
+            raise
+
+        # Seed plans and SaaS Admin. Both seeders are idempotent — they
+        # short-circuit when the row already exists, so the same call
+        # is safe on a fresh DB and on an existing one.
+        with Session(master_engine) as db:
+            seed_plans(db)
+            seed_saas_admin(db)
+            db.commit()
+    finally:
+        master_engine.dispose()
 
     logger.info("Master Database initialized and seeded.")
 
@@ -1055,51 +1122,111 @@ def run_tenant_initialization(
 
 def run_initialization(
     *,
-    recreate_entire_database: bool = True,
     recreate_master_database: bool = True,
-    drop_and_recreate_all_tables: bool = True,
-    create_default_admin: bool = True,
+    physical_recreate_master_database: bool = False,
     init_master: bool = True,
+    # The flags below are kept for backwards-compat with shell scripts /
+    # CI jobs that pass them; they are no-ops now and ignored with a
+    # warning *only when explicitly set*. Tenant tables NEVER live in
+    # the central database.
+    recreate_entire_database: bool = False,
+    drop_and_recreate_all_tables: bool = False,
+    create_default_admin: bool = False,
 ) -> None:
     """
-    Run full database reset/initialization and seed steps.
+    Run the default ``python -m app.init_db`` flow.
 
-    Defaults perform a destructive reset: both the master and operational
-    databases are dropped and recreated, all SQLAlchemy tables are
-    rebuilt, and seed data is applied. This matches the canonical
-    "wipe everything and start clean" workflow.
+    Multi-tenancy contract
+    ----------------------
+    Carepoint HMS is strictly multi-tenant. Two kinds of databases exist:
 
-    To preserve existing data, pass ``recreate_master_database=False``
-    and/or ``recreate_entire_database=False`` (or use the matching
-    ``--no-recreate-master`` / ``--no-recreate-db`` CLI flags).
+    * the **central / master DB** (``MASTER_DATABASE_URL``) holds only
+      :class:`~app.models.base.MasterTable` rows — Tenant, TenantDomain,
+      SubscriptionPlan, TenantSubscription, SaaSAdmin, etc.
+    * each **tenant DB** holds every :class:`~app.models.base.TenantTable`
+      row for that tenant. There is no "default" or "shared" tenant DB.
 
-    The :func:`check_production_safety` guard inside
-    :func:`recreate_database` blocks the destructive path entirely when
-    ``settings.ENVIRONMENT == "production"``, so this default cannot be
-    used to nuke a production database by accident.
+    Accordingly, this entry point now initialises only the master
+    database. Tenant tables are created inside their own per-tenant
+    database via either the API tenant-registration flow or the
+    ``--provision-tenant`` / ``--init-tenant`` CLI options.
+
+    Default behaviour
+    -----------------
+    With no flags, ``python -m app.init_db`` performs a **schema-level**
+    destructive master reset that works on any PostgreSQL deployment
+    (including managed Postgres on Render / RDS / Cloud SQL / Neon /
+    Supabase, where the application user lacks superuser):
+
+      1. ``DROP SCHEMA public CASCADE; CREATE SCHEMA public;`` against
+         the master DB at ``MASTER_DATABASE_URL`` (e.g.
+         ``carepoint_hms_master``).
+      2. ``MasterBase.metadata.create_all`` rebuilds the 16 master
+         tables.
+      3. Seed the default subscription plans.
+      4. Seed the default SaaS Admin
+         (``superadmin@carepointhms.com`` / ``SuperAdmin123!``) when no
+         SaaS admin row exists.
+
+    Tenant tables are NEVER touched here. A tenant database is
+    provisioned automatically when ``TenantService.approve_registration``
+    runs at registration approval time; the script's
+    ``--init-tenant <url>`` and ``--provision-tenant <code>`` flags
+    exist only as edge-case escape hatches.
+
+    Variants
+    --------
+    * ``--no-recreate-master`` — preserve existing rows, run only
+      ``sync_master_schema`` to forward-migrate (add new tables /
+      columns / enum values).
+    * ``--recreate-master-database`` — ALSO drop and recreate the
+      physical PostgreSQL database (``DROP DATABASE`` / ``CREATE
+      DATABASE``). Requires superuser-equivalent privileges; not
+      available on most managed Postgres.
+
+    The destructive path is blocked automatically when
+    ``settings.ENVIRONMENT == "production"`` via
+    :func:`check_production_safety`.
+
+    Backwards-compat
+    ----------------
+    The old ``recreate_entire_database`` / ``drop_and_recreate_all_tables``
+    / ``create_default_admin`` arguments used to drop ``DATABASE_URL`` and
+    spray all 230+ tenant tables into it. That was wrong for a strict
+    per-tenant-DB layout. They are accepted here for call-site
+    compatibility but ignored with a warning.
     """
+    # Surface the old flags so anyone with stale wrapper scripts learns
+    # immediately that the behaviour changed. Only fire when the
+    # operator explicitly passed at least one of them — the dispatcher
+    # below no longer auto-forwards anything, so a bare invocation
+    # never trips this warning.
+    if recreate_entire_database or drop_and_recreate_all_tables or create_default_admin:
+        logger.warning(
+            "init_db: ignoring legacy flags (recreate_entire_database=%s, "
+            "drop_and_recreate_all_tables=%s, create_default_admin=%s). "
+            "Tenant tables only live in tenant databases — they are "
+            "auto-provisioned at tenant-registration approval. Use "
+            "--init-tenant <url> or --provision-tenant <code> only as an "
+            "escape hatch.",
+            recreate_entire_database,
+            drop_and_recreate_all_tables,
+            create_default_admin,
+        )
+
     if init_master:
-        run_master_initialization(recreate=recreate_master_database)
+        run_master_initialization(
+            recreate=recreate_master_database,
+            physical_recreate=physical_recreate_master_database,
+        )
+    else:
+        logger.info("init_master=False — skipping master DB initialization.")
 
-    if recreate_entire_database:
-        recreate_database(DATABASE_URL)
-
-    logger.info("Checking database connection...")
-    if not check_database_connection():
-        raise RuntimeError("Database connection failed. Please verify your DB settings.")
-
-    if drop_and_recreate_all_tables:
-        logger.info("Dropping existing tables...")
-        drop_tables(is_master=False)
-
-    logger.info("Creating database tables...")
-    create_tables(is_master=False)
-
-    logger.info("Seeding initial data...")
-    with db_session_scope() as db:
-        seed_all(db, create_default_admin=create_default_admin)
-
-    logger.info("Database reset and initialization completed successfully.")
+    logger.info(
+        "Master DB initialization complete. Tenant databases are "
+        "provisioned automatically when TenantService.approve_registration "
+        "runs at registration approval time."
+    )
 
 
 # =============================================================================
@@ -1118,31 +1245,74 @@ def parse_args() -> argparse.Namespace:
     # recreate, and reseed" reset most operators expect. Use the matching
     # ``--no-recreate-*`` flags to opt out (e.g. when running on a long-
     # lived dev DB that already has data you want to preserve).
+    # Legacy flags kept for backwards-compat. The default flow no longer
+    # touches DATABASE_URL — tenant tables only live in tenant DBs.
     parser.add_argument(
         "--recreate-db",
         dest="recreate_db",
         action="store_true",
-        default=True,
-        help="Drop and recreate the operational database itself (default).",
+        default=False,
+        help=(
+            "(Legacy / no-op) Used to drop the operational DATABASE_URL "
+            "DB. Tenant tables now only live in tenant DBs; ignored."
+        ),
     )
     parser.add_argument(
         "--no-recreate-db",
         dest="recreate_db",
         action="store_false",
-        help="Skip dropping the operational database.",
+        help="(Legacy / no-op) Ignored.",
     )
     parser.add_argument(
         "--recreate-master",
         dest="recreate_master",
         action="store_true",
         default=True,
-        help="Drop and recreate the master database itself (default).",
+        help=(
+            "Schema-level reset of the master DB (default): "
+            "DROP SCHEMA public CASCADE; CREATE SCHEMA public; followed "
+            "by MasterBase.metadata.create_all and re-seed of "
+            "subscription plans + the default SaaS admin "
+            "(superadmin@carepointhms.com / SuperAdmin123!). Works on "
+            "managed Postgres because it does not need superuser. "
+            "Blocked in production by check_production_safety."
+        ),
     )
     parser.add_argument(
         "--no-recreate-master",
         dest="recreate_master",
         action="store_false",
-        help="Skip dropping the master database.",
+        help=(
+            "Skip the destructive reset. Falls back to an idempotent "
+            "forward-migrate via sync_master_schema; existing rows "
+            "(including any SaaS admins) are preserved."
+        ),
+    )
+    parser.add_argument(
+        "--recreate-master-database",
+        dest="recreate_master_database",
+        action="store_true",
+        default=False,
+        help=(
+            "ALSO drop and recreate the master database at the "
+            "PostgreSQL level (DROP DATABASE / CREATE DATABASE). "
+            "Requires superuser-equivalent privileges; usually NOT "
+            "available on managed Postgres (Render/RDS/Cloud SQL/Neon/"
+            "Supabase). Reach for this only on bare-metal local PG."
+        ),
+    )
+    parser.add_argument(
+        "--init-tenant",
+        dest="init_tenant",
+        type=str,
+        help=(
+            "Initialise a single tenant database at the given SQLAlchemy "
+            "URL: forward-migrates the tenant schema, creates any missing "
+            "TenantTable tables, and seeds default roles/permissions/"
+            "departments/admin. Use this for dev tenants whose DB you "
+            "created out of band; for end-to-end tenant registration use "
+            "--provision-tenant instead."
+        ),
     )
     parser.add_argument(
         "--keep-existing-tables",
@@ -1279,14 +1449,35 @@ if __name__ == "__main__":
                 logger.info(f"Tenant {args.provision_tenant} provisioned successfully.")
 
         elif args.init_master_only:
-            run_master_initialization(recreate=args.recreate_master)
-        else:
-            run_initialization(
-                recreate_entire_database=args.recreate_db,
-                recreate_master_database=args.recreate_master,
-                drop_and_recreate_all_tables=not args.keep_existing_tables,
+            run_master_initialization(
+                recreate=args.recreate_master,
+                physical_recreate=args.recreate_master_database,
+            )
+
+        elif args.init_tenant:
+            # Initialise a single tenant DB at the given URL. The
+            # ``run_tenant_initialization`` helper runs ``sync_tenant_schema``
+            # (idempotent forward-migration) followed by
+            # ``create_tables(is_master=False)`` against that engine,
+            # then seeds the standard tenant defaults.
+            run_tenant_initialization(
+                args.init_tenant,
                 create_default_admin=not args.no_admin,
+            )
+
+        else:
+            # Only forward the legacy flags when the operator explicitly
+            # passed them; this keeps a bare ``python -m app.init_db``
+            # invocation quiet. ``--recreate-db`` is the only one that
+            # carries a clear "I asked for it" signal (default False).
+            # ``--keep-existing-tables`` and ``--no-admin`` are no-ops
+            # now and intentionally not forwarded so the warning fires
+            # only when somebody actually typed --recreate-db.
+            run_initialization(
+                recreate_master_database=args.recreate_master,
+                physical_recreate_master_database=args.recreate_master_database,
                 init_master=not args.no_master,
+                recreate_entire_database=args.recreate_db,
             )
     except SQLAlchemyError as exc:
         logger.error(f"Database operation failed: {exc}")
@@ -1299,6 +1490,44 @@ if __name__ == "__main__":
 """
 Usage
 -----
-python -m app.init_db --recreate-db
-python -m app.init_db
+
+Default — schema-level master reset that works on any PostgreSQL,
+including managed providers (Render / RDS / Cloud SQL / Neon /
+Supabase). DROP SCHEMA public CASCADE on the master DB, then
+MasterBase.metadata.create_all + seed plans + seed the default SaaS
+admin (superadmin@carepointhms.com / SuperAdmin123!):
+    python -m app.init_db
+
+Idempotent forward-migrate only (preserve existing rows, no drop):
+    python -m app.init_db --no-recreate-master
+
+Database-level reset of the master DB (DROP DATABASE / CREATE DATABASE).
+Requires superuser; not available on most managed Postgres. Stack with
+--recreate-master to also wipe the schema afterwards (default already
+enabled), or pair with --no-recreate-master if you only want the
+physical recreate:
+    python -m app.init_db --recreate-master-database
+
+Forward-migrate every active tenant DB (no data loss). Tenant DBs are
+auto-created at registration approval, but this is useful after a
+deploy that adds new TenantTable columns:
+    python -m app.init_db --sync-tenants
+
+Tenant escape hatches (rare). Tenant DBs are normally provisioned
+automatically when TenantService.approve_registration runs at
+registration approval time. Use these only for out-of-band scenarios:
+
+    # Apply tenant schema + seeds to a DB URL you created out of band:
+    python -m app.init_db --init-tenant \
+        postgresql+psycopg2://postgres:Admin123@localhost:5432/carepoint_hms_acme
+
+    # End-to-end registration via TenantService (writes master row,
+    # provisions the tenant DB, seeds defaults):
+    python -m app.init_db --provision-tenant ACME \
+        --tenant-name "Acme Hospital" \
+        --tenant-domain acme.example.com
+
+NOT supported anymore: dumping every TenantTable into the central
+DATABASE_URL DB. In Carepoint HMS, tenant tables live only in
+per-tenant databases.
 """
