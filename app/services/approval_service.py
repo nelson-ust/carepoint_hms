@@ -8,36 +8,52 @@ Two services exposed:
 
 * :class:`ApprovalFlowService` — admin CRUD over flow definitions.
 * :class:`ApprovalRequestService` — operator runtime: submit a request,
-  approve / reject / delegate a step, comment, query inboxes.
+  approve / reject / delegate / comment / cancel, plus admin-only
+  reopen / force-close, plus a scheduler-friendly sweep that expires
+  stale requests.
 
 Engine semantics
 ----------------
-1. ``submit()`` materialises an ``ApprovalRequest`` from a flow,
-   snapshots every step + approver target, resolves the eligible-user
-   set for each step, opens the first step (PENDING → IN_PROGRESS), and
-   records the submission timestamp.
-2. ``decide()`` records an :class:`~app.models.all_models.ApprovalDecision`
-   on the active step. The step's tally is updated and the
-   :func:`~app.utils.approval_utils.evaluate_step_outcome` rule decides
-   whether the step is APPROVED, REJECTED, or still IN_PROGRESS.
-3. When the active step becomes APPROVED the engine advances to the
-   next non-optional step. When it becomes REJECTED the whole request
-   is rejected.
-4. Subject-type finalization hooks (``_finalize_subject``) propagate the
-   final status onto the underlying domain row when one is linked
-   (LeaveRequest, StaffRequest, Timesheet, ...). Hook failures do not
-   roll the approval back; they are recorded in ``decision_summary``.
+1. ``submit()`` materialises an ``ApprovalRequest`` from a flow.
+   Every flow step is snapshotted onto an ``ApprovalRequestStep`` row
+   so the request's behaviour is frozen even if the flow is edited
+   later. Each step's optional ``condition`` JSON is evaluated against
+   the request payload; steps whose condition is False are immediately
+   marked SKIPPED. Eligible approvers are resolved per step via
+   :func:`~app.utils.approval_utils.resolve_step_approvers`.
+
+2. After the snapshot pass, the engine activates the first work unit:
+   either a single sequential step, or every step inside the lowest
+   ``parallel_group``. Active steps move PENDING → IN_PROGRESS.
+
+3. ``decide()`` records one approval/rejection/delegation against an
+   IN_PROGRESS step on which the caller is eligible. The step's tally
+   is updated and :func:`evaluate_step_outcome` decides whether the
+   step is APPROVED, REJECTED, or still IN_PROGRESS. A REJECT on any
+   step rejects the whole request.
+
+4. When a step becomes APPROVED the engine looks for the next work
+   unit. With parallel groups the request only advances past the
+   group when *every* member is APPROVED or SKIPPED.
+
+5. ``_finalize_subject`` propagates the terminal status onto the
+   linked domain row (LeaveRequest, StaffRequest, Timesheet,
+   OvertimeRecord). Hook failures do not roll the approval back;
+   they're recorded in ``decision_summary``.
+
+Audit
+-----
+Every recorded decision and lifecycle transition is also written to
+``StaffAuditLog`` for tenant-side audit reporting.
 
 Notifications
 -------------
-The service makes a best-effort call to
-:class:`~app.services.notification_service.NotificationService` when one
-can be imported. Notification failures never block the approval flow;
-they are swallowed and logged.
+Best-effort dispatch to :class:`NotificationService` when available.
+Notification errors never block the approval flow.
 """
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from sqlalchemy.orm import Session
@@ -48,7 +64,9 @@ from app.core.enums import (
     ApprovalRequestStepStatus,
     ApprovalSubjectType,
     LeaveStatus,
+    OvertimeStatus,
     StaffRequestStatus,
+    TimesheetStatus,
 )
 from app.core.exceptions import (
     BadRequestError,
@@ -60,8 +78,11 @@ from app.models.all_models import (
     ApprovalRequest,
     ApprovalRequestStep,
     LeaveRequest,
+    OvertimeRecord,
+    StaffAuditLog,
     StaffProfile,
     StaffRequest,
+    Timesheet,
     User,
 )
 from app.repositories.approval_repository import (
@@ -77,6 +98,7 @@ from app.schemas.approval_schemas import (
     ApprovalRequestCreateSchema,
 )
 from app.utils.approval_utils import (
+    evaluate_condition,
     evaluate_step_outcome,
     resolve_step_approvers,
     serialize_approver_specs,
@@ -171,7 +193,7 @@ class ApprovalFlowService:
 
 
 class ApprovalRequestService:
-    """Runtime engine: submit, decide, comment, list."""
+    """Runtime engine: submit, decide, comment, list, expire."""
 
     def __init__(self, db: Session) -> None:
         self.db = db
@@ -257,26 +279,133 @@ class ApprovalRequestService:
         )
         return staff, department_id, facility_id
 
-    def _open_step(
+    def _build_condition_context(
         self,
         request: ApprovalRequest,
-        request_step: ApprovalRequestStep,
+    ) -> dict[str, Any]:
+        """Context dict exposed to step ``condition`` expressions."""
+        return {
+            "payload": request.payload or {},
+            "request": {
+                "subject_type": str(request.subject_type),
+                "subject_id": request.subject_id,
+                "priority": request.priority,
+                "title": request.title,
+                "department_id": request.department_id,
+                "facility_id": request.facility_id,
+                "requester_user_id": request.requester_user_id,
+            },
+        }
+
+    def _is_runnable(self, step: ApprovalRequestStep) -> bool:
+        return step.status in (
+            ApprovalRequestStepStatus.PENDING,
+            ApprovalRequestStepStatus.IN_PROGRESS,
+        )
+
+    # ------------------------------------------------------------------
+    # Step activation (sequential + parallel-group aware)
+    # ------------------------------------------------------------------
+
+    def _activate_step(
+        self,
+        step: ApprovalRequestStep,
         *,
         actor_user_id: Optional[int] = None,
     ) -> ApprovalRequestStep:
-        request_step = self.request_repo.update_request_step(
-            request_step,
+        return self.request_repo.update_request_step(
+            step,
             actor_user_id=actor_user_id,
             status=ApprovalRequestStepStatus.IN_PROGRESS,
             started_at=datetime.now(timezone.utc),
         )
+
+    def _open_next_unit(
+        self,
+        request: ApprovalRequest,
+        *,
+        actor_user_id: Optional[int] = None,
+    ) -> Optional[list[ApprovalRequestStep]]:
+        """
+        Activate the next runnable work unit.
+
+        A "unit" is either a single PENDING step (sequential) or every
+        PENDING step that shares the lowest-ordered ``parallel_group``.
+        Optional steps with no eligible approvers are auto-SKIPPED in
+        place and the function recurses to find the next unit.
+
+        Returns the list of newly-activated steps, or None when the
+        request has no runnable steps left (caller should finalize).
+        """
+        steps = self.request_repo.get_steps(request.id)
+        # Find the lowest-order step that is still PENDING.
+        next_step: Optional[ApprovalRequestStep] = None
+        for step in steps:
+            if step.status == ApprovalRequestStepStatus.PENDING:
+                next_step = step
+                break
+
+        if next_step is None:
+            return None
+
+        # Skip optional steps with no eligible approvers and recurse.
+        if next_step.is_optional and not (next_step.eligible_user_ids or []):
+            self.request_repo.update_request_step(
+                next_step,
+                actor_user_id=actor_user_id,
+                status=ApprovalRequestStepStatus.SKIPPED,
+                completed_at=datetime.now(timezone.utc),
+            )
+            return self._open_next_unit(request, actor_user_id=actor_user_id)
+
+        if next_step.parallel_group:
+            unit = [
+                s for s in steps
+                if s.parallel_group == next_step.parallel_group
+                and s.status == ApprovalRequestStepStatus.PENDING
+            ]
+        else:
+            unit = [next_step]
+
+        opened: list[ApprovalRequestStep] = []
+        for s in unit:
+            opened.append(self._activate_step(s, actor_user_id=actor_user_id))
+
+        # Reflect the most recent activation on the request header.
+        first = sorted(opened, key=lambda s: s.step_order)[0]
         self.request_repo.update_request(
             request,
             actor_user_id=actor_user_id,
-            current_step_id=request_step.id,
+            current_step_id=first.id,
             status=ApprovalRequestStatus.IN_PROGRESS,
         )
-        return request_step
+        return opened
+
+    def _unit_is_complete(
+        self,
+        request_id: int,
+        completed_step: ApprovalRequestStep,
+    ) -> bool:
+        """Return True when the step's parallel-group is fully resolved."""
+        if not completed_step.parallel_group:
+            return True
+        siblings = (
+            self.db.query(ApprovalRequestStep)
+            .filter(
+                ApprovalRequestStep.request_id == request_id,
+                ApprovalRequestStep.parallel_group == completed_step.parallel_group,
+                ApprovalRequestStep.is_deleted.is_(False),
+            )
+            .all()
+        )
+        return all(
+            s.status
+            in (
+                ApprovalRequestStepStatus.APPROVED,
+                ApprovalRequestStepStatus.SKIPPED,
+            )
+            for s in siblings
+        )
 
     # ------------------------------------------------------------------
     # Submit
@@ -320,62 +449,96 @@ class ApprovalRequestService:
             actor_user_id=actor_user_id or requester_user_id,
         )
 
-        # Materialise per-request step rows with eligible-user snapshots.
-        warnings: list[str] = []
-        first_runtime_step: Optional[ApprovalRequestStep] = None
-        for flow_step in flow_steps:
-            approvers = self.flow_repo.get_step_approvers(flow_step.id)
-            eligible_user_ids = resolve_step_approvers(
-                self.db,
-                approvers=approvers,
-                requester_user_id=requester_user_id,
-                allow_self_approval=flow_step.allow_self_approval,
+        if flow.auto_cancel_after_hours:
+            self.request_repo.update_request(
+                request,
+                actor_user_id=actor_user_id or requester_user_id,
+                expires_at=datetime.now(timezone.utc)
+                + timedelta(hours=int(flow.auto_cancel_after_hours)),
             )
-            if not eligible_user_ids and not flow_step.is_optional:
-                warnings.append(
-                    f"Step '{flow_step.name}' (#{flow_step.step_order}) has no eligible approvers."
-                )
 
-            runtime_step = self.request_repo.create_request_step(
+        # Materialise per-request step rows. Each step is evaluated
+        # against the condition DSL — false-condition steps are
+        # snapshotted as SKIPPED so they're visible in audit but never
+        # block progress.
+        warnings: list[str] = []
+        condition_ctx = self._build_condition_context(request)
+
+        for flow_step in flow_steps:
+            condition_ok = evaluate_condition(flow_step.condition, condition_ctx)
+            initial_status = (
+                ApprovalRequestStepStatus.PENDING
+                if condition_ok
+                else ApprovalRequestStepStatus.SKIPPED
+            )
+
+            if condition_ok:
+                approvers = self.flow_repo.get_step_approvers(flow_step.id)
+                eligible_user_ids = resolve_step_approvers(
+                    self.db,
+                    approvers=approvers,
+                    requester_user_id=requester_user_id,
+                    allow_self_approval=flow_step.allow_self_approval,
+                )
+                if not eligible_user_ids and not flow_step.is_optional:
+                    warnings.append(
+                        f"Step '{flow_step.name}' (#{flow_step.step_order}) "
+                        "has no eligible approvers."
+                    )
+                approver_specs = serialize_approver_specs(approvers)
+            else:
+                # Snapshot what would have applied even when skipped, for audit.
+                approvers = self.flow_repo.get_step_approvers(flow_step.id)
+                eligible_user_ids = []
+                approver_specs = serialize_approver_specs(approvers)
+
+            self.request_repo.create_request_step(
                 request_id=request.id,
                 flow_step=flow_step,
                 eligible_user_ids=eligible_user_ids,
-                approver_specs=serialize_approver_specs(approvers),
+                approver_specs=approver_specs,
+                initial_status=initial_status,
                 actor_user_id=actor_user_id or requester_user_id,
             )
-            if first_runtime_step is None:
-                first_runtime_step = runtime_step
 
         if warnings:
-            request = self.request_repo.update_request(
+            self.request_repo.update_request(
                 request,
                 actor_user_id=actor_user_id or requester_user_id,
                 decision_summary="; ".join(warnings),
             )
 
         if payload.submit_now:
-            if first_runtime_step is None:
-                raise BadRequestError(
-                    message="Failed to materialise approval steps for this flow.",
-                    detail={"flow_id": flow.id},
-                )
             request = self.request_repo.update_request(
                 request,
                 actor_user_id=actor_user_id or requester_user_id,
                 status=ApprovalRequestStatus.PENDING,
                 submitted_at=datetime.now(timezone.utc),
             )
-            self._open_step(
-                request,
-                first_runtime_step,
-                actor_user_id=actor_user_id or requester_user_id,
+            opened = self._open_next_unit(
+                request, actor_user_id=actor_user_id or requester_user_id
             )
-            self._notify_safe(
-                "approval_submitted",
-                request=request,
-                step=first_runtime_step,
-            )
+            if opened is None:
+                # Every step was SKIPPED — the flow has nothing to ask
+                # for, so we approve straight away.
+                self._approve_request(
+                    request,
+                    actor_user_id=actor_user_id or requester_user_id,
+                )
+            else:
+                for s in opened:
+                    self._notify_safe(
+                        "approval_step_opened", request=request, step=s
+                    )
+                self._notify_safe(
+                    "approval_submitted", request=request, step=opened[0]
+                )
 
+        self._audit(
+            "approval.submit",
+            request=request,
+            actor_user_id=actor_user_id or requester_user_id,
+        )
         self.db.commit()
         return self.request_repo.get_required_by_id(request.id)
 
@@ -401,22 +564,56 @@ class ApprovalRequestService:
                 detail={"request_id": request_id, "status": str(request.status)},
             )
 
-        active_step = self.request_repo.get_active_step(request_id)
-        if not active_step:
+        active_steps = self.request_repo.get_active_steps(request_id)
+        if not active_steps:
             raise BadRequestError(
                 message="No active step is open for decisioning.",
                 detail={"request_id": request_id},
             )
 
-        eligible = active_step.eligible_user_ids or []
-        if decider_user_id not in eligible:
+        # Resolve which step the caller is acting on. With parallel
+        # groups multiple steps may be active for the same user; require
+        # an explicit step_id when ambiguous.
+        candidate_steps = [
+            s for s in active_steps
+            if decider_user_id in (s.eligible_user_ids or [])
+        ]
+        if not candidate_steps:
             raise ForbiddenError(
-                message="You are not an eligible approver for this step.",
-                detail={
-                    "request_id": request_id,
-                    "step_id": active_step.id,
-                },
+                message="You are not an eligible approver for any active step on this request.",
+                detail={"request_id": request_id},
             )
+
+        if payload.step_id:
+            target = next(
+                (s for s in candidate_steps if s.id == payload.step_id),
+                None,
+            )
+            if not target:
+                raise BadRequestError(
+                    message=(
+                        "The provided step_id is not active or you are "
+                        "not eligible to decide on it."
+                    ),
+                    detail={
+                        "request_id": request_id,
+                        "step_id": payload.step_id,
+                    },
+                )
+            active_step = target
+        else:
+            if len(candidate_steps) > 1:
+                raise BadRequestError(
+                    message=(
+                        "Multiple active steps are available to you on "
+                        "this request. Provide step_id to disambiguate."
+                    ),
+                    detail={
+                        "request_id": request_id,
+                        "candidate_step_ids": [s.id for s in candidate_steps],
+                    },
+                )
+            active_step = candidate_steps[0]
 
         if self.request_repo.has_user_decided(
             step_id=active_step.id, user_id=decider_user_id
@@ -451,6 +648,15 @@ class ApprovalRequestService:
                 active_step,
                 actor_user_id=actor_user_id or decider_user_id,
                 eligible_user_ids=new_eligible,
+            )
+            self._audit(
+                "approval.delegate",
+                request=request,
+                actor_user_id=actor_user_id or decider_user_id,
+                payload={
+                    "step_id": active_step.id,
+                    "delegated_to_user_id": payload.delegated_to_user_id,
+                },
             )
             self.db.commit()
             return decision, self.request_repo.get_required_by_id(request_id)
@@ -489,9 +695,27 @@ class ApprovalRequestService:
                 status=ApprovalRequestStepStatus.APPROVED,
                 completed_at=datetime.now(timezone.utc),
             )
-            self._advance_or_finalize(
-                request, active_step, actor_user_id=actor_user_id or decider_user_id
+            self._audit(
+                "approval.step_approved",
+                request=request,
+                actor_user_id=actor_user_id or decider_user_id,
+                payload={"step_id": active_step.id},
             )
+            if self._unit_is_complete(request_id, active_step):
+                opened = self._open_next_unit(
+                    request,
+                    actor_user_id=actor_user_id or decider_user_id,
+                )
+                if opened is None:
+                    self._approve_request(
+                        request,
+                        actor_user_id=actor_user_id or decider_user_id,
+                    )
+                else:
+                    for s in opened:
+                        self._notify_safe(
+                            "approval_step_opened", request=request, step=s
+                        )
         elif outcome == ApprovalRequestStepStatus.REJECTED:
             active_step = self.request_repo.update_request_step(
                 active_step,
@@ -499,55 +723,21 @@ class ApprovalRequestService:
                 status=ApprovalRequestStepStatus.REJECTED,
                 completed_at=datetime.now(timezone.utc),
             )
+            self._audit(
+                "approval.step_rejected",
+                request=request,
+                actor_user_id=actor_user_id or decider_user_id,
+                payload={"step_id": active_step.id, "comment": payload.comment},
+            )
             self._reject_request(
                 request,
                 actor_user_id=actor_user_id or decider_user_id,
                 reason=payload.comment,
             )
-        # Otherwise the step stays IN_PROGRESS waiting for more approvers.
+        # else step stays IN_PROGRESS waiting for more approvers.
 
         self.db.commit()
         return decision, self.request_repo.get_required_by_id(request_id)
-
-    def _advance_or_finalize(
-        self,
-        request: ApprovalRequest,
-        completed_step: ApprovalRequestStep,
-        *,
-        actor_user_id: Optional[int] = None,
-    ) -> None:
-        # Find the next non-skipped step in step_order.
-        steps = self.request_repo.get_steps(request.id)
-        next_step: Optional[ApprovalRequestStep] = None
-        for step in steps:
-            if step.step_order <= completed_step.step_order:
-                continue
-            if step.status == ApprovalRequestStepStatus.SKIPPED:
-                continue
-            next_step = step
-            break
-
-        if next_step is None:
-            self._approve_request(request, actor_user_id=actor_user_id)
-            return
-
-        # Skip optional steps that have no eligible approvers.
-        if next_step.is_optional and not (next_step.eligible_user_ids or []):
-            self.request_repo.update_request_step(
-                next_step,
-                actor_user_id=actor_user_id,
-                status=ApprovalRequestStepStatus.SKIPPED,
-                completed_at=datetime.now(timezone.utc),
-            )
-            self._advance_or_finalize(
-                request, next_step, actor_user_id=actor_user_id
-            )
-            return
-
-        self._open_step(request, next_step, actor_user_id=actor_user_id)
-        self._notify_safe(
-            "approval_step_opened", request=request, step=next_step
-        )
 
     def _approve_request(
         self,
@@ -574,6 +764,11 @@ class ApprovalRequestService:
                     + warning
                 ),
             )
+        self._audit(
+            "approval.approved",
+            request=request,
+            actor_user_id=actor_user_id,
+        )
         self._notify_safe("approval_finalized", request=request)
 
     def _reject_request(
@@ -603,6 +798,12 @@ class ApprovalRequestService:
                     + warning
                 ),
             )
+        self._audit(
+            "approval.rejected",
+            request=request,
+            actor_user_id=actor_user_id,
+            payload={"reason": reason},
+        )
         self._notify_safe("approval_finalized", request=request)
 
     # ------------------------------------------------------------------
@@ -615,15 +816,13 @@ class ApprovalRequestService:
         *,
         final: ApprovalRequestStatus,
     ) -> Optional[str]:
-        """
-        Propagate the approval outcome onto the linked domain row.
-
-        Returns a warning string when finalization couldn't be applied
-        (e.g. the linked row is missing); ``None`` on success or when
-        no subject is linked.
-        """
+        """Propagate the approval outcome onto the linked domain row."""
         if not request.subject_id:
             return None
+
+        approved = final == ApprovalRequestStatus.APPROVED
+        actor = request.updated_by_id
+        now = datetime.now(timezone.utc)
 
         try:
             if request.subject_type == ApprovalSubjectType.LEAVE_REQUEST:
@@ -634,13 +833,9 @@ class ApprovalRequestService:
                 )
                 if not row:
                     return f"LeaveRequest #{request.subject_id} not found for finalization."
-                row.status = (
-                    LeaveStatus.APPROVED
-                    if final == ApprovalRequestStatus.APPROVED
-                    else LeaveStatus.REJECTED
-                )
-                row.decided_at = datetime.now(timezone.utc)
-                row.decided_by_user_id = request.updated_by_id
+                row.status = LeaveStatus.APPROVED if approved else LeaveStatus.REJECTED
+                row.decided_at = now
+                row.decided_by_user_id = actor
                 self.db.add(row)
                 return None
 
@@ -653,19 +848,49 @@ class ApprovalRequestService:
                 if not row:
                     return f"StaffRequest #{request.subject_id} not found for finalization."
                 row.status = (
-                    StaffRequestStatus.APPROVED
-                    if final == ApprovalRequestStatus.APPROVED
-                    else StaffRequestStatus.REJECTED
+                    StaffRequestStatus.APPROVED if approved else StaffRequestStatus.REJECTED
                 )
-                row.decided_at = datetime.now(timezone.utc)
-                row.decided_by_user_id = request.updated_by_id
+                row.decided_at = now
+                row.decided_by_user_id = actor
                 self.db.add(row)
                 return None
 
-            # TIMESHEET / REIMBURSEMENT / OVERTIME / SALARY_ADVANCE /
-            # PROCUREMENT subjects: leave the hook open for module-owners
-            # to extend. We don't auto-update those tables here because
-            # their schema varies and we don't want to dictate behavior.
+            if request.subject_type == ApprovalSubjectType.OVERTIME:
+                row = (
+                    self.db.query(OvertimeRecord)
+                    .filter(OvertimeRecord.id == request.subject_id)
+                    .first()
+                )
+                if not row:
+                    return f"OvertimeRecord #{request.subject_id} not found for finalization."
+                row.status = (
+                    OvertimeStatus.APPROVED if approved else OvertimeStatus.REJECTED
+                )
+                row.approved_at = now if approved else None
+                row.approved_by_user_id = actor if approved else None
+                self.db.add(row)
+                return None
+
+            if request.subject_type == ApprovalSubjectType.TIMESHEET:
+                row = (
+                    self.db.query(Timesheet)
+                    .filter(Timesheet.id == request.subject_id)
+                    .first()
+                )
+                if not row:
+                    return f"Timesheet #{request.subject_id} not found for finalization."
+                row.status = (
+                    TimesheetStatus.APPROVED if approved else TimesheetStatus.REJECTED
+                )
+                row.approved_at = now if approved else None
+                row.approved_by_user_id = actor if approved else None
+                self.db.add(row)
+                return None
+
+            # REIMBURSEMENT / SALARY_ADVANCE / PROCUREMENT / GENERIC: no
+            # backing tables in the codebase yet. Module owners can wire
+            # finalization here when those models land — the ApprovalRequest
+            # row already carries subject_id + payload for them to read.
             return None
         except Exception as exc:  # pragma: no cover - defensive
             logger.exception(
@@ -727,8 +952,112 @@ class ApprovalRequestService:
             current_step_id=None,
             decision_summary=reason or "Cancelled by requester.",
         )
+        self._audit(
+            "approval.cancelled",
+            request=request,
+            actor_user_id=actor_user_id,
+            payload={"reason": reason},
+        )
         self.db.commit()
         self._notify_safe("approval_cancelled", request=request)
+        return self.request_repo.get_required_by_id(request_id)
+
+    def admin_force_close(
+        self,
+        request_id: int,
+        *,
+        actor_user_id: int,
+        approve: bool,
+        reason: Optional[str] = None,
+    ) -> ApprovalRequest:
+        """Admin override: mark a request APPROVED or REJECTED outright."""
+        request = self.request_repo.get_required_by_id(request_id)
+        if request.status in (
+            ApprovalRequestStatus.APPROVED,
+            ApprovalRequestStatus.REJECTED,
+            ApprovalRequestStatus.CANCELLED,
+        ):
+            raise BadRequestError(
+                message="This request is already in a terminal state.",
+                detail={"status": str(request.status)},
+            )
+
+        # Close every still-active step so audit reflects the override.
+        for step in self.request_repo.get_active_steps(request_id):
+            self.request_repo.update_request_step(
+                step,
+                actor_user_id=actor_user_id,
+                status=(
+                    ApprovalRequestStepStatus.APPROVED
+                    if approve
+                    else ApprovalRequestStepStatus.REJECTED
+                ),
+                completed_at=datetime.now(timezone.utc),
+            )
+
+        if approve:
+            self._approve_request(request, actor_user_id=actor_user_id)
+        else:
+            self._reject_request(
+                request, actor_user_id=actor_user_id, reason=reason
+            )
+        self._audit(
+            "approval.admin_force_close",
+            request=request,
+            actor_user_id=actor_user_id,
+            payload={"approve": approve, "reason": reason},
+        )
+        self.db.commit()
+        return self.request_repo.get_required_by_id(request_id)
+
+    def admin_reopen_step(
+        self,
+        request_id: int,
+        step_id: int,
+        *,
+        actor_user_id: int,
+    ) -> ApprovalRequest:
+        """Admin override: re-open a previously closed step on an in-flight request."""
+        request = self.request_repo.get_required_by_id(request_id)
+        step = self.request_repo.get_step_required(step_id)
+        if step.request_id != request_id:
+            raise BadRequestError(
+                message="Step does not belong to this request.",
+                detail={"request_id": request_id, "step_id": step_id},
+            )
+        if request.status in (
+            ApprovalRequestStatus.APPROVED,
+            ApprovalRequestStatus.REJECTED,
+            ApprovalRequestStatus.CANCELLED,
+        ):
+            raise BadRequestError(
+                message="Cannot reopen a step on a finalized request.",
+                detail={"status": str(request.status)},
+            )
+
+        # Reset the step. Existing decisions stay for audit; counters reset.
+        self.request_repo.update_request_step(
+            step,
+            actor_user_id=actor_user_id,
+            status=ApprovalRequestStepStatus.IN_PROGRESS,
+            started_at=datetime.now(timezone.utc),
+            completed_at=None,
+            approvals_received=0,
+            rejections_received=0,
+        )
+        self.request_repo.update_request(
+            request,
+            actor_user_id=actor_user_id,
+            current_step_id=step.id,
+            status=ApprovalRequestStatus.IN_PROGRESS,
+        )
+        self._audit(
+            "approval.step_reopened",
+            request=request,
+            actor_user_id=actor_user_id,
+            payload={"step_id": step.id},
+        )
+        self.db.commit()
         return self.request_repo.get_required_by_id(request_id)
 
     def get(self, request_id: int) -> ApprovalRequest:
@@ -771,8 +1100,103 @@ class ApprovalRequestService:
         )
 
     # ------------------------------------------------------------------
-    # Notification fan-out
+    # Scheduler entry point
     # ------------------------------------------------------------------
+
+    def expire_stale_requests(self, *, batch_limit: int = 200) -> int:
+        """
+        Auto-cancel in-flight requests whose ``expires_at`` has passed.
+
+        Wired into the per-tenant scheduler tick. Returns the number of
+        requests transitioned to EXPIRED.
+        """
+        now = datetime.now(timezone.utc)
+        candidates = (
+            self.db.query(ApprovalRequest)
+            .filter(
+                ApprovalRequest.is_deleted.is_(False),
+                ApprovalRequest.status.in_(
+                    [
+                        ApprovalRequestStatus.PENDING,
+                        ApprovalRequestStatus.IN_PROGRESS,
+                    ]
+                ),
+                ApprovalRequest.expires_at.is_not(None),
+                ApprovalRequest.expires_at <= now,
+            )
+            .order_by(ApprovalRequest.expires_at.asc())
+            .limit(batch_limit)
+            .all()
+        )
+        if not candidates:
+            return 0
+
+        transitioned = 0
+        for request in candidates:
+            try:
+                # Close any still-active steps without recording decisions.
+                for step in self.request_repo.get_active_steps(request.id):
+                    self.request_repo.update_request_step(
+                        step,
+                        status=ApprovalRequestStepStatus.SKIPPED,
+                        completed_at=now,
+                    )
+                self.request_repo.update_request(
+                    request,
+                    status=ApprovalRequestStatus.EXPIRED,
+                    completed_at=now,
+                    current_step_id=None,
+                    decision_summary=(
+                        (request.decision_summary + "; " if request.decision_summary else "")
+                        + "Auto-expired due to SLA breach."
+                    ),
+                )
+                self._audit("approval.expired", request=request)
+                self._notify_safe("approval_expired", request=request)
+                transitioned += 1
+            except Exception:  # pragma: no cover - defensive
+                logger.exception(
+                    "Failed to auto-expire approval request id=%s", request.id
+                )
+
+        if transitioned:
+            self.db.commit()
+        return transitioned
+
+    # ------------------------------------------------------------------
+    # Audit + notification fan-out
+    # ------------------------------------------------------------------
+
+    def _audit(
+        self,
+        action: str,
+        *,
+        request: ApprovalRequest,
+        actor_user_id: Optional[int] = None,
+        payload: Optional[dict[str, Any]] = None,
+    ) -> None:
+        try:
+            self.db.add(
+                StaffAuditLog(
+                    actor_user_id=actor_user_id,
+                    entity="approval_request",
+                    entity_id=request.id,
+                    action=action[:20],
+                    after_data={
+                        "request_id": request.id,
+                        "status": str(request.status),
+                        "subject_type": str(request.subject_type),
+                        "subject_id": request.subject_id,
+                        "extra": payload or {},
+                    },
+                    occurred_at=datetime.now(timezone.utc),
+                )
+            )
+            self.db.flush()
+        except Exception:
+            logger.debug(
+                "StaffAuditLog write failed for action=%s", action, exc_info=True
+            )
 
     def _notify_safe(self, event: str, **kwargs: Any) -> None:
         """Best-effort notification dispatch. Never raises."""
@@ -791,11 +1215,10 @@ class ApprovalRequestService:
                 "approval_step_opened": "APPROVAL_STEP_OPENED",
                 "approval_finalized": "APPROVAL_FINALIZED",
                 "approval_cancelled": "APPROVAL_CANCELLED",
+                "approval_expired": "APPROVAL_EXPIRED",
             }.get(event)
             if not template_code:
                 return
-            # NotificationService.dispatch_by_code is the convention used
-            # elsewhere; gracefully no-op when the template isn't seeded.
             dispatch = getattr(ns, "dispatch_by_code", None)
             if not callable(dispatch):
                 return

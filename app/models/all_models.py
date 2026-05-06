@@ -30,7 +30,7 @@ Design Notes
 5. Relationships are designed to support gradual expansion of repositories/services.
 """
 
-from datetime import date, datetime
+from datetime import date, datetime, time
 from decimal import Decimal
 from typing import Optional
 
@@ -47,6 +47,7 @@ from sqlalchemy import (
     Numeric,
     String,
     Text,
+    Time,
     UniqueConstraint,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -128,6 +129,7 @@ from app.core.enums import (
     QuotationStatus,
     RadiologyExamStatus,
     RadiologyModality,
+    ReimbursementStatus,
     RadiologyOrderStatus,
     RadiologyReportStatus,
     ReferralPriority,
@@ -195,6 +197,7 @@ from app.core.enums import (
     PayrollLineStatus,
     OvertimeStatus,
     StaffLoanStatus,
+    SalaryAdvanceStatus,
     AppraisalStatus,
     StaffDocumentCategory,
     LicenseStatus,
@@ -206,6 +209,8 @@ from app.core.enums import (
     StaffTaskPriority,
     HolidayScope,
     TrainingStatus,
+    OnboardingInvitationStatus,
+    OnboardingDocumentType,
 )
 
 
@@ -4199,6 +4204,9 @@ class PurchaseRequisition(TenantTable):
     justification: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     estimated_total: Mapped[Optional[Decimal]] = mapped_column(Numeric(16, 2), nullable=True)
     submitted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    
+    # Link to approval engine
+    approval_request_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
 
     items: Mapped[list["PurchaseRequisitionItem"]] = relationship(
         back_populates="requisition", cascade="all, delete-orphan"
@@ -6567,6 +6575,22 @@ class StaffLicense(TenantTable):
     notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
 
+class StaffEmergencyContact(TenantTable):
+    """Emergency contact information for a staff member."""
+
+    __tablename__ = "staff_emergency_contact"
+
+    staff_profile_id: Mapped[int] = mapped_column(
+        ForeignKey("staff_profile.id"), nullable=False, index=True
+    )
+    full_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    relationship: Mapped[str] = mapped_column(String(100), nullable=False)
+    phone_number: Mapped[str] = mapped_column(String(40), nullable=False)
+    email: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    address: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    is_primary: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
 class StaffStatusHistory(TenantTable):
     """Audit row for every employment-status transition."""
 
@@ -6756,6 +6780,8 @@ class Timesheet(TenantTable):
     approved_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     locked_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    entries: Mapped[list["TimesheetEntry"]] = relationship(back_populates="timesheet", cascade="all, delete-orphan")
+
 
 
 class TimesheetEntry(TenantTable):
@@ -6774,6 +6800,8 @@ class TimesheetEntry(TenantTable):
     holiday_hours: Mapped[Decimal] = mapped_column(Numeric(6, 2), default=0)
     is_absent: Mapped[bool] = mapped_column(Boolean, default=False)
     note: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    timesheet: Mapped["Timesheet"] = relationship(back_populates="entries")
+
 
 
 # ============================================================
@@ -6839,6 +6867,9 @@ class LeaveRequest(TenantTable):
         Enum(LeaveStatus), default=LeaveStatus.DRAFT, nullable=False, index=True
     )
     submitted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    
+    # Link to approval engine
+    approval_request_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
     decided_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     decided_by_user_id: Mapped[Optional[int]] = mapped_column(ForeignKey("user.id"), nullable=True)
     decision_note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
@@ -6846,6 +6877,31 @@ class LeaveRequest(TenantTable):
     cover_staff_id: Mapped[Optional[int]] = mapped_column(
         ForeignKey("staff_profile.id"), nullable=True
     )
+
+
+class ReimbursementRequest(TenantTable):
+    """Reimbursement request workflow row."""
+
+    __tablename__ = "reimbursement_request"
+
+    staff_profile_id: Mapped[int] = mapped_column(
+        ForeignKey("staff_profile.id"), nullable=False, index=True
+    )
+    expense_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    amount: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    category: Mapped[str] = mapped_column(String(100), nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    receipt_url: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    status: Mapped[ReimbursementStatus] = mapped_column(
+        Enum(ReimbursementStatus), default=ReimbursementStatus.DRAFT, nullable=False, index=True
+    )
+    submitted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    
+    # Link to approval engine
+    approval_request_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    decided_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    decided_by_user_id: Mapped[Optional[int]] = mapped_column(ForeignKey("user.id"), nullable=True)
+    decision_note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
 
 class PublicHoliday(TenantTable):
@@ -7071,6 +7127,31 @@ class StaffLoanRepayment(TenantTable):
     amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
     balance_after: Mapped[Decimal] = mapped_column(Numeric(14, 2), default=0)
     note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+
+class SalaryAdvance(TenantTable):
+    """Staff request for an early payout of their earned salary."""
+
+    __tablename__ = "salary_advance"
+
+    staff_profile_id: Mapped[int] = mapped_column(
+        ForeignKey("staff_profile.id"), nullable=False, index=True
+    )
+    amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    repayment_month: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    status: Mapped[SalaryAdvanceStatus] = mapped_column(
+        Enum(SalaryAdvanceStatus), default=SalaryAdvanceStatus.DRAFT, nullable=False, index=True
+    )
+    submitted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    approved_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    paid_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    staff_profile: Mapped["StaffProfile"] = relationship()
+    
+    # Link to approval engine (optional but helpful back-reference)
+    approval_request_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+
 
 
 class StatutoryDeductionConfig(TenantTable):
@@ -7378,6 +7459,11 @@ class ApprovalFlow(TenantTable):
         Index("ix_approval_flow_subject_default", "subject_type", "is_default"),
     )
 
+    steps: Mapped[list["ApprovalFlowStep"]] = relationship(
+        back_populates="flow", cascade="all, delete-orphan", order_by="ApprovalFlowStep.step_order"
+    )
+    requests: Mapped[list["ApprovalRequest"]] = relationship(back_populates="flow")
+
 
 class ApprovalFlowStep(TenantTable):
     """
@@ -7407,8 +7493,26 @@ class ApprovalFlowStep(TenantTable):
     sla_hours: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     is_optional: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
+    # Optional condition expression evaluated against the request payload
+    # at submit time. If the condition is False the step is auto-SKIPPED
+    # for that request. Format: {"field": "amount", "op": "gt",
+    # "value": 1000} or composite {"all": [...]} / {"any": [...]} /
+    # {"not": {...}}. See app.utils.approval_utils.evaluate_condition.
+    condition: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+
+    # Steps sharing the same parallel_group activate simultaneously; the
+    # group is treated as a single advancement boundary (the engine only
+    # advances past the group when every member is APPROVED or SKIPPED).
+    # NULL means "sequential, no group".
+    parallel_group: Mapped[Optional[str]] = mapped_column(String(60), nullable=True, index=True)
+
     __table_args__ = (
         UniqueConstraint("flow_id", "step_order", name="uq_approval_step_order"),
+    )
+
+    flow: Mapped["ApprovalFlow"] = relationship(back_populates="steps")
+    approvers: Mapped[list["ApprovalFlowStepApprover"]] = relationship(
+        back_populates="step", cascade="all, delete-orphan"
     )
 
 
@@ -7447,6 +7551,8 @@ class ApprovalFlowStepApprover(TenantTable):
     # For ALL_OF / N_OF_M semantics: rows where is_required=True must approve.
     is_required: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    step: Mapped["ApprovalFlowStep"] = relationship(back_populates="approvers")
 
 
 class ApprovalRequest(TenantTable):
@@ -7523,6 +7629,21 @@ class ApprovalRequest(TenantTable):
         ),
     )
 
+    flow: Mapped["ApprovalFlow"] = relationship(back_populates="requests")
+    steps: Mapped[list["ApprovalRequestStep"]] = relationship(
+        back_populates="request", 
+        cascade="all, delete-orphan", 
+        order_by="ApprovalRequestStep.step_order",
+        foreign_keys="[ApprovalRequestStep.request_id]"
+    )
+    comments: Mapped[list["ApprovalComment"]] = relationship(
+        back_populates="request", cascade="all, delete-orphan"
+    )
+    
+    current_step: Mapped[Optional["ApprovalRequestStep"]] = relationship(
+        foreign_keys=[current_step_id], post_update=True
+    )
+
 
 class ApprovalRequestStep(TenantTable):
     """
@@ -7550,6 +7671,10 @@ class ApprovalRequestStep(TenantTable):
     )
     required_approvals: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     is_optional: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    # Snapshotted from ApprovalFlowStep at submit time so editing the
+    # flow definition later doesn't change live request behaviour.
+    parallel_group: Mapped[Optional[str]] = mapped_column(String(60), nullable=True, index=True)
+    condition_snapshot: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
 
     # Snapshot of the eligible approver user ids resolved at step start.
     eligible_user_ids: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
@@ -7579,6 +7704,15 @@ class ApprovalRequestStep(TenantTable):
         ),
     )
 
+    request: Mapped["ApprovalRequest"] = relationship(
+        back_populates="steps",
+        foreign_keys=[request_id]
+    )
+    flow_step: Mapped["ApprovalFlowStep"] = relationship()
+    decisions: Mapped[list["ApprovalDecision"]] = relationship(
+        back_populates="request_step", cascade="all, delete-orphan"
+    )
+
 
 class ApprovalDecision(TenantTable):
     """One approve/reject/delegate action recorded against a request step."""
@@ -7605,6 +7739,9 @@ class ApprovalDecision(TenantTable):
         DateTime(timezone=True), default=utc_now, nullable=False
     )
 
+    request: Mapped["ApprovalRequest"] = relationship()
+    request_step: Mapped["ApprovalRequestStep"] = relationship(back_populates="decisions")
+
 
 class ApprovalComment(TenantTable):
     """Free-form comment thread attached to an approval request."""
@@ -7620,4 +7757,298 @@ class ApprovalComment(TenantTable):
     body: Mapped[str] = mapped_column(Text, nullable=False)
     posted_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, nullable=False
+    )
+
+    request: Mapped["ApprovalRequest"] = relationship(back_populates="comments")
+
+
+# =============================================================================
+# Staff Shift Management
+# =============================================================================
+
+class ShiftDefinition(TenantTable):
+    """
+    Reusable shift template owned by a department.
+
+    Each department head creates definitions (e.g. "Morning Shift 07:00–15:00")
+    that are then assigned to staff members.
+    """
+
+    __tablename__ = "shift_definition"
+
+    department_id: Mapped[int] = mapped_column(
+        ForeignKey("department.id"), nullable=False, index=True
+    )
+    name: Mapped[str] = mapped_column(String(150), nullable=False)
+    code: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    shift_type: Mapped[StaffShiftType] = mapped_column(
+        Enum(StaffShiftType), nullable=False, index=True
+    )
+    start_time: Mapped[time] = mapped_column(Time, nullable=False)
+    end_time: Mapped[time] = mapped_column(Time, nullable=False)
+    break_duration_minutes: Mapped[int] = mapped_column(
+        Integer, default=0, nullable=False
+    )
+    color_hex: Mapped[Optional[str]] = mapped_column(String(7), nullable=True)
+    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    # relationships
+    department: Mapped["Department"] = relationship()
+
+
+class StaffShiftAssignment(TenantTable):
+    """
+    Assigns a staff member to a specific shift definition on a specific date.
+    """
+
+    __tablename__ = "staff_shift_assignment"
+
+    staff_profile_id: Mapped[int] = mapped_column(
+        ForeignKey("staff_profile.id"), nullable=False, index=True
+    )
+    shift_definition_id: Mapped[int] = mapped_column(
+        ForeignKey("shift_definition.id"), nullable=False, index=True
+    )
+    shift_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    status: Mapped[ShiftStatus] = mapped_column(
+        Enum(ShiftStatus), default=ShiftStatus.SCHEDULED, nullable=False, index=True
+    )
+    check_in_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    check_out_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    assigned_by_user_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("user.id"), nullable=True
+    )
+
+    # relationships
+    staff_profile: Mapped["StaffProfile"] = relationship()
+    shift_definition: Mapped["ShiftDefinition"] = relationship()
+
+
+class ShiftSwapRequest(TenantTable):
+    """
+    A request from one staff member to swap a shift assignment with another.
+    """
+
+    __tablename__ = "shift_swap_request"
+
+    requester_assignment_id: Mapped[int] = mapped_column(
+        ForeignKey("staff_shift_assignment.id"), nullable=False, index=True
+    )
+    target_assignment_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("staff_shift_assignment.id"), nullable=True, index=True
+    )
+    target_staff_id: Mapped[int] = mapped_column(
+        ForeignKey("staff_profile.id"), nullable=False, index=True
+    )
+    reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(
+        String(20), default="PENDING", nullable=False, index=True
+    )
+    decided_by_user_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("user.id"), nullable=True
+    )
+    decided_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    # relationships
+    requester_assignment: Mapped["StaffShiftAssignment"] = relationship(
+        foreign_keys=[requester_assignment_id]
+    )
+    target_staff: Mapped["StaffProfile"] = relationship()
+
+
+# ============================================================
+# STAFF ONBOARDING INVITATIONS
+# ============================================================
+
+
+class StaffOnboardingInvitation(TenantTable):
+    """
+    HR-issued onboarding invitation for a post-interview candidate.
+
+    Lifecycle
+    ---------
+    1. HR creates the record in DRAFT status with the candidate's personal
+       email, phone number, and basic demographic data.
+    2. HR clicks "Send Link" → the status moves to PENDING and a unique,
+       time-limited token is generated and emailed to the candidate.
+    3. The candidate clicks the link in the email → status can transition
+       to IN_PROGRESS while they complete the form (optional front-end step).
+    4. The candidate submits all required data and uploads their documents
+       → status moves to COMPLETED and the linked StaffProfile.onboarding_completed
+       flag is set to True.
+    5. HR can CANCEL a PENDING/DRAFT invitation at any time (e.g., candidate
+       withdrew).  If a PENDING token passes its expiry, a background sweep
+       marks it EXPIRED.
+    6. HR can RESENT a PENDING or EXPIRED invitation; a new token is issued and
+       the old one is invalidated.
+
+    Security
+    --------
+    The raw token is never persisted — only its SHA-256 hash is stored
+    (``token_hash``).  The plain token is returned exactly once (at issue or
+    re-issue time) so the caller can embed it in the invitation email URL.
+
+    Relationships
+    -------------
+    * A ``StaffOnboardingInvitation`` is linked to a ``StaffProfile`` (created
+      by HR at the time the invitation is drafted) so that the candidate's
+      record exists before they complete onboarding.
+    * Uploaded documents are linked via ``StaffOnboardingDocument``.
+    """
+
+    __tablename__ = "staff_onboarding_invitation"
+
+    # ── Core identity ────────────────────────────────────────────────────
+    staff_profile_id: Mapped[int] = mapped_column(
+        ForeignKey("staff_profile.id"), nullable=False, unique=True, index=True,
+        comment="The pre-created staff profile this invitation is for.",
+    )
+
+    # ── Candidate contact (pre-populated by HR) ──────────────────────────
+    candidate_email: Mapped[str] = mapped_column(
+        String(255), nullable=False, index=True,
+        comment="Personal email address where the invitation link is sent.",
+    )
+    candidate_phone: Mapped[Optional[str]] = mapped_column(
+        String(40), nullable=True,
+        comment="Mobile number for SMS fallback delivery.",
+    )
+
+    # ── Token management ─────────────────────────────────────────────────
+    token_hash: Mapped[Optional[str]] = mapped_column(
+        String(128), nullable=True, index=True, unique=True,
+        comment="SHA-256 hash of the raw invitation token. NULL when status=DRAFT.",
+    )
+    expires_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+        comment="UTC timestamp after which the token is invalid.",
+    )
+
+    # ── Lifecycle ────────────────────────────────────────────────────────
+    status: Mapped[OnboardingInvitationStatus] = mapped_column(
+        Enum(OnboardingInvitationStatus),
+        default=OnboardingInvitationStatus.DRAFT,
+        nullable=False,
+        index=True,
+        comment="Current state in the onboarding invitation lifecycle.",
+    )
+    sent_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+        comment="Timestamp when the invitation email was last dispatched.",
+    )
+    completed_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+        comment="Timestamp when the candidate marked their profile as complete.",
+    )
+    cancelled_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+    )
+    resend_count: Mapped[int] = mapped_column(
+        Integer, default=0, nullable=False,
+        comment="Number of times the invitation link has been re-dispatched.",
+    )
+
+    # ── Authorship / audit ────────────────────────────────────────────────
+    created_by_user_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("user.id"), nullable=True,
+        comment="HR user who created this invitation.",
+    )
+    cancelled_by_user_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("user.id"), nullable=True,
+        comment="HR user who cancelled this invitation.",
+    )
+
+    # ── Extra metadata ────────────────────────────────────────────────────
+    notes: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True,
+        comment="Internal HR notes (not visible to the candidate).",
+    )
+    expiry_days: Mapped[int] = mapped_column(
+        Integer, default=7, nullable=False,
+        comment="Number of days the token remains valid after dispatch.",
+    )
+
+    # ── Salary presets (HR-defined) ───────────────────────────────────────
+    salary_grade_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("salary_grade.id"), nullable=True,
+    )
+    salary_step_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("salary_step.id"), nullable=True,
+    )
+
+    # ── Relationships ────────────────────────────────────────────────────
+    staff_profile: Mapped["StaffProfile"] = relationship()
+    documents: Mapped[list["StaffOnboardingDocument"]] = relationship(
+        back_populates="invitation",
+        cascade="all, delete-orphan",
+    )
+
+
+class StaffOnboardingDocument(TenantTable):
+    """
+    Document uploaded by a candidate during the onboarding flow.
+
+    Each row represents one file the candidate submitted via the
+    self-service onboarding portal.  The actual file bytes are stored
+    on AWS S3; only the bucket key and a publicly-accessible URL are
+    persisted here.
+
+    The ``document_type`` is drawn from :class:`OnboardingDocumentType`
+    and drives the checklist displayed to the candidate.
+
+    After onboarding is complete, HR can promote any of these documents
+    to the permanent ``StaffDocument`` table via a separate operation.
+    """
+
+    __tablename__ = "staff_onboarding_document"
+
+    invitation_id: Mapped[int] = mapped_column(
+        ForeignKey("staff_onboarding_invitation.id"),
+        nullable=False,
+        index=True,
+        comment="Parent invitation this document belongs to.",
+    )
+    document_type: Mapped[OnboardingDocumentType] = mapped_column(
+        Enum(OnboardingDocumentType),
+        nullable=False,
+        index=True,
+        comment="Document category from the onboarding checklist.",
+    )
+    title: Mapped[str] = mapped_column(
+        String(255), nullable=False,
+        comment="Human-readable label for the document.",
+    )
+    description: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True,
+        comment="Optional description provided by the candidate.",
+    )
+
+    # ── S3 storage metadata ──────────────────────────────────────────────
+    s3_key: Mapped[Optional[str]] = mapped_column(
+        String(500), nullable=True,
+        comment="S3 object key used to retrieve/delete the file.",
+    )
+    file_url: Mapped[Optional[str]] = mapped_column(
+        String(1000), nullable=True,
+        comment="Direct or pre-signed URL to access the stored file.",
+    )
+    mime_type: Mapped[Optional[str]] = mapped_column(
+        String(120), nullable=True,
+        comment="MIME type of the uploaded file (e.g. application/pdf).",
+    )
+    size_bytes: Mapped[Optional[int]] = mapped_column(
+        BigInteger, nullable=True,
+        comment="File size in bytes recorded at upload time.",
+    )
+
+    # ── Relationships ────────────────────────────────────────────────────
+    invitation: Mapped["StaffOnboardingInvitation"] = relationship(
+        back_populates="documents",
     )

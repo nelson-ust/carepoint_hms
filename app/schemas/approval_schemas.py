@@ -17,7 +17,7 @@ Naming follows existing project conventions:
 from datetime import datetime
 from typing import Any, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator, AliasChoices
 
 from app.core.enums import (
     ApprovalApproverKind,
@@ -41,13 +41,14 @@ class ApprovalFlowStepApproverCreateSchema(BaseModel):
     Set exactly one of ``user_id`` / ``role_id`` / ``department_id`` /
     ``dynamic_token`` based on ``approver_kind``.
     """
-    approver_kind: ApprovalApproverKind
+    approver_kind: ApprovalApproverKind = Field(..., validation_alias=AliasChoices("approver_kind", "kind"))
     user_id: Optional[int] = None
     role_id: Optional[int] = None
     department_id: Optional[int] = None
     dynamic_token: Optional[ApprovalDynamicApprover] = None
     is_required: bool = False
     notes: Optional[str] = Field(None, max_length=500)
+
 
     @model_validator(mode="after")
     def _validate_target_for_kind(self) -> "ApprovalFlowStepApproverCreateSchema":
@@ -91,6 +92,24 @@ class ApprovalFlowStepCreateSchema(BaseModel):
     allow_self_approval: bool = False
     sla_hours: Optional[int] = Field(None, ge=0)
     is_optional: bool = False
+    parallel_group: Optional[str] = Field(
+        None,
+        max_length=60,
+        description=(
+            "Steps sharing this group activate concurrently. NULL means "
+            "the step is sequential. Pick any short identifier; group "
+            "membership is per-flow."
+        ),
+    )
+    condition: Optional[dict[str, Any]] = Field(
+        None,
+        description=(
+            "Optional JSON condition evaluated at submit time against "
+            "the request payload. If False, the step is auto-SKIPPED. "
+            'Examples: {"field": "amount", "op": "gt", "value": 1000}; '
+            '{"all": [<expr>, <expr>]}; {"any": [...]}; {"not": <expr>}.'
+        ),
+    )
     approvers: list[ApprovalFlowStepApproverCreateSchema] = Field(
         default_factory=list,
         description="Approver targets for the step. At least one is required.",
@@ -122,6 +141,8 @@ class ApprovalFlowStepUpdateSchema(BaseModel):
     allow_self_approval: Optional[bool] = None
     sla_hours: Optional[int] = Field(None, ge=0)
     is_optional: Optional[bool] = None
+    parallel_group: Optional[str] = Field(None, max_length=60)
+    condition: Optional[dict[str, Any]] = None
 
 
 class ApprovalFlowStepReadSchema(BaseModel):
@@ -137,6 +158,8 @@ class ApprovalFlowStepReadSchema(BaseModel):
     allow_self_approval: bool
     sla_hours: Optional[int] = None
     is_optional: bool
+    parallel_group: Optional[str] = None
+    condition: Optional[dict[str, Any]] = None
     approvers: list[ApprovalFlowStepApproverReadSchema] = Field(default_factory=list)
 
 
@@ -270,6 +293,15 @@ class ApprovalDecisionCreateSchema(BaseModel):
     action: ApprovalDecisionAction
     comment: Optional[str] = Field(None, max_length=2000)
     delegated_to_user_id: Optional[int] = None
+    step_id: Optional[int] = Field(
+        None,
+        description=(
+            "Specific request step to decide on. Required when more than "
+            "one step is currently active for the caller (parallel-group "
+            "flows). If omitted and only one step is active for the "
+            "caller, that step is used automatically."
+        ),
+    )
 
     @model_validator(mode="after")
     def _validate_action_targets(self) -> "ApprovalDecisionCreateSchema":
@@ -308,6 +340,8 @@ class ApprovalRequestStepReadSchema(BaseModel):
     decision_rule: ApprovalStepDecisionRule
     required_approvals: int
     is_optional: bool
+    parallel_group: Optional[str] = None
+    condition_snapshot: Optional[dict[str, Any]] = None
     status: ApprovalRequestStepStatus
     approvals_received: int
     rejections_received: int

@@ -382,6 +382,19 @@ class ApprovalRequestRepository:
     def get_active_step(
         self, request_id: int
     ) -> Optional[ApprovalRequestStep]:
+        """Backwards-compat helper: return the lowest-ordered active step."""
+        steps = self.get_active_steps(request_id)
+        return steps[0] if steps else None
+
+    def get_active_steps(
+        self, request_id: int
+    ) -> list[ApprovalRequestStep]:
+        """
+        Return all currently active steps for a request, in step_order.
+
+        With parallel-group flows there can be more than one IN_PROGRESS
+        step at a time; sequential flows always return at most one row.
+        """
         return (
             self.db.query(ApprovalRequestStep)
             .filter(
@@ -395,7 +408,7 @@ class ApprovalRequestRepository:
                 ),
             )
             .order_by(ApprovalRequestStep.step_order.asc())
-            .first()
+            .all()
         )
 
     def get_step_decisions(self, step_id: int) -> list[ApprovalDecision]:
@@ -486,6 +499,7 @@ class ApprovalRequestRepository:
         flow_step: ApprovalFlowStep,
         eligible_user_ids: list[int],
         approver_specs: list[dict],
+        initial_status: ApprovalRequestStepStatus = ApprovalRequestStepStatus.PENDING,
         actor_user_id: Optional[int] = None,
     ) -> ApprovalRequestStep:
         step = ApprovalRequestStep(
@@ -496,12 +510,16 @@ class ApprovalRequestRepository:
             decision_rule=flow_step.decision_rule,
             required_approvals=flow_step.required_approvals,
             is_optional=flow_step.is_optional,
+            parallel_group=flow_step.parallel_group,
+            condition_snapshot=flow_step.condition,
             eligible_user_ids=eligible_user_ids,
             approver_specs=approver_specs,
-            status=ApprovalRequestStepStatus.PENDING,
+            status=initial_status,
             created_by_id=actor_user_id,
             updated_by_id=actor_user_id,
         )
+        if initial_status == ApprovalRequestStepStatus.SKIPPED:
+            step.completed_at = datetime.now(timezone.utc)
         self.db.add(step)
         self.db.flush()
         self.db.refresh(step)

@@ -580,6 +580,95 @@ def _ensure_role_permissions(
     return created
 
 
+def _seed_fresh_baseline(
+    db: Session,
+    bootstrap_superuser: bool,
+    superuser_username: Optional[str],
+    superuser_email: Optional[str],
+    superuser_password: Optional[str],
+) -> dict:
+    """Fast-path for empty databases: direct bulk inserts."""
+    summary = {
+        "permissions_processed": 0,
+        "roles_processed": 0,
+        "role_permission_links_created": 0,
+        "superuser_created": False,
+    }
+    
+    # 1. Bulk insert permissions
+    perms_to_add = []
+    perms_by_code = {}
+    for entry in DEFAULT_PERMISSIONS:
+        p = Permission(
+            code=entry["code"],
+            name=entry["name"],
+            module=entry["module"],
+            description=entry["name"],
+            is_system=True,
+        )
+        perms_to_add.append(p)
+        perms_by_code[p.code] = p
+    
+    db.add_all(perms_to_add)
+    db.flush()
+    summary["permissions_processed"] = len(perms_to_add)
+    
+    # 2. Bulk insert roles
+    roles_to_add = []
+    roles_by_code = {}
+    for entry in DEFAULT_ROLES:
+        r = Role(
+            code=entry["code"],
+            name=entry["name"],
+            description=entry["description"],
+            is_system=True,
+        )
+        roles_to_add.append(r)
+        roles_by_code[r.code] = r
+    
+    db.add_all(roles_to_add)
+    db.flush()
+    summary["roles_processed"] = len(roles_to_add)
+    
+    # 3. Create role-permission links
+    links = []
+    for role_code, perms in ROLE_PERMISSIONS_BASELINE.items():
+        role = roles_by_code.get(role_code)
+        if not role: continue
+        for p_code in perms:
+            perm = perms_by_code.get(p_code)
+            if perm:
+                links.append(RolePermissionAssociation(role_id=role.id, permission_id=perm.id))
+    
+    db.add_all(links)
+    summary["role_permission_links_created"] = len(links)
+    
+    # 4. Superuser
+    if bootstrap_superuser and superuser_username and superuser_email and superuser_password:
+        from app.core.security import get_password_hash
+        from app.core.enums import UserStatus
+        user = User(
+            username=superuser_username,
+            email=superuser_email,
+            password_hash=get_password_hash(superuser_password),
+            status=UserStatus.ACTIVE,
+            is_superuser=True,
+            is_email_verified=True,
+        )
+        db.add(user)
+        db.flush()
+        
+        # Link to admin role
+        admin_role = roles_by_code.get("TENANT_ADMIN")
+        if admin_role:
+            db.add(UserRoleAssociation(user_id=user.id, role_id=admin_role.id))
+        
+        summary["superuser_created"] = True
+        
+    db.commit()
+    return summary
+
+
 def seed_security_baseline(
     db: Session,
     *,
@@ -587,6 +676,7 @@ def seed_security_baseline(
     superuser_username: Optional[str] = None,
     superuser_email: Optional[str] = None,
     superuser_password: Optional[str] = None,
+    is_fresh: bool = False,
 ) -> dict:
     """
     Seed the canonical permission catalog, role catalog, role-permission
@@ -605,6 +695,9 @@ def seed_security_baseline(
     Returns:
         dict: Summary of created/updated counts.
     """
+    if is_fresh:
+        return _seed_fresh_baseline(db, bootstrap_superuser, superuser_username, superuser_email, superuser_password)
+
     summary = {
         "permissions_processed": 0,
         "roles_processed": 0,
@@ -612,27 +705,95 @@ def seed_security_baseline(
         "superuser_created": False,
     }
 
+    # 1. Bulk pre-fetch existing permissions to avoid hundreds of single queries
+    existing_perms = db.query(Permission).filter(Permission.is_deleted.is_(False)).all()
+    perms_map = {p.code: p for p in existing_perms}
+    perms_by_name = {p.name: p for p in existing_perms}
+
     permissions_by_code: dict[str, Permission] = {}
+    to_add_perms = []
+
     for entry in DEFAULT_PERMISSIONS:
-        permission = _upsert_permission(
-            db,
-            code=entry["code"],
-            name=entry["name"],
-            module=entry["module"],
-        )
-        permissions_by_code[permission.code] = permission
+        code = entry["code"]
+        name = entry["name"]
+        module = entry["module"]
+        
+        # Check by code or name (to match _upsert_permission logic)
+        permission = perms_map.get(code) or perms_by_name.get(name)
+        
+        if permission is None:
+            permission = Permission(
+                code=code,
+                name=name,
+                module=module,
+                description=name,
+                is_system=True,
+            )
+            to_add_perms.append(permission)
+            perms_map[code] = permission # Track for subsequent role mapping
+        else:
+            # Update existing if needed
+            changed = False
+            if permission.name != name:
+                permission.name = name
+                changed = True
+            if permission.module != module:
+                permission.module = module
+                changed = True
+            if not permission.is_system:
+                permission.is_system = True
+                changed = True
+            if changed:
+                db.add(permission)
+        
+        permissions_by_code[code] = permission
         summary["permissions_processed"] += 1
 
+    if to_add_perms:
+        db.add_all(to_add_perms)
+    db.flush()
+
+    # 2. Bulk pre-fetch existing roles
+    existing_roles = db.query(Role).filter(Role.is_deleted.is_(False)).all()
+    roles_map = {r.code: r for r in existing_roles}
+
     roles_by_code: dict[str, Role] = {}
+    to_add_roles = []
+
     for entry in DEFAULT_ROLES:
-        role = _upsert_role(
-            db,
-            code=entry["code"],
-            name=entry["name"],
-            description=entry["description"],
-        )
-        roles_by_code[role.code] = role
+        code = entry["code"]
+        name = entry["name"]
+        description = entry["description"]
+        
+        role = roles_map.get(code)
+        if role is None:
+            role = Role(
+                code=code,
+                name=name,
+                description=description,
+                is_system=True,
+            )
+            to_add_roles.append(role)
+        else:
+            changed = False
+            if role.name != name:
+                role.name = name
+                changed = True
+            if role.description != description:
+                role.description = description
+                changed = True
+            if not role.is_system:
+                role.is_system = True
+                changed = True
+            if changed:
+                db.add(role)
+        
+        roles_by_code[code] = role
         summary["roles_processed"] += 1
+
+    if to_add_roles:
+        db.add_all(to_add_roles)
+    db.flush()
 
     for role_code, permission_codes in DEFAULT_ROLE_PERMISSIONS.items():
         role = roles_by_code.get(role_code)

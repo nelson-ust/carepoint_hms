@@ -823,7 +823,7 @@ async def custom_swagger_ui_html() -> HTMLResponse:
         "[" + ", ".join(f'"{p}"' for p in _PUBLIC_AUTH_PATH_SUFFIXES) + "]"
     )
 
-    swagger_html = f"""
+    swagger_html = """
 <!DOCTYPE html>
 <html>
 <head>
@@ -833,64 +833,84 @@ async def custom_swagger_ui_html() -> HTMLResponse:
 </head>
 <body>
   <div id="swagger-ui"></div>
+  <div style="position: fixed; bottom: 20px; right: 20px; z-index: 9999; background: #fff; padding: 10px; border-radius: 8px; border: 1px solid #ddd; box-shadow: 0 4px 6px rgba(0,0,0,0.1); font-family: sans-serif;">
+    <label for="tenant-code-input" style="display: block; font-size: 12px; font-weight: bold; margin-bottom: 4px; color: #3b4151;">Active Tenant Code</label>
+    <input type="text" id="tenant-code-input" placeholder="e.g. ACME" style="padding: 6px 8px; border: 1px solid #d9d9d9; border-radius: 4px; width: 150px; font-size: 13px;" />
+  </div>
   <script src="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui-standalone-preset.js"></script>
   <script>
-    // localStorage key. Versioned so we can rotate the token format later
-    // without colliding with stale tokens cached in browser storage.
+    // localStorage keys.
     const TOKEN_STORAGE_KEY = "carepoint_hms_swagger_access_token_v1";
+    const TENANT_STORAGE_KEY = "carepoint_hms_swagger_tenant_code_v1";
 
     // Public auth path suffixes computed from the Python-side set above.
     // Used to skip the auth-injection request interceptor.
     const PUBLIC_AUTH_PATHS = {public_paths_js_literal};
 
-    function saveToken(token) {{
+    const tenantInput = document.getElementById("tenant-code-input");
+    
+    function saveToken(token) {
       // Trim defensively: APIs sometimes return whitespace-padded tokens.
-      if (typeof token === "string" && token.trim()) {{
+      if (typeof token === "string" && token.trim()) {
         window.localStorage.setItem(TOKEN_STORAGE_KEY, token.trim());
-      }}
-    }}
+      }
+    }
 
-    function loadToken() {{
+    function loadToken() {
       return window.localStorage.getItem(TOKEN_STORAGE_KEY);
-    }}
+    }
 
-    function applySwaggerAuthorization(ui, token) {{
+    function saveTenantCode(code) {
+      if (typeof code === "string") {
+        window.localStorage.setItem(TENANT_STORAGE_KEY, code.trim().toUpperCase());
+      }
+    }
+
+    function loadTenantCode() {
+      return window.localStorage.getItem(TENANT_STORAGE_KEY);
+    }
+
+    // Initialize tenant input from storage
+    tenantInput.value = loadTenantCode() || "";
+    tenantInput.addEventListener("input", (e) => saveTenantCode(e.target.value));
+
+    function applySwaggerAuthorization(ui, token) {
       if (!ui || !token) return;
-      try {{
+      try {
         // Apply the captured token to the BearerAuth scheme so the lock icons
         // in the UI flip to authorized.
-        ui.authActions.authorize({{ BearerAuth: {{ value: token }} }});
-      }} catch (err) {{
+        ui.authActions.authorize({ BearerAuth: { value: token } });
+      } catch (err) {
         console.warn("Swagger authorize warning:", err);
-      }}
-    }}
+      }
+    }
 
-    function isPublicAuthUrl(url) {{
+    function isPublicAuthUrl(url) {
       // String.includes is tolerant of differing host/origin prefixes.
       if (!url) return false;
-      for (const path of PUBLIC_AUTH_PATHS) {{
+      for (const path of PUBLIC_AUTH_PATHS) {
         if (url.includes(path)) return true;
-      }}
+      }
       return false;
-    }}
+    }
 
-    function extractAccessToken(parsed) {{
+    function extractAccessToken(parsed) {
       // Auth responses live at one of two shapes:
-      //   1) {{ access_token: "..." }}                    (refresh)
-      //   2) {{ tokens: {{ access_token: "..." }}, ... }} (login / 2FA verify)
+      //   1) { access_token: "..." }                    (refresh)
+      //   2) { tokens: { access_token: "..." }, ... } (login / 2FA verify)
       if (!parsed || typeof parsed !== "object") return null;
-      if (typeof parsed.access_token === "string" && parsed.access_token.trim()) {{
+      if (typeof parsed.access_token === "string" && parsed.access_token.trim()) {
         return parsed.access_token.trim();
-      }}
-      if (parsed.tokens && typeof parsed.tokens.access_token === "string") {{
+      }
+      if (parsed.tokens && typeof parsed.tokens.access_token === "string") {
         const candidate = parsed.tokens.access_token.trim();
         if (candidate) return candidate;
-      }}
+      }
       return null;
-    }}
+    }
 
-    const ui = SwaggerUIBundle({{
+    const ui = SwaggerUIBundle({
       url: "{openapi_url}",
       dom_id: "#swagger-ui",
       deepLinking: true,
@@ -903,55 +923,63 @@ async def custom_swagger_ui_html() -> HTMLResponse:
       ],
       layout: "BaseLayout",
 
-      requestInterceptor: (req) => {{
+      requestInterceptor: (req) => {
+        const token = loadToken();
+        const tenantCode = loadTenantCode();
+        
+        req.headers = req.headers || {};
+        
+        // Inject Tenant Code if set
+        if (tenantCode) {
+          req.headers["X-Tenant-Code"] = tenantCode;
+        }
+
         // ``loadSpec`` is true when SwaggerUI is fetching the OpenAPI doc
         // itself; never inject a bearer token into that request.
-        const token = loadToken();
-        if (token && !req.loadSpec && !isPublicAuthUrl(req.url)) {{
-          req.headers = req.headers || {{}};
-          req.headers["Authorization"] = `Bearer ${{token}}`;
-        }}
+        if (token && !req.loadSpec && !isPublicAuthUrl(req.url)) {
+          req.headers["Authorization"] = `Bearer ${token}`;
+        }
         return req;
-      }},
+      },
 
-      responseInterceptor: (res) => {{
+      responseInterceptor: (res) => {
         // Auto-capture token from successful public-auth responses so the
         // analyst doesn't have to copy/paste it into the Authorize dialog.
-        try {{
+        try {
           if (
             res &&
             typeof res.url === "string" &&
             isPublicAuthUrl(res.url) &&
             res.status === 200
-          ) {{
+          ) {
             let parsed = null;
-            if (typeof res.body === "string") {{
-              try {{ parsed = JSON.parse(res.body); }} catch (e) {{ parsed = null; }}
-            }} else if (res.body && typeof res.body === "object") {{
+            if (typeof res.body === "string") {
+              try { parsed = JSON.parse(res.body); } catch (e) { parsed = null; }
+            } else if (res.body && typeof res.body === "object") {
               parsed = res.body;
-            }}
+            }
 
             const token = extractAccessToken(parsed);
-            if (token) {{
+            if (token) {
               saveToken(token);
               // Defer slightly so the SwaggerUI auth-store has time to
               // hydrate before we call authorize().
               setTimeout(() => applySwaggerAuthorization(ui, token), 0);
-            }}
-          }}
-        }} catch (err) {{
+            }
+          }
+        } catch (err) {
           console.warn("Token capture failed:", err);
-        }}
+        }
         return res;
-      }},
-    }});
+      },
+    });
 
     // Re-apply any previously stored token on page reload so the analyst
     // can keep working across browser sessions.
     const existingToken = loadToken();
-    if (existingToken) {{
+    if (existingToken) {
       setTimeout(() => applySwaggerAuthorization(ui, existingToken), 300);
-    }}
+    }
 
     // Expose a manual-save hook in case external tooling wants to push a
     // token (e.g. a developer console snippet).
@@ -959,7 +987,7 @@ async def custom_swagger_ui_html() -> HTMLResponse:
   </script>
 </body>
 </html>
-"""
+""".replace("{title}", title).replace("{public_paths_js_literal}", public_paths_js_literal).replace("{openapi_url}", openapi_url)
     return HTMLResponse(swagger_html)
 
 
@@ -989,3 +1017,18 @@ if __name__ == "__main__":
         port=UVICORN_PORT,
         reload=UVICORN_RELOAD,
     )
+
+
+
+'''
+curl -X 'POST' \
+  'http://0.0.0.0:8005/api/v1/auth/login' \
+  -H 'accept: application/json' \
+  -H 'Content-Type: application/json' \
+  -H 'X-Tenant-Code: stnicholas' \
+  -d '{
+  "identifier": "nelson.attah@live.com",
+  "password": "S3cure!Password2026",
+  "remember_me": false
+}'
+'''

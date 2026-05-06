@@ -83,7 +83,16 @@ from app.api.v1.endpoints.appointment_extension_routes import (
 )
 from app.api.v1.endpoints.tax_routes import router as tax_router
 from app.api.v1.endpoints.hr_routes import router as hr_router
+from app.api.v1.endpoints.approval_routes import router as approval_router
+from app.api.v1.endpoints.timesheet_routes import router as timesheet_router
+from app.api.v1.endpoints.leave_request_routes import router as leave_request_router
+from app.api.v1.endpoints.reimbursement_routes import router as reimbursement_router
 from app.api.v1.endpoints.tenant_dashboard_routes import router as tenant_dashboard_router
+from app.api.v1.endpoints.salary_advance_routes import router as salary_advance_router
+from app.api.v1.endpoints.procurement_routes import router as procurement_router
+from app.api.v1.endpoints.shift_routes import router as shift_router
+from app.api.v1.endpoints.onboarding_routes import router as onboarding_router
+
 from app.api.v1.endpoints.database_backup_routes import router as database_backup_router
 from app.api.v1.endpoints.saas_notification_routes import router as saas_notification_router
 from app.api.v1.endpoints.saas_dashboard_routes import router as saas_dashboard_router
@@ -229,6 +238,14 @@ api_router.include_router(doctor_calendar_router)
 api_router.include_router(appointment_extension_router)
 api_router.include_router(tax_router)
 api_router.include_router(hr_router)
+api_router.include_router(approval_router)
+api_router.include_router(timesheet_router)
+api_router.include_router(leave_request_router)
+api_router.include_router(reimbursement_router)
+api_router.include_router(salary_advance_router)
+api_router.include_router(procurement_router)
+api_router.include_router(shift_router)
+api_router.include_router(onboarding_router)
 api_router.include_router(tenant_dashboard_router)
 # Self-service profile endpoints (must be registered BEFORE the generic
 # /users admin router so /users/me does not collide with /users/{id}).

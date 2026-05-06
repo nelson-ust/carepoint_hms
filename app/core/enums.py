@@ -746,10 +746,20 @@ class ShiftStatus(StringEnum):
 
 
 class LeaveStatus(StringEnum):
+    DRAFT = "DRAFT"
     PENDING = "PENDING"
     APPROVED = "APPROVED"
     REJECTED = "REJECTED"
     CANCELLED = "CANCELLED"
+
+
+class ReimbursementStatus(StringEnum):
+    DRAFT = "DRAFT"
+    PENDING = "PENDING"
+    APPROVED = "APPROVED"
+    REJECTED = "REJECTED"
+    CANCELLED = "CANCELLED"
+    PAID = "PAID"
 
 
 class PerformanceStatus(StringEnum):
@@ -1528,10 +1538,19 @@ class OvertimeStatus(StringEnum):
 class StaffLoanStatus(StringEnum):
     REQUESTED = "REQUESTED"
     APPROVED = "APPROVED"
-    REJECTED = "REJECTED"
-    ACTIVE = "ACTIVE"
+    DISBURSED = "DISBURSED"
+    REPAYING = "REPAYING"
     COMPLETED = "COMPLETED"
-    DEFAULTED = "DEFAULTED"
+    REJECTED = "REJECTED"
+    CANCELLED = "CANCELLED"
+
+
+class SalaryAdvanceStatus(StringEnum):
+    DRAFT = "DRAFT"
+    SUBMITTED = "SUBMITTED"
+    APPROVED = "APPROVED"
+    REJECTED = "REJECTED"
+    PAID = "PAID"
     CANCELLED = "CANCELLED"
 
 
@@ -1669,3 +1688,53 @@ class DataExtractionPurpose(StringEnum):
     AUDIT = "AUDIT"
     BACKUP = "BACKUP"
     OTHER = "OTHER"
+
+
+# ============================================================
+# STAFF ONBOARDING
+# ============================================================
+
+
+class OnboardingInvitationStatus(StringEnum):
+    """
+    Lifecycle states for a staff onboarding invitation.
+
+    DRAFT      – HR has created the record but not yet sent the link.
+    PENDING    – The link has been dispatched; the candidate has not yet acted.
+    IN_PROGRESS – The candidate clicked the link and started filling in their
+                  details (optional intermediate state used by the front-end).
+    COMPLETED  – The candidate submitted all required information.
+    EXPIRED    – The link passed its expiry timestamp without being used.
+    CANCELLED  – HR explicitly revoked the invitation before it was used.
+    RESENT     – The link was regenerated and re-dispatched; the old token is
+                 now invalid but the record is preserved for audit purposes.
+    """
+
+    DRAFT = "DRAFT"
+    PENDING = "PENDING"
+    IN_PROGRESS = "IN_PROGRESS"
+    COMPLETED = "COMPLETED"
+    EXPIRED = "EXPIRED"
+    CANCELLED = "CANCELLED"
+    RESENT = "RESENT"
+
+
+class OnboardingDocumentType(StringEnum):
+    """
+    Expected document types that a candidate must upload during onboarding.
+
+    These are used to drive the document-upload checklist embedded in the
+    onboarding invitation flow.
+    """
+
+    CV = "CV"
+    GOVERNMENT_ID = "GOVERNMENT_ID"
+    PASSPORT_PHOTO = "PASSPORT_PHOTO"
+    ACADEMIC_CERTIFICATE = "ACADEMIC_CERTIFICATE"
+    PROFESSIONAL_CERTIFICATE = "PROFESSIONAL_CERTIFICATE"
+    MEDICAL_CLEARANCE = "MEDICAL_CLEARANCE"
+    POLICE_CLEARANCE = "POLICE_CLEARANCE"
+    OFFER_LETTER_SIGNED = "OFFER_LETTER_SIGNED"
+    NDA_SIGNED = "NDA_SIGNED"
+    OTHER = "OTHER"
+

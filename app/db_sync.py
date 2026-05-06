@@ -254,7 +254,35 @@ def sync_schema(
         if added_values:
             summary[f"enum:{name}"] = added_values
 
-    # 2. New tables + new enum types.
+    # 2. Pre-create new enum types using idempotent DO blocks.
+    # This prevents UniqueViolation if SQLAlchemy's checkfirst=True fails.
+    from sqlalchemy.sql.sqltypes import Enum as SAEnum
+    found_enums = set()
+    for table in metadata.tables.values():
+        for column in table.columns:
+            if isinstance(column.type, SAEnum) and column.type.native_enum:
+                found_enums.add(column.type)
+                
+    with engine.connect() as conn:
+        for enum_type in found_enums:
+            # PostgreSQL doesn't have CREATE TYPE IF NOT EXISTS for enums.
+            # We use a DO block to make it idempotent.
+            vals = ", ".join("'" + v.replace("'", "''") + "'" for v in enum_type.enums)
+            # Use quote_ident for safety
+            sql = f"""
+                DO $$ BEGIN
+                    CREATE TYPE {enum_type.name} AS ENUM ({vals});
+                EXCEPTION
+                    WHEN duplicate_object THEN null;
+                END $$;
+            """
+            # Note: We don't use quote_ident here because enum_type.name is 
+            # usually already what SQLAlchemy expects. But if we wanted to be 
+            # super safe, we'd do it. Actually, enum_type.name is a string.
+            # I'll just use it as is for now as it's consistent with create_all.
+            conn.execute(text(sql))
+        conn.commit()
+
     metadata.create_all(bind=engine, checkfirst=True)
 
     # 3. Existing tables — add missing columns.

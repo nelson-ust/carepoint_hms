@@ -21,7 +21,7 @@ error and surfaces it to the operator via the request's
 ``decision_summary``.
 """
 
-from typing import Iterable, Optional
+from typing import Any, Iterable, Optional
 
 from sqlalchemy.orm import Session
 
@@ -325,3 +325,147 @@ def evaluate_step_outcome(
             return ApprovalRequestStepStatus.APPROVED
 
     return ApprovalRequestStepStatus.IN_PROGRESS
+
+
+# ---------------------------------------------------------------------
+# Condition DSL
+# ---------------------------------------------------------------------
+#
+# Steps may carry an optional ``condition`` JSON expression evaluated at
+# submit time. If the condition is False the step is auto-SKIPPED for
+# that request. The DSL deliberately avoids any code-execution surface:
+# it is a tiny declarative tree.
+#
+# Leaf:    {"field": "amount", "op": "gt", "value": 1000}
+# Compose: {"all": [<expr>, <expr>, ...]}
+#          {"any": [<expr>, ...]}
+#          {"not": <expr>}
+#
+# ``field`` is a dotted path looked up against a context dict.  By
+# default the lookup root is the request payload, but the engine also
+# exposes ``request`` (subject_type, priority, requester_user_id,
+# department_id, facility_id) so flows can branch on those fields too:
+#
+#     {"field": "request.priority", "op": "eq", "value": "URGENT"}
+#     {"all": [
+#         {"field": "amount", "op": "gt", "value": 1000},
+#         {"field": "request.department_id", "op": "eq", "value": 7}
+#     ]}
+#
+# Supported ops: eq, ne, gt, gte, lt, lte, in, not_in, exists, missing,
+# truthy, falsy.
+
+_LEAF_OPS = {"eq", "ne", "gt", "gte", "lt", "lte", "in", "not_in",
+             "exists", "missing", "truthy", "falsy"}
+
+
+def _resolve_path(path: str, context: dict[str, Any]) -> tuple[bool, Any]:
+    """Return ``(found, value)`` for a dotted path lookup."""
+    if not path:
+        return False, None
+    parts = path.split(".")
+    node: Any = context
+    # Bare names look up against the payload first, then fall back to
+    # the top-level context (so {"field": "amount"} works even though
+    # technically that's payload.amount).
+    if parts[0] not in context and "payload" in context and isinstance(
+        context.get("payload"), dict
+    ):
+        node = context["payload"]
+    for part in parts:
+        if isinstance(node, dict) and part in node:
+            node = node[part]
+        else:
+            return False, None
+    return True, node
+
+
+def _evaluate_leaf(expr: dict[str, Any], context: dict[str, Any]) -> bool:
+    op = (expr.get("op") or "").lower()
+    if op not in _LEAF_OPS:
+        # Unknown op -> safest behaviour is "treat as not matching"
+        # rather than raising, so a misconfigured condition doesn't
+        # block in-flight submissions.
+        return False
+
+    field = expr.get("field")
+    if field is None:
+        return False
+
+    found, value = _resolve_path(str(field), context)
+
+    if op == "exists":
+        return found
+    if op == "missing":
+        return not found
+    if op == "truthy":
+        return bool(value) if found else False
+    if op == "falsy":
+        return (not bool(value)) if found else True
+
+    target = expr.get("value")
+
+    if not found:
+        # Comparators against a missing field never match.
+        return False
+
+    try:
+        if op == "eq":
+            return value == target
+        if op == "ne":
+            return value != target
+        if op == "gt":
+            return value > target
+        if op == "gte":
+            return value >= target
+        if op == "lt":
+            return value < target
+        if op == "lte":
+            return value <= target
+        if op == "in":
+            return value in (target or [])
+        if op == "not_in":
+            return value not in (target or [])
+    except TypeError:
+        # Mismatched types between value and target — treat as no-match.
+        return False
+    return False
+
+
+def evaluate_condition(
+    expr: Optional[dict[str, Any]],
+    context: dict[str, Any],
+) -> bool:
+    """
+    Evaluate a step ``condition`` against a context dict.
+
+    A missing/None expression is treated as ``True`` so steps without
+    conditions always run. Errors and unknown shapes default to False
+    so a malformed condition can't accidentally let a sensitive step
+    through.
+    """
+    if not expr:
+        return True
+
+    if not isinstance(expr, dict):
+        return False
+
+    if "all" in expr:
+        clauses = expr["all"] or []
+        if not isinstance(clauses, list):
+            return False
+        return all(evaluate_condition(c, context) for c in clauses)
+
+    if "any" in expr:
+        clauses = expr["any"] or []
+        if not isinstance(clauses, list):
+            return False
+        return any(evaluate_condition(c, context) for c in clauses)
+
+    if "not" in expr:
+        return not evaluate_condition(expr["not"], context)
+
+    if "field" in expr or "op" in expr:
+        return _evaluate_leaf(expr, context)
+
+    return False

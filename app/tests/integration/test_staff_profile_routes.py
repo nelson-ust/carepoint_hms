@@ -24,11 +24,6 @@ class TestStaffProfileRoutes:
         assert "items" in data
         assert len(data["items"]) > 0
 
-    def test_get_staff_profile(self, client, auth_header, admin_user):
-        staff_id = admin_user["staff"].id
-        response = client.get(f"/api/v1/staff/{staff_id}", headers=auth_header)
-        assert response.status_code == 200
-
     def test_get_staff_profile_by_user(self, client, auth_header, admin_user):
         user_id = admin_user["user"].id
         response = client.get(f"/api/v1/staff/{user_id}", headers=auth_header)

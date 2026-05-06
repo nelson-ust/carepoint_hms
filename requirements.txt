@@ -40,3 +40,4 @@ boto3==1.42.88
 
 APScheduler==3.10.4
 Jinja2==3.1.6
+python-dotenv==1.0.1

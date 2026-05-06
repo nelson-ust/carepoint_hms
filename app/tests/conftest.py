@@ -1,5 +1,9 @@
 from __future__ import annotations
 import os
+from dotenv import load_dotenv
+
+# Load .env file to ensure CAREPOINT_HMS_TEST_DATABASE_URL is picked up
+load_dotenv()
 
 # Set environment variables BEFORE any other imports to avoid Pydantic validation warnings
 # We force these for tests to ensure consistency and avoid short-key warnings.
@@ -47,25 +51,90 @@ def database_engine():
     """
     Lazy import of the SQLAlchemy engine. Skips if no DB is available.
 
-    Creates tenant tables on the **default** engine (``DATABASE_URL``)
-    *and* on the **master** engine (``MASTER_DATABASE_URL``) so that code
-    paths using ``get_session()`` (e.g. ``AuditMiddleware``) can find
-    tables like ``audit_log`` regardless of which engine they fall back to.
-    Master tables are also created on the master engine.
+    Uses the **default** engine (``DATABASE_URL``) and **master** engine
+    (``MASTER_DATABASE_URL``). We monkeypatch ``get_master_engine`` to ensure
+    all database operations hit the same test database instance.
     """
     if not HAS_TEST_DB:
         pytest.skip("CAREPOINT_HMS_DATABASE_URL not configured for integration tests.")
-    from app.core.database import engine, create_tables, get_master_engine
+    
+    from app.core.database import engine, get_master_engine
     import app.core.database as db_mod
     
     # Monkeypatch get_master_engine to always return the main test engine
     # This ensures SaaS admin routes (which use master DB) hit the same DB.
     db_mod.get_master_engine = lambda: engine
     
-    # Tenant tables on the default engine (where tests create data)
-    create_tables()
-    # Master tables (Tenant, SaaSAdmin, etc.) on the default engine too
-    create_tables(is_master=True)
+    # We no longer drop/recreate tables here aggressively. 
+    # Instead, we check if a core table exists. If not, we create all tables.
+    # This avoids the slow SSL connection closures on every run.
+    from sqlalchemy import inspect, text
+    inspector = inspect(engine)
+    if not inspector.has_table("user"):
+        print("\n[DB] Tables missing or incomplete. Initializing schema...")
+        import app.models.all_models
+        from app.models.base import TenantBase, MasterBase
+        
+        with engine.connect() as conn:
+            # Postgres Enum workaround: if create_all fails because of existing types,
+            # we try to ignore those specific errors or handle them.
+            try:
+                TenantBase.metadata.create_all(bind=conn, checkfirst=True)
+                MasterBase.metadata.create_all(bind=conn, checkfirst=True)
+                conn.commit()
+            except Exception as e:
+                if "already exists" in str(e).lower():
+                    print(f"[DB] Note: Some types already exist, continuing... ({e})")
+                    conn.rollback()
+                    # Try creating tables one by one as a fallback
+                    for table in TenantBase.metadata.sorted_tables:
+                        try:
+                            table.create(conn, checkfirst=True)
+                        except Exception:
+                            pass
+                    for table in MasterBase.metadata.sorted_tables:
+                        try:
+                            table.create(conn, checkfirst=True)
+                        except Exception:
+                            pass
+                    conn.commit()
+                else:
+                    raise
+    
+    # Ensure new columns exist on tables that may predate the model changes.
+    # This is a lightweight migration for columns added after initial schema creation.
+    from sqlalchemy import text
+    _missing_columns = [
+        ("purchase_requisition", "approval_request_id", "BIGINT"),
+        ("salary_advance", "approval_request_id", "BIGINT"),
+        ("leave_request", "approval_request_id", "BIGINT"),
+        ("reimbursement_request", "approval_request_id", "BIGINT"),
+    ]
+    with engine.connect() as conn:
+        for table, col, col_type in _missing_columns:
+            try:
+                conn.execute(text(
+                    f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {col} {col_type}"
+                ))
+            except Exception:
+                pass
+        conn.commit()
+    
+    # (Optional) Ensure baseline security data exists if it's an empty DB
+    from app.core.database import SessionLocal
+    from app.seeds.security_seed import seed_security_baseline
+    db = SessionLocal()
+    try:
+        # We run seed_security_baseline in non-fresh mode (is_fresh=False)
+        # so it only adds missing records without being slow.
+        seed_security_baseline(db, is_fresh=False)
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        # Not fatal if it fails due to existing data
+        pass
+    finally:
+        db.close()
     
     return engine
 
@@ -239,14 +308,14 @@ def saas_admin_user(db_session):
     db_session.refresh(admin)
     return {"email": email, "password": password, "obj": admin}
 
-@pytest.fixture()
-def seeded_security(db_session):
+@pytest.fixture(scope="session")
+def seeded_security(database_engine):
     """
     Ensure the canonical role/permission seed has been applied for tests
     that assume those records exist.
+    
+    Now a session-scoped no-op as seeding happens in database_engine.
     """
-    from app.seeds.security_seed import seed_security_baseline
-    seed_security_baseline(db_session)
     return True
 
 

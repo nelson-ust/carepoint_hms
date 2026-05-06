@@ -119,6 +119,8 @@ def _flow_to_dict(flow: ApprovalFlow, db: Session) -> dict[str, Any]:
                 "allow_self_approval": step.allow_self_approval,
                 "sla_hours": step.sla_hours,
                 "is_optional": step.is_optional,
+                "parallel_group": step.parallel_group,
+                "condition": step.condition,
                 "approvers": [
                     ApprovalFlowStepApproverReadSchema.model_validate(a).model_dump()
                     for a in approvers
@@ -160,6 +162,8 @@ def _step_with_decisions(
         "decision_rule": step.decision_rule,
         "required_approvals": step.required_approvals,
         "is_optional": step.is_optional,
+        "parallel_group": step.parallel_group,
+        "condition_snapshot": step.condition_snapshot,
         "status": step.status,
         "approvals_received": step.approvals_received,
         "rejections_received": step.rejections_received,
@@ -546,4 +550,82 @@ def cancel_request(
         "request": ApprovalRequestReadSchema.model_validate(
             _request_to_dict(request, db)
         ),
+    }
+
+
+# =====================================================================
+# ADMIN OVERRIDES
+# =====================================================================
+
+
+@router.post(
+    "/requests/{request_id}/force-close",
+    response_model=ApprovalRequestActionResponseSchema,
+    summary="Admin override: mark a request APPROVED or REJECTED outright",
+)
+def admin_force_close(
+    request_id: int,
+    current_user: AdminUser,
+    db: Annotated[Session, Depends(get_db)],
+    service: Annotated[ApprovalRequestService, Depends(get_request_service)],
+    approve: bool = Query(..., description="True approves, False rejects."),
+    reason: Optional[str] = Query(None, max_length=500),
+):
+    request = service.admin_force_close(
+        request_id,
+        actor_user_id=current_user.id,
+        approve=approve,
+        reason=reason,
+    )
+    return {
+        "success": True,
+        "message": (
+            "Request force-approved by admin."
+            if approve
+            else "Request force-rejected by admin."
+        ),
+        "request": ApprovalRequestReadSchema.model_validate(
+            _request_to_dict(request, db)
+        ),
+    }
+
+
+@router.post(
+    "/requests/{request_id}/steps/{step_id}/reopen",
+    response_model=ApprovalRequestActionResponseSchema,
+    summary="Admin override: reopen a closed step on an in-flight request",
+)
+def admin_reopen_step(
+    request_id: int,
+    step_id: int,
+    current_user: AdminUser,
+    db: Annotated[Session, Depends(get_db)],
+    service: Annotated[ApprovalRequestService, Depends(get_request_service)],
+):
+    request = service.admin_reopen_step(
+        request_id, step_id, actor_user_id=current_user.id
+    )
+    return {
+        "success": True,
+        "message": "Approval step reopened.",
+        "request": ApprovalRequestReadSchema.model_validate(
+            _request_to_dict(request, db)
+        ),
+    }
+
+
+@router.post(
+    "/maintenance/expire-stale",
+    summary="Auto-expire requests whose SLA window has passed (admin / scheduler)",
+)
+def expire_stale(
+    _: AdminUser,
+    service: Annotated[ApprovalRequestService, Depends(get_request_service)],
+    batch_limit: int = Query(200, ge=1, le=2000),
+):
+    count = service.expire_stale_requests(batch_limit=batch_limit)
+    return {
+        "success": True,
+        "message": f"Auto-expired {count} approval request(s).",
+        "expired_count": count,
     }

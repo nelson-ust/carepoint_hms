@@ -39,6 +39,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable, Optional
 
 from sqlalchemy import create_engine
+from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
 from app.core.cryptography import decrypt_string
@@ -262,8 +263,15 @@ def sweep_offline_nodes() -> int:
 # ---------------------------------------------------------------------------
 
 
-def _open_tenant_session(tenant_id: int) -> tuple[Session, "EngineResource"]:
-    """Open a tenant-scoped Session for ``tenant_id``."""
+def _open_tenant_session(tenant_id: int) -> tuple[Session, Engine]:
+    """
+    Open a tenant-scoped ``Session`` for ``tenant_id``.
+
+    Returns the session paired with the underlying ``Engine`` so the
+    caller can ``engine.dispose()`` after closing the session — this
+    matters because each call constructs a fresh per-tenant engine
+    rather than reusing a pooled one.
+    """
     with get_master_db_context() as db:
         tenant = db.query(Tenant).filter(Tenant.id == tenant_id).first()
         if not tenant or not tenant.db_connection_string:
