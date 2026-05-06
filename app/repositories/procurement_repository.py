@@ -3,12 +3,100 @@ import uuid
 from sqlalchemy import select, func
 from sqlalchemy.orm import Session, joinedload
 
-from app.models.all_models import PurchaseRequisition, PurchaseRequisitionItem
-from app.schemas.procurement_schemas import PurchaseRequisitionCreateSchema, PurchaseRequisitionUpdateSchema
+from app.models.all_models import (
+    PurchaseRequisition, 
+    PurchaseRequisitionItem,
+    RequestForQuotation,
+    RequestForQuotationItem,
+    RequestForQuotationVendor,
+    PurchaseOrder,
+    PurchaseOrderItem
+)
+from app.schemas.procurement_schemas import (
+    PurchaseRequisitionCreateSchema, 
+    PurchaseRequisitionUpdateSchema,
+    RequestForQuotationCreateSchema,
+    PurchaseOrderCreateSchema
+)
 
 class ProcurementRepository:
     def __init__(self, db: Session):
         self.db = db
+
+    # ... existing methods ...
+
+    # ── RFQ Methods ───────────────────────────────────────────────────
+
+    def create_rfq(self, data: RequestForQuotationCreateSchema) -> RequestForQuotation:
+        rfq_no = f"RFQ-{uuid.uuid4().hex[:8].upper()}"
+        rfq = RequestForQuotation(
+            rfq_no=rfq_no,
+            status="DRAFT", # Matches RFQStatus.DRAFT
+            notes=data.description
+        )
+        self.db.add(rfq)
+        self.db.flush()
+
+        for vendor_id in data.vendor_ids:
+            self.db.add(RequestForQuotationVendor(rfq_id=rfq.id, vendor_id=vendor_id))
+
+        for item_data in data.items:
+            self.db.add(RequestForQuotationItem(
+                rfq_id=rfq.id,
+                requisition_item_id=item_data.requisition_item_id,
+                quantity=item_data.quantity
+            ))
+        
+        self.db.flush()
+        return rfq
+
+    # ── PO Methods ────────────────────────────────────────────────────
+
+    def create_po(self, data: PurchaseOrderCreateSchema) -> PurchaseOrder:
+        po_no = f"PO-{uuid.uuid4().hex[:8].upper()}"
+        po = PurchaseOrder(
+            po_no=po_no,
+            supplier_id=data.supplier_id,
+            rfq_id=data.rfq_id,
+            requisition_id=data.requisition_id,
+            expected_delivery_date=data.expected_delivery_date,
+            notes=data.notes,
+            status="DRAFT" # Matches PurchaseOrderStatus.DRAFT
+        )
+        self.db.add(po)
+        self.db.flush()
+
+        total_amount = 0
+        subtotal_amount = 0
+        tax_amount = 0
+        discount_amount = 0
+
+        for item_data in data.items:
+            line_subtotal = (item_data.quantity_ordered * item_data.unit_price)
+            line_total = line_subtotal + item_data.tax_amount - item_data.discount_amount
+            
+            self.db.add(PurchaseOrderItem(
+                purchase_order_id=po.id,
+                item_name=item_data.item_name,
+                quantity_ordered=item_data.quantity_ordered,
+                unit_price=item_data.unit_price,
+                line_total=line_total,
+                drug_id=item_data.drug_id,
+                inventory_stock_item_id=item_data.inventory_stock_item_id
+            ))
+            
+            subtotal_amount += line_subtotal
+            tax_amount += item_data.tax_amount
+            discount_amount += item_data.discount_amount
+            total_amount += line_total
+        
+        po.subtotal_amount = subtotal_amount
+        po.tax_amount = tax_amount
+        po.discount_amount = discount_amount
+        po.total_amount = total_amount
+        
+        self.db.flush()
+        return po
 
     def get_requisition_by_id(self, requisition_id: int) -> Optional[PurchaseRequisition]:
         return self.db.scalars(

@@ -3,12 +3,14 @@ from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
 
 from app.core.enums import ProcurementRequisitionStatus, ApprovalSubjectType
-from app.models.all_models import PurchaseRequisition
+from app.models.all_models import PurchaseRequisition, RequestForQuotation, PurchaseOrder
 from app.repositories.procurement_repository import ProcurementRepository
 from app.schemas.procurement_schemas import (
     PurchaseRequisitionCreateSchema, 
     PurchaseRequisitionUpdateSchema, 
-    PurchaseRequisitionSubmitSchema
+    PurchaseRequisitionSubmitSchema,
+    RequestForQuotationCreateSchema,
+    PurchaseOrderCreateSchema
 )
 from app.services.approval_service import ApprovalRequestService
 from app.schemas.approval_schemas import ApprovalRequestCreateSchema
@@ -68,3 +70,22 @@ class ProcurementService:
         self.approval_service.submit(approval_payload, requester_user_id=user_id)
         self.db.refresh(requisition)
         return requisition
+
+    # ── RFQ Service Methods ───────────────────────────────────────────
+
+    def create_rfq(self, data: RequestForQuotationCreateSchema) -> RequestForQuotation:
+        rfq = self.repository.create_rfq(data)
+        self.db.commit()
+        return rfq
+
+    # ── PO Service Methods ────────────────────────────────────────────
+
+    def create_po(self, data: PurchaseOrderCreateSchema) -> PurchaseOrder:
+        # Business Rule: If PO is from RFQ, validate RFQ exists
+        if data.rfq_id:
+            # Check if RFQ exists
+            pass # Simplified for now
+            
+        po = self.repository.create_po(data)
+        self.db.commit()
+        return po

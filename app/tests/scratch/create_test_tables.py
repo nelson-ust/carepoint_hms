@@ -11,15 +11,15 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 def create_new_tables():
     print("Refreshing test database schema (aggressive drop)...")
-    with engine.connect() as conn:
-        # Drop all tables in public schema
-        conn.execute(text("""
-            DROP SCHEMA public CASCADE;
-            CREATE SCHEMA public;
-            GRANT ALL ON SCHEMA public TO postgres;
-            GRANT ALL ON SCHEMA public TO public;
-        """))
-        conn.commit()
+    # with engine.connect() as conn:
+    #     # Drop all tables in public schema
+    #     conn.execute(text("""
+    #         DROP SCHEMA public CASCADE;
+    #         CREATE SCHEMA public;
+    #         GRANT ALL ON SCHEMA public TO postgres;
+    #         GRANT ALL ON SCHEMA public TO public;
+    #     """))
+    #     conn.commit()
         
     print("Creating all tables...")
     with engine.connect() as conn:

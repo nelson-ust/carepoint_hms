@@ -92,6 +92,10 @@ from app.api.v1.endpoints.salary_advance_routes import router as salary_advance_
 from app.api.v1.endpoints.procurement_routes import router as procurement_router
 from app.api.v1.endpoints.shift_routes import router as shift_router
 from app.api.v1.endpoints.onboarding_routes import router as onboarding_router
+from app.api.v1.endpoints.patient_identity_routes import router as patient_identity_router
+from app.api.v1.endpoints.portal_routes import router as portal_self_service_router
+from app.api.v1.endpoints.hr_payroll_routes import router as hr_payroll_router
+from app.api.v1.endpoints.loyalty_routes import router as loyalty_router
 
 from app.api.v1.endpoints.database_backup_routes import router as database_backup_router
 from app.api.v1.endpoints.saas_notification_routes import router as saas_notification_router
@@ -246,6 +250,10 @@ api_router.include_router(salary_advance_router)
 api_router.include_router(procurement_router)
 api_router.include_router(shift_router)
 api_router.include_router(onboarding_router)
+api_router.include_router(patient_identity_router)
+api_router.include_router(portal_self_service_router)
+api_router.include_router(hr_payroll_router)
+api_router.include_router(loyalty_router)
 api_router.include_router(tenant_dashboard_router)
 # Self-service profile endpoints (must be registered BEFORE the generic
 # /users admin router so /users/me does not collide with /users/{id}).

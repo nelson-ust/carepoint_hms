@@ -8,12 +8,50 @@ from app.schemas.procurement_schemas import (
     PurchaseRequisitionCreateSchema,
     PurchaseRequisitionUpdateSchema,
     PurchaseRequisitionReadSchema,
-    PurchaseRequisitionSubmitSchema
+    PurchaseRequisitionSubmitSchema,
+    RequestForQuotationCreateSchema,
+    RequestForQuotationReadSchema,
+    PurchaseOrderCreateSchema,
+    PurchaseOrderReadSchema
 )
 from app.dependencies.auth import get_current_user
 from app.models.all_models import User
 
 router = APIRouter(prefix="/procurements", tags=["Procurement"])
+
+# ... existing requisition routes ...
+
+# ── RFQ Routes ────────────────────────────────────────────────────────
+
+@router.post("/rfqs", response_model=dict, status_code=status.HTTP_201_CREATED)
+def create_rfq(
+    payload: RequestForQuotationCreateSchema,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    service = ProcurementService(db)
+    rfq = service.create_rfq(payload)
+    return {
+        "success": True,
+        "message": "Request for Quotation created successfully",
+        "rfq": RequestForQuotationReadSchema.model_validate(rfq).model_dump()
+    }
+
+# ── PO Routes ─────────────────────────────────────────────────────────
+
+@router.post("/purchase-orders", response_model=dict, status_code=status.HTTP_201_CREATED)
+def create_po(
+    payload: PurchaseOrderCreateSchema,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    service = ProcurementService(db)
+    po = service.create_po(payload)
+    return {
+        "success": True,
+        "message": "Purchase Order created successfully",
+        "po": PurchaseOrderReadSchema.model_validate(po).model_dump()
+    }
 
 @router.post("/requisitions", response_model=dict, status_code=status.HTTP_201_CREATED)
 def create_requisition(

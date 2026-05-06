@@ -53,3 +53,49 @@ class PurchaseRequisitionReadSchema(PurchaseRequisitionBase):
     items: List[PurchaseRequisitionItemReadSchema] = []
     
     model_config = ConfigDict(from_attributes=True)
+
+# ── RFQ Schemas ───────────────────────────────────────────────────────
+
+class RFQItemCreateSchema(BaseModel):
+    requisition_item_id: Optional[int] = None
+    quantity: float
+
+class RequestForQuotationCreateSchema(BaseModel):
+    title: Optional[str] = None
+    description: Optional[str] = None
+    bid_deadline: Optional[datetime] = None
+    vendor_ids: List[int] = [] # These will be used to create RequestForQuotationVendor
+    items: List[RFQItemCreateSchema]
+
+class RequestForQuotationReadSchema(BaseModel):
+    id: int
+    rfq_no: str
+    status: str
+    model_config = ConfigDict(from_attributes=True)
+
+# ── Purchase Order Schemas ───────────────────────────────────────────
+
+class POItemCreateSchema(BaseModel):
+    item_name: str
+    quantity_ordered: float
+    unit_price: float
+    tax_amount: float = 0
+    discount_amount: float = 0
+    drug_id: Optional[int] = None
+    inventory_stock_item_id: Optional[int] = None
+
+class PurchaseOrderCreateSchema(BaseModel):
+    supplier_id: int
+    rfq_id: Optional[int] = None
+    requisition_id: Optional[int] = None
+    expected_delivery_date: Optional[date] = None
+    notes: Optional[str] = None
+    items: List[POItemCreateSchema]
+
+class PurchaseOrderReadSchema(BaseModel):
+    id: int
+    po_no: str
+    supplier_id: int
+    status: str
+    total_amount: float
+    model_config = ConfigDict(from_attributes=True)

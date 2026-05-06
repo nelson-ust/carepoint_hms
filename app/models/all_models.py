@@ -4255,6 +4255,29 @@ class RequestForQuotation(TenantTable):
     notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     quotations: Mapped[list["Quotation"]] = relationship(back_populates="rfq")
+    items: Mapped[list["RequestForQuotationItem"]] = relationship(back_populates="rfq", cascade="all, delete-orphan")
+    vendors: Mapped[list["RequestForQuotationVendor"]] = relationship(back_populates="rfq", cascade="all, delete-orphan")
+
+
+class RequestForQuotationItem(TenantTable):
+    """Specific items requested in an RFQ."""
+
+    rfq_id: Mapped[int] = mapped_column(ForeignKey("request_for_quotation.id"), nullable=False, index=True)
+    requisition_item_id: Mapped[Optional[int]] = mapped_column(ForeignKey("purchase_requisition_item.id"), nullable=True, index=True)
+    quantity: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    
+    rfq: Mapped["RequestForQuotation"] = relationship(back_populates="items")
+    requisition_item: Mapped[Optional["PurchaseRequisitionItem"]] = relationship()
+
+
+class RequestForQuotationVendor(TenantTable):
+    """Vendors invited to bid on an RFQ."""
+
+    rfq_id: Mapped[int] = mapped_column(ForeignKey("request_for_quotation.id"), nullable=False, index=True)
+    vendor_id: Mapped[int] = mapped_column(ForeignKey("supplier.id"), nullable=False, index=True)
+    
+    rfq: Mapped["RequestForQuotation"] = relationship(back_populates="vendors")
+    vendor: Mapped["Supplier"] = relationship()
 
 
 class Quotation(TenantTable):
