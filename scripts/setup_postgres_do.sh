@@ -12,6 +12,14 @@
 set -euo pipefail
 IFS=$'\n\t'
 
+# Check for --fresh flag
+FRESH_START=false
+for arg in "$@"; do
+    if [[ "$arg" == "--fresh" ]]; then
+        FRESH_START=true
+    fi
+done
+
 # ─── CONFIGURATION ────────────────────────────────────────────────────────────
 # REQUIRED: change DB_PASSWORD before running — script aborts if left as default.
 DB_SUPERUSER="carepoint_admin"        # Postgres owner / CREATEDB user
@@ -170,16 +178,23 @@ fi
 # ─── STEP 5: Install PostgreSQL ───────────────────────────────────────────────
 step "Step 5/9 — Installing PostgreSQL ${PG_VERSION}"
 
-if ! command -v psql &>/dev/null; then
-    install -d /usr/share/postgresql-common/pgdg
-    curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
-        | gpg --dearmor -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.gpg
+if [[ "$FRESH_START" == "true" ]]; then
+    warn "FRESH_START detected: Purging existing PostgreSQL installation..."
+    systemctl stop postgresql 2>/dev/null || true
+    apt-get purge -y "postgresql-${PG_VERSION}" "postgresql-client-${PG_VERSION}" postgresql-common 2>/dev/null || true
+    rm -rf "/etc/postgresql/${PG_VERSION}"
+    rm -rf "/var/lib/postgresql/${PG_VERSION}"
+    info "Deep clean complete."
+fi
 
-    echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.gpg] \
-https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
-        > /etc/apt/sources.list.d/pgdg.list
+if ! command -v psql &>/dev/null || [[ "$FRESH_START" == "true" ]]; then
+    # Add PGDG repository if not present
+    if ! grep -q "apt.postgresql.org" /etc/apt/sources.list.d/pgdg.list 2>/dev/null; then
+        curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | gpg --dearmor -o /etc/apt/trusted.gpg.d/postgresql.gpg
+        echo "deb https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list
+        apt-get update -y
+    fi
 
-    apt-get update -y
     apt-get install -y "postgresql-${PG_VERSION}" "postgresql-client-${PG_VERSION}"
     success "PostgreSQL ${PG_VERSION} installed"
 else
