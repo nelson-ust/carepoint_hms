@@ -210,23 +210,26 @@ step "Step 6/9 — Tuning PostgreSQL for production"
 PG_CONF="/etc/postgresql/${PG_VERSION}/main/postgresql.conf"
 PG_HBA="/etc/postgresql/${PG_VERSION}/main/pg_hba.conf"
 PG_EXTRA="/etc/postgresql/${PG_VERSION}/main/carepoint_hms.conf"
-PG_BIN="/usr/lib/postgresql/${PG_VERSION}/bin/postgres"
+PG_BIN=$(which postgres || echo "/usr/lib/postgresql/${PG_VERSION}/bin/postgres")
 PG_DATA="/var/lib/postgresql/${PG_VERSION}/main"
 
 # --- RESCUE LOGIC: Detect and fix corrupted config from previous runs ---
-info "Validating existing configuration..."
-if ! sudo -u postgres "${PG_BIN}" -D "${PG_DATA}" -C listen_addresses &>/dev/null; then
-    warn "PostgreSQL configuration appears corrupted. Attempting rescue..."
-    BACKUP=$(ls -t "${PG_CONF}.bak."* 2>/dev/null | head -1)
-    if [[ -n "$BACKUP" ]]; then
-        cp "$BACKUP" "$PG_CONF"
-        success "Restored configuration from backup: $(basename "$BACKUP")"
-    else
-        warn "No backup found. Cleaning up known problematic lines..."
-        # Remove any previous includes or corrupted listen_addresses lines
-        sed -i "/include = 'carepoint_hms.conf'/d" "${PG_CONF}"
-        sed -i "/^listen_addresses/d" "${PG_CONF}"
-        echo "listen_addresses = 'localhost'" >> "${PG_CONF}"
+if [[ "$FRESH_START" == "true" ]]; then
+    info "FRESH_START: Skipping rescue logic (using clean defaults)"
+else
+    info "Validating existing configuration..."
+    # Improved validation check using --describe-config which is safer
+    if ! sudo -u postgres "${PG_BIN}" -D "${PG_DATA}" --describe-config &>/dev/null; then
+        warn "PostgreSQL configuration appears corrupted. Attempting rescue..."
+        BACKUP=$(ls -t "${PG_CONF}.bak."* 2>/dev/null | head -1)
+        if [[ -n "$BACKUP" ]]; then
+            cp "$BACKUP" "$PG_CONF"
+            success "Restored configuration from backup: $(basename "$BACKUP")"
+        else
+            warn "No backup found. Resetting configuration to defaults..."
+            # If everything is broken and no backup, force a reinstall of the config
+            apt-get install --reinstall -o Dpkg::Options::="--force-confmiss" "postgresql-${PG_VERSION}"
+        fi
     fi
 fi
 
