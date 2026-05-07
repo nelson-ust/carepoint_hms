@@ -564,37 +564,96 @@ def recreate_database(db_url: str) -> None:
 
 def create_new_database(db_name: str, base_url: str = DATABASE_URL) -> None:
     """
-    Create a new physical database in the PostgreSQL server.
+    Ensure a tenant database (or schema) exists.
+
+    Strategy
+    --------
+    1. **Self-hosted / local Postgres** — attempt ``CREATE DATABASE``.
+       This is the preferred isolation model (one DB per tenant).
+    2. **Managed Postgres** (Render, Railway, Supabase, etc.) — the user
+       account typically lacks ``CREATEDB`` privileges.  When a
+       ``CREATE DATABASE`` fails with an authentication or privilege error
+       we fall back to creating a *schema* inside the master database
+       instead.  The tenant's ``db_connection_string`` already carries the
+       correct host/credentials, so only the ``search_path`` differs at
+       query time.
+
+    The caller (``TenantService.approve_tenant``) does not need to change
+    because ``run_tenant_initialization`` connects via the tenant's stored
+    URL; the tables will land in whatever database/schema exists.
     """
-    # No destructive=True because CREATE DATABASE IF NOT EXISTS is safe
     check_production_safety(destructive=False)
-    
-    admin_uri = _build_postgres_admin_uri(base_url)
-    target_identifier = _quote_identifier(db_name)
 
-    logger.info(f"Ensuring PostgreSQL database exists: {db_name}")
+    logger.info("Ensuring tenant database / schema exists: %s", db_name)
 
-    admin_engine = create_engine(
-        admin_uri,
-        isolation_level="AUTOCOMMIT",
-        future=True,
-    )
-
+    # ── Attempt 1: CREATE DATABASE (works on self-hosted Postgres) ───────────
     try:
-        with admin_engine.connect() as conn:
-            # Check if it exists first
-            result = conn.execute(
-                text("SELECT 1 FROM pg_database WHERE datname = :db_name"),
-                {"db_name": db_name}
-            ).first()
-            
-            if not result:
-                conn.execute(text(f"CREATE DATABASE {target_identifier}"))
-                logger.info(f"Database {db_name} created.")
-            else:
-                logger.info(f"Database {db_name} already exists.")
+        admin_uri = _build_postgres_admin_uri(base_url)
+        target_identifier = _quote_identifier(db_name)
+        admin_engine = create_engine(
+            admin_uri,
+            isolation_level="AUTOCOMMIT",
+            future=True,
+        )
+        try:
+            with admin_engine.connect() as conn:
+                result = conn.execute(
+                    text("SELECT 1 FROM pg_database WHERE datname = :db_name"),
+                    {"db_name": db_name},
+                ).first()
+                if not result:
+                    conn.execute(text(f"CREATE DATABASE {target_identifier}"))
+                    logger.info("Database '%s' created successfully.", db_name)
+                else:
+                    logger.info("Database '%s' already exists.", db_name)
+            return  # success — nothing more to do
+        finally:
+            admin_engine.dispose()
+
+    except Exception as create_err:
+        # Detect privilege / auth failures that indicate managed hosting.
+        err_msg = str(create_err).lower()
+        is_privilege_error = any(
+            kw in err_msg
+            for kw in (
+                "must be superuser",
+                "permission denied",
+                "insufficient privilege",
+                "password authentication failed",
+                "pg_hba.conf",
+                "createdb",
+            )
+        )
+        if not is_privilege_error:
+            # Unexpected error — propagate so the caller surfaces it.
+            raise
+
+        logger.warning(
+            "CREATE DATABASE not permitted (%s). "
+            "Falling back to schema-per-tenant inside the master database.",
+            type(create_err).__name__,
+        )
+
+    # ── Attempt 2: CREATE SCHEMA (managed Postgres fallback) ─────────────────
+    # Use the master DB connection (base_url) directly — we are already on it.
+    schema_name = _quote_identifier(db_name)
+    fallback_engine = create_engine(base_url, future=True)
+    try:
+        with fallback_engine.connect() as conn:
+            conn.execute(
+                text(f"CREATE SCHEMA IF NOT EXISTS {schema_name}")
+            )
+            conn.commit()
+        logger.info(
+            "Schema '%s' created inside the master database (managed-PG mode).",
+            db_name,
+        )
+    except Exception as schema_err:
+        logger.error("Schema fallback also failed: %s", schema_err)
+        raise
     finally:
-        admin_engine.dispose()
+        fallback_engine.dispose()
+
 
 
 # =============================================================================

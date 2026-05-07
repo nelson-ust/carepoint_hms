@@ -135,10 +135,37 @@ class TenantService:
         master_url = settings.MASTER_DATABASE_URL
         if not master_url:
             raise BadRequestError(message="MASTER_DATABASE_URL is not configured.")
-        
+
         from sqlalchemy.engine import make_url
         url_obj = make_url(master_url)
-        tenant_db_url = str(url_obj.set(database=db_name))
+
+        # On self-hosted Postgres the tenant gets its own database.
+        # On managed platforms (Render, Railway, etc.) CREATE DATABASE is
+        # not permitted, so we use a schema inside the master database
+        # and override the search_path via the connection string.
+        # We detect this by probing whether CREATE DATABASE would succeed,
+        # but a simpler heuristic is: if the master DB host is clearly a
+        # managed provider, stay on the same database and set search_path.
+        managed_hosts = (
+            ".render.com",
+            ".railway.app",
+            ".supabase.co",
+            ".neon.tech",
+            ".elephantsql.com",
+        )
+        host = (url_obj.host or "").lower()
+        is_managed = any(host.endswith(h) for h in managed_hosts)
+
+        if is_managed:
+            # Stay on the master database; isolate via search_path.
+            tenant_db_url = str(
+                url_obj.update_query_dict(
+                    {"options": f"-c search_path={db_name},public"}
+                )
+            )
+        else:
+            # Self-hosted: one physical database per tenant.
+            tenant_db_url = str(url_obj.set(database=db_name))
 
         # Store admin info for later provisioning
         onboarding_data = {
