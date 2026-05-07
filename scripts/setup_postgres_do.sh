@@ -379,7 +379,7 @@ END
 \$\$;
 
 -- Create master database (idempotent)
-SELECT 'CREATE DATABASE ${DB_NAME} OWNER ${DB_SUPERUSER} ENCODING UTF8 LC_COLLATE ''en_US.UTF-8'' LC_CTYPE ''en_US.UTF-8'''
+SELECT 'CREATE DATABASE ${DB_NAME} OWNER ${DB_SUPERUSER} ENCODING UTF8 LC_COLLATE ''C.UTF-8'' LC_CTYPE ''C.UTF-8'''
 WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = '${DB_NAME}')\gexec
 
 -- Grant app user access to master DB
