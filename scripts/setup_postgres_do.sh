@@ -199,8 +199,11 @@ PG_HBA="/etc/postgresql/${PG_VERSION}/main/pg_hba.conf"
 TOTAL_RAM_MB=$(free -m | awk '/^Mem:/{print $2}')
 SHARED_BUFFERS_MB=$(( TOTAL_RAM_MB / 4 ))
 EFFECTIVE_CACHE_MB=$(( TOTAL_RAM_MB * 3 / 4 ))
-WORK_MEM_MB=$(( TOTAL_RAM_MB / 50 ))
-[[ $WORK_MEM_MB -lt 4 ]] && WORK_MEM_MB=4
+# work_mem: keep low on small servers — max_connections * work_mem must fit in RAM.
+# Formula: RAM / (max_connections * 3) capped to 8MB on servers under 4GB.
+WORK_MEM_MB=$(( TOTAL_RAM_MB / 200 / 3 ))
+[[ $WORK_MEM_MB -lt 2 ]] && WORK_MEM_MB=2
+[[ $WORK_MEM_MB -gt 8 && $TOTAL_RAM_MB -lt 4096 ]] && WORK_MEM_MB=8
 
 apply_pg_setting() {
     local key=$1 val=$2
@@ -252,6 +255,20 @@ host    all             ${DB_SUPERUSER}         ${ALLOWED_CLIENT_CIDR}  scram-sh
 HBA
 
 systemctl restart postgresql
+
+# Wait for PostgreSQL to be fully ready before proceeding
+info "Waiting for PostgreSQL to be ready..."
+for i in $(seq 1 30); do
+    if pg_isready -q 2>/dev/null; then
+        success "PostgreSQL is ready (took ${i}s)"
+        break
+    fi
+    if [[ $i -eq 30 ]]; then
+        error "PostgreSQL did not start within 30s. Check: journalctl -u postgresql"
+    fi
+    sleep 1
+done
+
 success "PostgreSQL tuned (shared_buffers=${SHARED_BUFFERS_MB}MB, work_mem=${WORK_MEM_MB}MB)"
 
 # ─── STEP 7: Create Users and Database ───────────────────────────────────────
