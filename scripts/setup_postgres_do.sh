@@ -318,9 +318,16 @@ HBA
 
 # --- PRE-RESTART VALIDATION ---
 info "Validating new configuration..."
-if sudo -u postgres "${PG_BIN}" -D "${PG_DATA}" --config-file="${PG_CONF}" -C listen_addresses &>/dev/null; then
+# Capture validation output to show error if it fails
+VALIDATION_OUT=$(sudo -u postgres "${PG_BIN}" -D "${PG_DATA}" --config-file="${PG_CONF}" -C listen_addresses 2>&1 || true)
+
+if echo "${VALIDATION_OUT}" | grep -q '^\*' || echo "${VALIDATION_OUT}" | grep -q "^'"; then
     success "Configuration valid"
 else
+    echo "----------------------------------------------------------------"
+    echo "VALIDATION FAILED WITH ERROR:"
+    echo "${VALIDATION_OUT}"
+    echo "----------------------------------------------------------------"
     error "New configuration is invalid. Please check ${PG_EXTRA}"
 fi
 
