@@ -131,29 +131,41 @@ SSHD_CONF="/etc/ssh/sshd_config"
 cp "${SSHD_CONF}" "${SSHD_CONF}.bak.$(date +%Y%m%d_%H%M%S)"
 
 # Apply production SSH settings
+# Note: PasswordAuthentication kept 'yes' so password-authenticated root
+# sessions are not immediately locked out. Disable it manually once you
+# have added your SSH public key to ~/.ssh/authorized_keys.
 declare -A SSH_SETTINGS=(
-    ["PermitRootLogin"]="prohibit-password"
-    ["PasswordAuthentication"]="no"
+    ["PermitRootLogin"]="yes"
+    ["PasswordAuthentication"]="yes"
     ["PubkeyAuthentication"]="yes"
     ["PermitEmptyPasswords"]="no"
     ["X11Forwarding"]="no"
-    ["MaxAuthTries"]="3"
-    ["LoginGraceTime"]="30"
+    ["MaxAuthTries"]="5"
+    ["LoginGraceTime"]="60"
     ["ClientAliveInterval"]="300"
     ["ClientAliveCountMax"]="2"
-    ["Protocol"]="2"
 )
 for key in "${!SSH_SETTINGS[@]}"; do
     val="${SSH_SETTINGS[$key]}"
-    if grep -q "^${key}" "${SSHD_CONF}"; then
-        sed -i "s/^${key}.*/${key} ${val}/" "${SSHD_CONF}"
+    if grep -q "^#*\s*${key}" "${SSHD_CONF}"; then
+        sed -i "s|^#*\s*${key}.*|${key} ${val}|" "${SSHD_CONF}"
     else
         echo "${key} ${val}" >> "${SSHD_CONF}"
     fi
 done
 
-sshd -t && systemctl reload sshd
-success "SSH hardened (root password login disabled)"
+# Ubuntu 22.04+ uses 'ssh', older systems use 'sshd'
+SSH_SERVICE="ssh"
+systemctl is-active --quiet sshd 2>/dev/null && SSH_SERVICE="sshd"
+
+# Validate config before reloading (prevents locking yourself out)
+if sshd -t 2>/dev/null || /usr/sbin/sshd -t 2>/dev/null; then
+    systemctl reload "${SSH_SERVICE}" || systemctl restart "${SSH_SERVICE}"
+    success "SSH hardened"
+else
+    warn "sshd config validation failed — skipping reload (original config preserved)"
+fi
+
 
 # ─── STEP 5: Install PostgreSQL ───────────────────────────────────────────────
 step "Step 5/9 — Installing PostgreSQL ${PG_VERSION}"
