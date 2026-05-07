@@ -1015,6 +1015,16 @@ def seed_all(db: Session, *, create_default_admin: bool = True) -> None:
     """
     Run all seed steps in the correct order.
     """
+    # Safety check: Prevent accidental seeding of tenant data into the master DB
+    from app.core.database import MASTER_DATABASE_URL
+    from sqlalchemy.engine import make_url
+    
+    bind_url = db.get_bind().url
+    if MASTER_DATABASE_URL:
+        m_url = make_url(MASTER_DATABASE_URL)
+        if bind_url.host == m_url.host and bind_url.database == m_url.database and not bind_url.query.get("options"):
+             logger.warning("seed_all() called on Master DB session. Blocking to prevent pollution.")
+             return
     seed_roles(db)
     seed_permissions(db)
     seed_role_permissions(db)
@@ -1121,6 +1131,13 @@ def run_master_initialization(
             summary = sync_master_schema(engine=master_engine)
             if summary:
                 logger.info("Master schema sync applied: %s", summary)
+            else:
+                # Be explicit when nothing happened (tables already exist)
+                from app.models.base import MasterBase
+                logger.info(
+                    "Master schema is already up to date (%d tables verified).", 
+                    len(MasterBase.metadata.tables)
+                )
         except Exception as exc:
             logger.exception("Master schema sync failed: %s", exc)
             raise

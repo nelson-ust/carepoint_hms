@@ -216,13 +216,33 @@ def get_engine() -> Engine:
     return get_engine_for_url(tenant_db_url)
 
 
-def create_tables(bind_engine: Optional[Engine] = None, is_master: bool = False) -> None:
+def create_tables(bind_engine: Optional[Engine] = None, is_master: bool = True) -> None:
     """
     Create ORM tables registered in metadata.
+
+    Defaults to ``is_master=True`` to prevent accidental leakage of the
+    230+ tenant tables into the master database when called without
+    arguments (e.g. from the app lifespan).
     """
-    # Ensure all models are imported so they register with metadata
     import app.models.all_models  # noqa: F401
     target_engine = bind_engine or engine
+    
+    # Safety check: if we are using the default master engine but is_master=False,
+    # something is likely wrong (leakage attempt).
+    # We compare the host and database name, but ignore query parameters 
+    # (like search_path) to allow legitimate tenant schemas on managed Postgres.
+    if not is_master:
+        m_url = engine.url
+        t_url = target_engine.url
+        if (t_url.host == m_url.host and 
+            t_url.database == m_url.database and 
+            not t_url.query.get("options")):
+            logger.warning(
+                "create_tables(is_master=False) called on the master database "
+                "without a tenant search_path. Blocking to prevent leakage."
+            )
+            return
+
     if is_master:
         MasterBase.metadata.create_all(bind=target_engine)
     else:

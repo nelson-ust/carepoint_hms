@@ -241,9 +241,12 @@ async def lifespan(app: FastAPI):
     # Optionally create tables. In production we expect Alembic to be in
     # charge — disable AUTO_CREATE_TABLES there.
     if AUTO_CREATE_TABLES:
-        logger.info("[lifespan] Creating database tables if needed.")
+        logger.info("[lifespan] Ensuring master database tables exist.")
         try:
-            create_tables()
+            # We explicitly pass is_master=True here. Tenant tables should
+            # NEVER be created automatically in the default (master) database.
+            # They are provisioned dynamically during the tenant onboarding flow.
+            create_tables(is_master=True)
         except Exception as exc:  # pragma: no cover
             # Don't crash startup; report via /health. This makes it possible
             # to bring up the API and inspect logs even when the DB is bad.

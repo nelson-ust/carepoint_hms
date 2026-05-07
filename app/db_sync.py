@@ -308,6 +308,23 @@ def sync_master_schema(engine: Engine | None = None) -> dict[str, list[str]]:
         engine = get_master_engine()
 
     enum_extensions = _master_enum_extensions()
+    
+    # Check for pollution (tenant tables in master DB)
+    try:
+        inspector = inspect(engine)
+        existing_tables = set(inspector.get_table_names())
+        master_tables = set(MasterBase.metadata.tables.keys())
+        unexpected = existing_tables - master_tables
+        if unexpected:
+            logger.warning(
+                "POLLUTION DETECTED in Master Database! Found %d unexpected tables "
+                "(e.g. %s). These likely leaked from a misconfigured tenant sync. "
+                "Run `python -m app.init_db` for a destructive reset to clean this up.",
+                len(unexpected), list(unexpected)[:5]
+            )
+    except Exception as exc:
+        logger.warning("Could not audit master database for pollution: %s", exc)
+
     return sync_schema(MasterBase.metadata, engine, enum_extensions=enum_extensions)
 
 
