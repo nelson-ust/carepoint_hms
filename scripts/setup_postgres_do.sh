@@ -318,7 +318,7 @@ HBA
 
 # --- PRE-RESTART VALIDATION ---
 info "Validating new configuration..."
-if sudo -u postgres "${PG_BIN}" -D "${PG_DATA}" --config-file="${PG_CONF}" --describe-config &>/dev/null; then
+if sudo -u postgres "${PG_BIN}" -D "${PG_DATA}" --config-file="${PG_CONF}" -C listen_addresses &>/dev/null; then
     success "Configuration valid"
 else
     error "New configuration is invalid. Please check ${PG_EXTRA}"
