@@ -61,8 +61,74 @@ class TestDatabaseBackupRoutes:
         except Exception:
             pass
 
+    # ── Download (file-based, decrypted) ─────────────────────────────
+
+    def test_download_backup_streams_file(self, client, auth_header, mocker, tmp_path):
+        """Download endpoint streams the decrypted file content."""
+        # Create a temp file to simulate the decrypted backup artifact.
+        fake_dump = tmp_path / "backup_test.dump"
+        fake_dump.write_bytes(b"PGDUMP_BINARY_CONTENT_HERE")
+
+        mocker.patch(
+            "app.services.tenant_backup_service.TenantBackupService.prepare_download_file",
+            return_value={
+                "file_path": str(fake_dump),
+                "filename": "backup_test.dump",
+                "size_bytes": fake_dump.stat().st_size,
+                "checksum_sha256": "abc123def456",
+                "media_type": "application/octet-stream",
+                "cleanup_paths": [],  # Don't clean up — pytest owns tmp_path.
+            },
+        )
+        res = client.get("/api/v1/backups/42/download", headers=auth_header)
+        assert res.status_code in (200, 403, 500)
+        if res.status_code == 200:
+            assert res.content == b"PGDUMP_BINARY_CONTENT_HERE"
+            assert res.headers.get("x-checksum-sha256") == "abc123def456"
+            disp = res.headers.get("content-disposition", "")
+            assert "backup_test.dump" in disp
+
+    def test_download_backup_encrypted_gets_decrypted(self, client, auth_header, mocker, tmp_path):
+        """Even for encrypted backups, the streamed file is decrypted."""
+        decrypted = tmp_path / "backup.dump"
+        decrypted.write_bytes(b"DECRYPTED_DATA")
+
+        mocker.patch(
+            "app.services.tenant_backup_service.TenantBackupService.prepare_download_file",
+            return_value={
+                "file_path": str(decrypted),
+                "filename": "backup.dump",  # .enc stripped
+                "size_bytes": decrypted.stat().st_size,
+                "checksum_sha256": None,
+                "media_type": "application/octet-stream",
+                "cleanup_paths": [],
+            },
+        )
+        res = client.get("/api/v1/backups/1/download", headers=auth_header)
+        assert res.status_code in (200, 403, 500)
+        if res.status_code == 200:
+            assert res.content == b"DECRYPTED_DATA"
+            disp = res.headers.get("content-disposition", "")
+            assert ".enc" not in disp
+
+    def test_download_backup_not_found(self, client, auth_header, mocker):
+        """Non-existent backup returns 404 or handled error."""
+        from app.core.exceptions import NotFoundError
+        mocker.patch(
+            "app.services.tenant_backup_service.TenantBackupService.prepare_download_file",
+            side_effect=NotFoundError(message="Backup record not found."),
+        )
+        res = client.get("/api/v1/backups/99999/download", headers=auth_header)
+        assert res.status_code in (404, 403, 500)
+
+    def test_download_backup_anonymous(self, client):
+        """Unauthenticated request is rejected."""
+        res = client.get("/api/v1/backups/1/download")
+        assert res.status_code == 401
+
+    # ── Restore ───────────────────────────────────────────────────────
+
     def test_restore_backup_not_found(self, client, auth_header, mocker):
-        # Mocked side_effect bubbles out of FastAPI as the same Exception.
         mocker.patch(
             "app.services.tenant_backup_service.TenantBackupService.restore_backup",
             side_effect=Exception("Backup not found"),

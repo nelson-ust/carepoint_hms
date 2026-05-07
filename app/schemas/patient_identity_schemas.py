@@ -71,13 +71,12 @@ class PatientConsentReadSchema(PatientConsentBase):
 
 class InsuranceProviderBase(BaseModel):
     name: str
-    code: str
-    provider_type: str = Field(..., description="HMO, PRIVATE, GOVERNMENT, etc.")
+    code: Optional[str] = None
     contact_person: Optional[str] = None
     email: Optional[str] = None
-    phone: Optional[str] = None
+    phone_number: Optional[str] = None
     address: Optional[str] = None
-    is_active: bool = True
+    notes: Optional[str] = None
 
 class InsuranceProviderCreateSchema(InsuranceProviderBase):
     pass
@@ -85,6 +84,7 @@ class InsuranceProviderCreateSchema(InsuranceProviderBase):
 class InsuranceProviderReadSchema(InsuranceProviderBase):
     id: int
     model_config = ConfigDict(from_attributes=True)
+
 
 class PatientInsuranceBase(BaseModel):
     insurance_provider_id: int

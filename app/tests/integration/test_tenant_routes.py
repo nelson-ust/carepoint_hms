@@ -1,4 +1,18 @@
 # app/tests/integration/test_tenant_routes.py
+"""
+Integration tests for the SaaS tenant management routes.
+
+Covers:
+- Tenant registration (POST /api/v1/tenants/register)
+- Tenant listing (GET /api/v1/tenants)
+- Tenant detail retrieval (GET /api/v1/tenants/{id})
+- Tenant approval / provisioning (POST /api/v1/tenants/{id}/approve)
+- Tenant status updates (PUT /api/v1/tenants/{id}/status)
+- Anonymous rejection (401)
+
+Email and SMS delivery is mocked to prevent SMTP connection hangs
+during tests, since the test environment has no mail server.
+"""
 from __future__ import annotations
 
 import pytest
@@ -10,11 +24,34 @@ pytestmark = pytest.mark.skipif(
     reason="CAREPOINT_HMS_DATABASE_URL not configured for integration tests.",
 )
 
+
+# ── Fixtures ──────────────────────────────────────────────────────────
+
+@pytest.fixture(autouse=True)
+def _mock_email_sms(mocker):
+    """
+    Prevent all outgoing email / SMS during tenant tests.
+
+    Without this mock, register_tenant → _notify_saas_admins_of_registration
+    and _notify_applicant_received would attempt real SMTP connections that
+    hang indefinitely in a test environment without a mail server.
+    """
+    mocker.patch(
+        "app.services.tenant_service.send_email",
+        return_value={"success": True, "message": "mocked"},
+    )
+    mocker.patch(
+        "app.services.tenant_service.send_sms",
+        return_value=None,
+    )
+
+
 @pytest.fixture()
 def saas_auth_header(saas_client, saas_admin_user):
+    """Authenticate and return bearer headers for SaaS admin routes."""
     login_res = saas_client.post("/api/v1/auth/login", json={
         "identifier": saas_admin_user["email"],
-        "password": saas_admin_user["password"]
+        "password": saas_admin_user["password"],
     })
     if login_res.status_code != 200:
         pytest.skip(f"SaaS admin login failed: {login_res.status_code}")
@@ -42,7 +79,9 @@ def subscription_plan(saas_client, saas_auth_header):
         "max_patients": 1000,
         "is_active": True,
     }
-    create_res = saas_client.post("/api/v1/saas/plans", json=plan_payload, headers=saas_auth_header)
+    create_res = saas_client.post(
+        "/api/v1/saas/plans", json=plan_payload, headers=saas_auth_header
+    )
     if create_res.status_code in (200, 201):
         data = create_res.json()
         return data.get("code") or plan_payload["code"]
@@ -50,8 +89,12 @@ def subscription_plan(saas_client, saas_auth_header):
     return plan_payload["code"]
 
 
+# ── Test Class ────────────────────────────────────────────────────────
+
 class TestTenantRoutes:
+
     def _register_tenant(self, saas_client, subscription_plan):
+        """Helper to register a new tenant and return its ID."""
         code = _unique("clinic")
         payload = {
             "tenant_name": _unique("New Clinic"),
@@ -62,11 +105,14 @@ class TestTenantRoutes:
             "admin_username": f"admin-{code}",
             "admin_password": "ClinicPass123!",
             "admin_first_name": "Clinic",
-            "admin_last_name": "Admin"
+            "admin_last_name": "Admin",
         }
         response = saas_client.post("/api/v1/tenants/register", json=payload)
         if response.status_code != 201:
-            print(f"DEBUG: Register Tenant Failed. Path: /api/v1/tenants/register, Status: {response.status_code}, Body: {response.text}")
+            print(
+                f"DEBUG: Register Tenant Failed. "
+                f"Status: {response.status_code}, Body: {response.text}"
+            )
         assert response.status_code == 201
         data = response.json()
         assert data["success"] is True
@@ -87,38 +133,55 @@ class TestTenantRoutes:
 
     def test_get_tenant(self, saas_client, saas_auth_header, subscription_plan):
         tid = self._register_tenant(saas_client, subscription_plan)
-        response = saas_client.get(f"/api/v1/tenants/{tid}", headers=saas_auth_header)
+        response = saas_client.get(
+            f"/api/v1/tenants/{tid}", headers=saas_auth_header
+        )
         assert response.status_code == 200
         data = response.json()
         assert data["id"] == tid
         assert "code" in data
         assert "status" in data
 
-    def test_approve_tenant(self, saas_client, saas_auth_header, subscription_plan, mocker):
+    def test_approve_tenant(
+        self, saas_client, saas_auth_header, subscription_plan, mocker
+    ):
         tid = self._register_tenant(saas_client, subscription_plan)
-        
-        # Mock slow/complex infrastructure operations
+
+        # Mock the heavy infrastructure operations that require real
+        # databases, filesystems, and AWS access.
         mocker.patch("app.services.tenant_service.create_new_database")
         mocker.patch("app.services.tenant_service.run_tenant_initialization")
-        mocker.patch("app.services.tenant_service.TenantService._create_tenant_admin")
-        mocker.patch("app.services.tenant_service.TenantService._bootstrap_tenant_settings")
-        
+        mocker.patch(
+            "app.services.tenant_service.TenantService._create_tenant_admin"
+        )
+        mocker.patch(
+            "app.services.tenant_service.TenantService._bootstrap_tenant_settings"
+        )
+
         mock_s3 = mocker.patch("app.services.tenant_service.S3Service")
         mock_s3.return_value.create_tenant_bucket.return_value = "test-bucket"
-        
-        response = saas_client.post(f"/api/v1/tenants/{tid}/approve", headers=saas_auth_header)
+
+        response = saas_client.post(
+            f"/api/v1/tenants/{tid}/approve", headers=saas_auth_header
+        )
         assert response.status_code == 200
         data = response.json()
         assert data["success"] is True
         assert data["status"] == "ACTIVE"
         assert data["is_provisioned"] is True
 
-    def test_update_tenant_status(self, saas_client, saas_auth_header, subscription_plan):
+    def test_update_tenant_status(
+        self, saas_client, saas_auth_header, subscription_plan
+    ):
         tid = self._register_tenant(saas_client, subscription_plan)
-        
+
         # Suspend tenant
         payload = {"status": "SUSPENDED"}
-        response = saas_client.put(f"/api/v1/tenants/{tid}/status", json=payload, headers=saas_auth_header)
+        response = saas_client.put(
+            f"/api/v1/tenants/{tid}/status",
+            json=payload,
+            headers=saas_auth_header,
+        )
         assert response.status_code == 200
         assert response.json()["status"] == "SUSPENDED"
 

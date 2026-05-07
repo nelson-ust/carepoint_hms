@@ -7,10 +7,12 @@ admin-facing notifications.
 """
 from __future__ import annotations
 
+import os
 from datetime import datetime
 from typing import Annotated, Optional
 
 from fastapi import APIRouter, Depends, status
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -61,6 +63,61 @@ def create_backup(
     retention_days: Optional[int] = None,
 ):
     return service.create_backup(triggered_by="MANUAL", retention_days=retention_days)
+
+
+@router.get(
+    "/{backup_id}/download",
+    status_code=status.HTTP_200_OK,
+    summary="Download a decrypted backup file",
+    description=(
+        "Downloads the backup artifact as a decrypted binary file. "
+        "If the backup was encrypted at rest, it is transparently "
+        "decrypted before being streamed to the client. The response "
+        "includes a Content-Disposition header with the original "
+        "filename and an X-Checksum-SHA256 header for integrity "
+        "verification."
+    ),
+    responses={
+        200: {
+            "content": {"application/octet-stream": {}},
+            "description": "The decrypted backup file.",
+        },
+    },
+)
+def download_backup(
+    backup_id: int,
+    _: Annotated[bool, Depends(require_permission("BACKUP_READ"))],
+    service: Annotated[TenantBackupService, Depends(get_backup_service)],
+):
+    result = service.prepare_download_file(backup_id)
+
+    headers = {}
+    if result.get("checksum_sha256"):
+        headers["X-Checksum-SHA256"] = result["checksum_sha256"]
+
+    response = FileResponse(
+        path=result["file_path"],
+        filename=result["filename"],
+        media_type=result["media_type"],
+        headers=headers,
+        background=_make_cleanup_task(result.get("cleanup_paths", [])),
+    )
+    return response
+
+
+def _make_cleanup_task(paths: list[str]):
+    """Return a Starlette ``BackgroundTask`` that deletes temp files."""
+    from starlette.background import BackgroundTask
+
+    def _cleanup() -> None:
+        for p in paths:
+            try:
+                if os.path.exists(p):
+                    os.unlink(p)
+            except OSError:
+                pass
+
+    return BackgroundTask(_cleanup)
 
 
 @router.post(

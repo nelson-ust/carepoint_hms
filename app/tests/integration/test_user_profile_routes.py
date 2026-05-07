@@ -50,13 +50,17 @@ class TestUserProfileRoutes:
         assert res.json()["job_title"] == "Senior Doctor"
 
     def test_update_me_with_phone(self, client, auth_header):
+        import uuid
+        # Use a unique phone number to avoid UniqueViolation from stale
+        # rows left by previous test runs in the shared test database.
+        unique_phone = f"+234{uuid.uuid4().int % 10**10:010d}"
         res = client.put(
             "/api/v1/users/me",
-            json={"phone_number": "+2348012345678"},
+            json={"phone_number": unique_phone},
             headers=auth_header,
         )
         assert res.status_code == 200
-        assert res.json()["phone_number"] == "+2348012345678"
+        assert res.json()["phone_number"] == unique_phone
 
     def test_update_me_invalid_field(self, client, auth_header):
         # Pydantic ignores extra fields by default unless model is strict;

@@ -34,6 +34,108 @@ class DatabaseBackupService:
             raise NotFoundError(message="Backup record not found.")
         return backup
 
+    def prepare_download_file(
+        self,
+        backup_id: int,
+    ) -> dict:
+        """
+        Download a backup artifact from S3, decrypt it if encrypted, and
+        return the path to the ready-to-serve **decrypted** file.
+
+        The caller is responsible for deleting the temp files listed in
+        ``cleanup_paths`` once the response has been streamed.
+        """
+        from app.core.cryptography import decrypt_bytes
+
+        backup = self.get_backup_by_id(backup_id)
+
+        if backup.status != "COMPLETED":
+            raise BadRequestError(
+                message="Cannot download a backup that has not completed successfully."
+            )
+
+        s3_key = getattr(backup, "s3_key", None) or f"backups/{backup.filename}"
+
+        with get_master_db_context() as master_db:
+            tenant = master_db.query(Tenant).filter(Tenant.code == self.tenant_code).first()
+            if not tenant:
+                raise NotFoundError(message="Tenant not found.")
+            bucket_name = tenant.aws_s3_bucket_name or "dummy-bucket"
+
+        temp_dir = tempfile.gettempdir()
+        downloaded_path = os.path.join(temp_dir, f"dl_{backup.id}_{backup.filename}")
+        cleanup_paths = [downloaded_path]
+
+        # ── Retrieve the artifact ────────────────────────────────────
+        s3_service = S3Service()
+        if s3_service.is_enabled:
+            logger.info(
+                "Downloading backup %s from S3 bucket=%s key=%s",
+                backup.id, bucket_name, s3_key,
+            )
+            s3_service.s3_client.download_file(bucket_name, s3_key, downloaded_path)
+        else:
+            # Dev fallback: try the local:// path from backup creation.
+            s3_url = getattr(backup, "s3_url", "") or ""
+            local_src = s3_url[len("local://"):] if s3_url.startswith("local://") else None
+            if local_src and os.path.exists(local_src):
+                import shutil
+                logger.info("S3 disabled — copying local artifact %s", local_src)
+                shutil.copy2(local_src, downloaded_path)
+            elif os.path.exists(downloaded_path):
+                logger.info("S3 disabled — using existing local file %s", downloaded_path)
+            else:
+                raise BadRequestError(
+                    message="Backup artifact could not be retrieved (S3 disabled and no local copy exists)."
+                )
+
+        if not os.path.exists(downloaded_path):
+            raise BadRequestError(
+                message="Backup artifact could not be retrieved from storage."
+            )
+
+        logger.info(
+            "Backup %s downloaded (%d bytes, is_encrypted=%s)",
+            backup.id, os.path.getsize(downloaded_path),
+            getattr(backup, "is_encrypted", False),
+        )
+
+        # ── Decrypt if encrypted ─────────────────────────────────────
+        serve_path = downloaded_path
+        is_encrypted = getattr(backup, "is_encrypted", False)
+        if is_encrypted:
+            decrypted_path = downloaded_path + ".dec"
+            logger.info("Decrypting backup %s", backup.id)
+            try:
+                encrypted_data = open(downloaded_path, "rb").read()
+                with open(decrypted_path, "wb") as f:
+                    f.write(decrypt_bytes(encrypted_data))
+            except Exception as exc:
+                logger.error("Decryption failed for backup %s: %s", backup.id, exc)
+                raise BadRequestError(
+                    message=f"Failed to decrypt backup: {exc}"
+                )
+            serve_path = decrypted_path
+            cleanup_paths.append(decrypted_path)
+            logger.info(
+                "Decrypted backup %s (%d bytes)",
+                backup.id, os.path.getsize(decrypted_path),
+            )
+
+        # Derive a human-friendly download filename
+        download_filename = backup.filename
+        if download_filename.endswith(".enc"):
+            download_filename = download_filename[:-4]
+
+        return {
+            "file_path": serve_path,
+            "filename": download_filename,
+            "size_bytes": os.path.getsize(serve_path),
+            "checksum_sha256": getattr(backup, "checksum_sha256", None),
+            "media_type": "application/octet-stream",
+            "cleanup_paths": cleanup_paths,
+        }
+
     def trigger_backup(self) -> DatabaseBackup:
         """
         Trigger a new database backup for the tenant.

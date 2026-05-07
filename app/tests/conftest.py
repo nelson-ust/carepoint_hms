@@ -15,6 +15,10 @@ test_db_url = os.environ.get(
 os.environ["CAREPOINT_HMS_DATABASE_URL"] = test_db_url
 os.environ["CAREPOINT_HMS_MASTER_DATABASE_URL"] = test_db_url
 os.environ["CAREPOINT_HMS_SECRET_KEY"] = "test-secret-key-please-change-to-something-longer-and-more-secure-2026"
+# Disable in-memory rate limiting during tests.  The test suite fires 100+
+# login requests from the same TestClient IP within 60s, which exhausts the
+# per-path bucket and causes auth_header fixtures to receive 429 responses.
+os.environ["CAREPOINT_HMS_RATE_LIMIT_ENABLED"] = "false"
 
 from typing import Generator
 import pytest
@@ -153,22 +157,6 @@ def db_session(database_engine) -> Generator:
         session.close()
 
 
-@pytest.fixture(scope="session")
-def client(app_module, database_engine):
-    """
-    FastAPI TestClient wired to the running app.
-
-    Two things are necessary for integration tests in a multi-tenant setup:
-
-    1. A mock tenant is injected into the request context so that route-level
-       branching (``if get_current_tenant() is None`` → SaaS admin path)
-       resolves to the normal tenant path.
-    2. The ``get_db`` dependency is overridden to return a session bound to
-       the **default** engine (``DATABASE_URL``), which is where
-       ``create_tables()`` placed the tenant-model tables. Without this
-       override the dependency falls back to the master engine
-       (``MASTER_DATABASE_URL``) where tenant tables do not exist.
-    """
 # Build a minimal stand-in that satisfies attribute access performed by
 # routes and services (e.g. .id, .code, .active_subscription, .subscriptions).
 from types import SimpleNamespace
@@ -234,6 +222,7 @@ def client(app_module, database_engine):
         if m.cls is not InjectTestTenantMiddleware
     ]
     app_module.middleware_stack = None
+
 
 
 

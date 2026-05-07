@@ -91,6 +91,119 @@ class TenantBackupService:
             raise NotFoundError(message="Backup record not found.")
         return record
 
+    def prepare_download_file(
+        self,
+        backup_id: int,
+    ) -> dict:
+        """
+        Download a backup artifact from S3 (or local storage), decrypt it
+        when encrypted, and return the path to the ready-to-serve
+        **decrypted** file.
+
+        The caller is responsible for deleting the temp files listed in
+        ``cleanup_paths`` once the response has been streamed.
+        """
+        record = self.get_backup(backup_id)
+
+        if record.status != "COMPLETED":
+            raise BadRequestError(
+                message="Cannot download a backup that has not completed successfully."
+            )
+
+        s3_key = record.s3_key
+        if not s3_key:
+            raise BadRequestError(
+                message="No S3 storage key found for this backup."
+            )
+
+        _, _, bucket_name = self._resolve_tenant()
+
+        temp_dir = tempfile.gettempdir()
+        downloaded_path = Path(temp_dir) / f"dl_{record.id}_{record.filename}"
+        cleanup_paths: list[Path] = [downloaded_path]
+
+        # ── Retrieve the artifact ────────────────────────────────────
+        s3 = S3Service()
+        if getattr(s3, "is_enabled", False) and bucket_name:
+            logger.info(
+                "Downloading backup %s from S3 bucket=%s key=%s",
+                record.id, bucket_name, s3_key,
+            )
+            s3.s3_client.download_file(bucket_name, s3_key, str(downloaded_path))
+        else:
+            # Dev fallback: the s3_url may carry a local:// path from
+            # when the backup was created with S3 disabled.
+            local_src = self._resolve_local_path(record)
+            if local_src and local_src.exists():
+                logger.info(
+                    "S3 disabled — copying local artifact %s", local_src,
+                )
+                import shutil
+                shutil.copy2(str(local_src), str(downloaded_path))
+            else:
+                raise BadRequestError(
+                    message=(
+                        "Backup artifact could not be retrieved. "
+                        "S3 is disabled and no local copy exists."
+                    ),
+                )
+
+        if not downloaded_path.exists():
+            raise BadRequestError(
+                message="Backup artifact could not be retrieved from storage."
+            )
+
+        logger.info(
+            "Backup %s downloaded (%d bytes, is_encrypted=%s)",
+            record.id, downloaded_path.stat().st_size, record.is_encrypted,
+        )
+
+        # ── Decrypt if the backup was encrypted at rest ──────────────
+        serve_path = downloaded_path
+        if record.is_encrypted:
+            decrypted_path = Path(str(downloaded_path) + ".dec")
+            logger.info("Decrypting backup %s -> %s", downloaded_path.name, decrypted_path.name)
+            try:
+                self._decrypt_file(downloaded_path, decrypted_path)
+            except Exception as exc:
+                logger.error("Decryption failed for backup %s: %s", record.id, exc)
+                raise BadRequestError(
+                    message=f"Failed to decrypt backup: {exc}"
+                )
+            serve_path = decrypted_path
+            cleanup_paths.append(decrypted_path)
+            logger.info(
+                "Decrypted backup %s (%d bytes)",
+                record.id, decrypted_path.stat().st_size,
+            )
+
+        # Derive a human-friendly download filename.  If the stored name
+        # ends with ".enc" strip it so the admin gets a clean ".dump".
+        download_filename = record.filename
+        if download_filename.endswith(".enc"):
+            download_filename = download_filename[:-4]
+
+        return {
+            "file_path": str(serve_path),
+            "filename": download_filename,
+            "size_bytes": serve_path.stat().st_size,
+            "checksum_sha256": record.checksum_sha256,
+            "media_type": "application/octet-stream",
+            "cleanup_paths": [str(p) for p in cleanup_paths],
+        }
+
+    @staticmethod
+    def _resolve_local_path(record) -> Optional[Path]:
+        """
+        Extract a usable filesystem path from a ``local://`` s3_url
+        stored when S3 was disabled during backup creation.
+        """
+        s3_url = record.s3_url or ""
+        if s3_url.startswith("local://"):
+            candidate = Path(s3_url[len("local://"):])
+            return candidate
+        return None
+
     # ------------------------------------------------------------------
     # CREATE
     # ------------------------------------------------------------------
@@ -130,6 +243,7 @@ class TenantBackupService:
         temp_dir = tempfile.gettempdir()
         dump_path = Path(temp_dir) / dump_filename
         encrypted_path: Optional[Path] = None
+        upload_path: Path = dump_path  # default; updated if encryption runs
 
         try:
             self._run_pg_dump(db_url, dump_path)
@@ -184,12 +298,23 @@ class TenantBackupService:
             )
             raise
         finally:
+            # When S3 is enabled the artifact lives in the bucket, so we
+            # clean up all local temp files.  When S3 is *disabled* the
+            # uploaded file (``upload_path``) is the only copy — we must
+            # keep it so ``prepare_download_file`` can serve it later.
+            s3 = S3Service()
+            s3_enabled = getattr(s3, "is_enabled", False)
+
             for path in (dump_path, encrypted_path):
-                if path is not None and path.exists():
-                    try:
-                        path.unlink()
-                    except OSError:
-                        pass
+                if path is None or not path.exists():
+                    continue
+                # Keep the file that was "uploaded" locally when S3 is off.
+                if not s3_enabled and path == upload_path:
+                    continue
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
 
         return record
 

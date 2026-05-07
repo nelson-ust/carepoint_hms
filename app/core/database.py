@@ -328,29 +328,6 @@ def check_database_connection_or_raise() -> None:
         raise RuntimeError(f"Unable to connect to PostgreSQL database: {exc}") from exc
 
 
-def get_master_db():
-    """
-    Dependency that provides a session to the shared/master database.
-    """
-    if not MASTER_DATABASE_URL:
-        # Fallback to default if master not set (for single-tenant dev)
-        db = SessionLocal()
-        try:
-            yield db
-        finally:
-            db.close()
-        return
-
-    # Create a one-off engine/session for the master DB
-    # In production, you might want to cache this engine too.
-    master_engine = create_engine(MASTER_DATABASE_URL, future=True)
-    session = Session(master_engine)
-    try:
-        yield session
-    finally:
-        session.close()
-        master_engine.dispose()
-
 
 def dispose_engine() -> None:
     """

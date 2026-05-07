@@ -234,6 +234,13 @@ class Settings(BaseSettings):
     REDIS_URL: Optional[str] = None
 
     # =========================================================
+    # RATE LIMITING
+    # =========================================================
+    RATE_LIMIT_ENABLED: bool = True
+    RATE_LIMIT_MAX_REQUESTS: int = 100
+    RATE_LIMIT_WINDOW_SECONDS: int = 60
+
+    # =========================================================
     # VALIDATORS
     # =========================================================
     @field_validator("ENVIRONMENT")

@@ -38,3 +38,14 @@ class DatabaseBackupReadSchema(BaseModel):
     date_created: datetime
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class BackupDownloadMetadataSchema(BaseModel):
+    """
+    Metadata returned alongside the streamed backup file via response
+    headers.  This schema documents the shape; the actual endpoint
+    returns a binary ``FileResponse``.
+    """
+    filename: str
+    size_bytes: int
+    checksum_sha256: Optional[str] = None
