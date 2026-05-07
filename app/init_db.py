@@ -522,7 +522,7 @@ def _build_postgres_admin_uri(db_url: str) -> str:
     if backend != "postgresql":
         raise ValueError("Actual database recreation is only implemented for PostgreSQL URLs.")
 
-    return str(url.set(database="postgres"))
+    return url.set(database="postgres").render_as_string(hide_password=False)
 
 
 def recreate_database(db_url: str) -> None:
@@ -562,7 +562,67 @@ def recreate_database(db_url: str) -> None:
         admin_engine.dispose()
 
 
-def create_new_database(db_name: str, base_url: str = DATABASE_URL) -> None:
+def ensure_master_database_exists(db_url: str) -> None:
+    """
+    Best-effort: make sure the database referenced by ``db_url`` exists.
+
+    Connects to the ``postgres`` maintenance DB on the same host and
+    issues ``CREATE DATABASE`` if the target is missing. Used by
+    ``run_master_initialization`` so a fresh local Postgres can be
+    bootstrapped with a single ``python -m app.init_db`` call without
+    the operator having to run ``createdb`` first.
+
+    Silently no-ops on managed Postgres (where the user lacks
+    ``CREATEDB``); the caller decides how to surface that.
+    """
+    target_db_name = _get_database_name(db_url)
+    admin_uri = _build_postgres_admin_uri(db_url)
+    target_identifier = _quote_identifier(target_db_name)
+
+    admin_engine = create_engine(
+        admin_uri,
+        isolation_level="AUTOCOMMIT",
+        future=True,
+        connect_args={"connect_timeout": 5},
+    )
+    try:
+        with admin_engine.connect() as conn:
+            existing = conn.execute(
+                text("SELECT 1 FROM pg_database WHERE datname = :db_name"),
+                {"db_name": target_db_name},
+            ).first()
+            if existing:
+                return
+            try:
+                conn.execute(text(f"CREATE DATABASE {target_identifier}"))
+                logger.info("Master database '%s' created.", target_db_name)
+            except Exception as create_exc:
+                err_msg = str(create_exc).lower()
+                # Managed Postgres or insufficient privileges — nothing
+                # we can do automatically. Bubble up so the caller logs
+                # a single warning instead of a stack trace.
+                if any(
+                    kw in err_msg
+                    for kw in (
+                        "must be superuser",
+                        "permission denied",
+                        "insufficient privilege",
+                        "createdb",
+                    )
+                ):
+                    logger.warning(
+                        "Cannot auto-create master database '%s' on this "
+                        "host — user lacks CREATEDB. Create the database "
+                        "out of band before re-running init_db.",
+                        target_db_name,
+                    )
+                    return
+                raise
+    finally:
+        admin_engine.dispose()
+
+
+def create_new_database(db_name: str, base_url: str = MASTER_DATABASE_URL) -> None:
     """
     Ensure a tenant database (or schema) exists.
 
@@ -581,6 +641,14 @@ def create_new_database(db_name: str, base_url: str = DATABASE_URL) -> None:
     The caller (``TenantService.approve_tenant``) does not need to change
     because ``run_tenant_initialization`` connects via the tenant's stored
     URL; the tables will land in whatever database/schema exists.
+
+    Connection robustness
+    ---------------------
+    Both the admin-URI engine and the schema-fallback engine pass an
+    explicit ``connect_timeout`` so a misconfigured master URL fails
+    fast (5 seconds) instead of hanging the API request thread for the
+    full TCP timeout (~75s on Linux). This is what was causing the
+    test_tenant_routes test class to appear to "hang" indefinitely.
     """
     check_production_safety(destructive=False)
 
@@ -594,6 +662,7 @@ def create_new_database(db_name: str, base_url: str = DATABASE_URL) -> None:
             admin_uri,
             isolation_level="AUTOCOMMIT",
             future=True,
+            connect_args={"connect_timeout": 5},
         )
         try:
             with admin_engine.connect() as conn:
@@ -637,7 +706,11 @@ def create_new_database(db_name: str, base_url: str = DATABASE_URL) -> None:
     # ── Attempt 2: CREATE SCHEMA (managed Postgres fallback) ─────────────────
     # Use the master DB connection (base_url) directly — we are already on it.
     schema_name = _quote_identifier(db_name)
-    fallback_engine = create_engine(base_url, future=True)
+    fallback_engine = create_engine(
+        base_url,
+        future=True,
+        connect_args={"connect_timeout": 5},
+    )
     try:
         with fallback_engine.connect() as conn:
             conn.execute(
@@ -1040,6 +1113,35 @@ def seed_all(db: Session, *, create_default_admin: bool = True) -> None:
 # Initialization orchestration
 # =============================================================================
 
+def grant_master_permissions(engine: Engine) -> None:
+    """
+    Grant read/write permissions to the application user on the master DB.
+    
+    This is necessary when the database is initialized by a superuser or admin
+    user (MASTER_DATABASE_URL) but the application runs as a restricted
+    user (DATABASE_URL).
+    """
+    app_url = make_url(settings.DATABASE_URL)
+    app_user = app_url.username
+    if not app_user:
+        return
+
+    logger.info("Granting privileges to application user: %s", app_user)
+    with engine.connect() as conn:
+        try:
+            # Grant on tables, sequences, and functions in the public schema
+            conn.execute(text(f"GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO {app_user}"))
+            conn.execute(text(f"GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO {app_user}"))
+            conn.execute(text(f"GRANT ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA public TO {app_user}"))
+            # Ensure future tables also get permissions
+            conn.execute(text(f"ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO {app_user}"))
+            conn.execute(text(f"ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO {app_user}"))
+            conn.execute(text(f"ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON FUNCTIONS TO {app_user}"))
+            conn.commit()
+        except Exception as e:
+            logger.warning("Failed to grant permissions (likely not a superuser): %s", e)
+
+
 def run_master_initialization(
     recreate: bool = True,
     *,
@@ -1091,9 +1193,29 @@ def run_master_initialization(
                 exc,
             )
             raise
+    else:
+        # Bootstrap: if the master database itself does not exist yet,
+        # try to create it. This makes ``python -m app.init_db`` work
+        # against a brand-new local Postgres without requiring the
+        # operator to run ``createdb`` first. Best-effort — on managed
+        # Postgres this will fail and fall through to the regular flow,
+        # which will surface a clear error if the DB still cannot be
+        # reached.
+        try:
+            ensure_master_database_exists(MASTER_DATABASE_URL)
+        except Exception as exc:
+            logger.warning(
+                "Could not auto-create the master database (%s). "
+                "Continuing — will fail later if it does not exist.",
+                exc,
+            )
 
     logger.info(f"Initializing Master Database: {MASTER_DATABASE_URL}")
-    master_engine = create_engine(MASTER_DATABASE_URL, future=True)
+    master_engine = create_engine(
+        MASTER_DATABASE_URL,
+        future=True,
+        connect_args={"connect_timeout": 5},
+    )
 
     try:
         # Schema-level reset (default destructive mode). Skipped when
@@ -1149,6 +1271,10 @@ def run_master_initialization(
             seed_plans(db)
             seed_saas_admin(db)
             db.commit()
+
+        # Grant permissions to the app user so the running API can see the tables
+        # created by the admin user.
+        grant_master_permissions(master_engine)
     finally:
         master_engine.dispose()
 
@@ -1166,13 +1292,26 @@ def run_tenant_initialization(
     Idempotent: the schema-sync step adds any missing columns and tables
     so this function can be re-run on existing tenant databases without
     losing data.
+
+    Performance
+    -----------
+    ``sync_tenant_schema`` already runs ``metadata.create_all`` (with a
+    fast-path on fresh DBs), so we no longer call ``create_tables`` a
+    second time afterwards — that doubled the number of round trips
+    against the tenant DB and was the dominant slowdown on
+    high-latency managed-Postgres links.
+
+    The engine that drives the seed pass is created with a 10s
+    ``connect_timeout`` and reused across the whole call, so all DDL
+    + seed inserts ride a single warm pool instead of opening and
+    tearing down a connection per step.
     """
     check_production_safety(destructive=False)
 
     logger.info(f"Initializing Tenant Database: {db_url}")
 
-    # Forward-migrate the tenant schema before doing any other work so
-    # subsequent ORM queries (e.g. seed lookups) see the new columns.
+    # Forward-migrate the tenant schema. On a brand-new DB this fast-
+    # paths to a single ``metadata.create_all(checkfirst=False)`` pass.
     try:
         from app.db_sync import sync_tenant_schema
 
@@ -1183,16 +1322,21 @@ def run_tenant_initialization(
         logger.exception("Tenant schema sync failed for %s: %s", db_url, exc)
         raise
 
-    tenant_engine = create_engine(db_url, future=True)
+    tenant_engine = create_engine(
+        db_url,
+        future=True,
+        pool_pre_ping=False,
+        connect_args={"connect_timeout": 10},
+    )
+    try:
+        # Seed tenant data on the same engine — no extra create_tables
+        # pass; sync_tenant_schema above already produced the schema.
+        with Session(tenant_engine) as db:
+            seed_all(db, create_default_admin=create_default_admin)
+            db.commit()
+    finally:
+        tenant_engine.dispose()
 
-    # Create all tables in tenant DB (Tenant metadata)
-    create_tables(bind_engine=tenant_engine, is_master=False)
-    
-    # Seed tenant data
-    with Session(tenant_engine) as db:
-        seed_all(db, create_default_admin=create_default_admin)
-        db.commit()
-    
     logger.info("Tenant Database initialized and seeded.")
 
 

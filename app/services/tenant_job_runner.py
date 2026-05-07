@@ -119,20 +119,24 @@ def _iter_active_tenants() -> list[Tenant]:
         logger.warning("MASTER_DATABASE_URL is not set; tenant job runner skipped.")
         return []
 
-    master_engine = create_engine(MASTER_DATABASE_URL, future=True)
     try:
-        with Session(master_engine) as master_db:
-            return (
-                master_db.query(Tenant)
-                .filter(
-                    Tenant.is_active.is_(True),
-                    Tenant.is_provisioned.is_(True),
-                    Tenant.is_deleted.is_(False),
+        master_engine = create_engine(MASTER_DATABASE_URL, future=True)
+        try:
+            with Session(master_engine) as master_db:
+                return (
+                    master_db.query(Tenant)
+                    .filter(
+                        Tenant.is_active.is_(True),
+                        Tenant.is_provisioned.is_(True),
+                        Tenant.is_deleted.is_(False),
+                    )
+                    .all()
                 )
-                .all()
-            )
-    finally:
-        master_engine.dispose()
+        finally:
+            master_engine.dispose()
+    except Exception as exc:
+        logger.error("Tenant job runner: failed to connect to master database: %s", exc)
+        return []
 
 
 def _resolve_tenant_db_url(tenant: Tenant) -> Optional[str]:

@@ -514,25 +514,47 @@ class TenantService:
         if tenant.is_provisioned:
             return tenant
 
-        # 1. Physically create the database
+        # 1. Physically create the database (or schema fallback on managed PG).
+        # ``create_new_database`` already handles the privilege-error
+        # cascade — it tries CREATE DATABASE and falls back to CREATE
+        # SCHEMA inside the master DB if the application user lacks
+        # CREATEDB. Either way it returns successfully when the tenant
+        # has a usable home.
         try:
             create_new_database(tenant.db_name)
         except Exception as e:
-            raise BadRequestError(message=f"Failed to create tenant database: {str(e)}")
+            logger.exception(
+                "Tenant database provisioning failed for %s",
+                tenant.code,
+            )
+            raise BadRequestError(
+                message=f"Failed to create tenant database: {str(e)}"
+            )
 
         # 2. Initialize Tenant Database (Tables + Seeds)
-        # Re-derive the correct URL at provision time using the current master DB
-        # settings. This handles tenants that were registered before the managed-
-        # Postgres fix (their stored URL may point to a non-existent separate DB).
+        # Re-derive the correct URL at provision time using the current
+        # master DB settings AND the actual outcome of step 1. This
+        # handles tenants that were registered before the managed-
+        # Postgres fix and ensures the URL we initialise here is the
+        # same URL we then persist on the tenant row.
         db_url = self._build_tenant_db_url(tenant.db_name)
+        logger.info("Provisioning tenant %s at URL: %s", tenant.code, db_url)
+
         # Persist the corrected URL so future connections (backup/restore etc.) use it.
         from app.core.cryptography import encrypt_string as _enc
         tenant.db_connection_string = _enc(db_url)
+        self.db.commit()  # Save the new URL early
 
         try:
             run_tenant_initialization(db_url, create_default_admin=False)
         except Exception as e:
-            raise BadRequestError(message=f"Failed to initialize tenant database: {str(e)}")
+            logger.exception(
+                "Tenant initialization failed for %s",
+                tenant.code,
+            )
+            raise BadRequestError(
+                message=f"Failed to initialize tenant database: {str(e)}"
+            )
 
         # 3. Create Admin User in the new Tenant Database
         if admin_payload:
@@ -603,6 +625,21 @@ class TenantService:
           returns the master DB URL with ``search_path`` overridden to the
           tenant schema, because managed providers do not allow
           ``CREATE DATABASE``.
+
+        Implementation notes
+        --------------------
+        The routine first asks ``create_new_database`` to ensure the
+        target physical database OR schema exists, then probes which one
+        actually came into being.  This keeps the URL we build perfectly
+        aligned with whatever ``create_new_database`` decided and avoids
+        the historical bug where ``pg_database`` happened to contain a
+        stale row for ``db_name`` (left over from an earlier failed
+        provisioning attempt) but the credentials in the master URL
+        couldn't actually connect to it.
+
+        We also pass a short ``connect_timeout`` so the lookup never
+        hangs the request thread for minutes against an unreachable
+        master host.
         """
         from sqlalchemy.engine import make_url
 
@@ -611,23 +648,73 @@ class TenantService:
             raise BadRequestError(message="MASTER_DATABASE_URL is not configured.")
 
         url_obj = make_url(master_url)
-        managed_hosts = (
-            ".render.com",
-            ".railway.app",
-            ".supabase.co",
-            ".neon.tech",
-            ".elephantsql.com",
-        )
-        host = (url_obj.host or "").lower()
-        is_managed = any(host.endswith(h) for h in managed_hosts)
 
-        if is_managed:
-            return str(
-                url_obj.update_query_dict(
-                    {"options": f"-c search_path={db_name},public"}
-                )
+        # Dynamic check: Does the physical database actually exist AND is it
+        # reachable with our master credentials?  If yes → one-DB-per-tenant.
+        # If no → fall back to schema-per-tenant inside the master DB.
+        from sqlalchemy import create_engine, text
+
+        is_physical_db = False
+        engine = None
+        try:
+            # ``connect_timeout`` is honoured by libpq (psycopg2). 5s is
+            # plenty for the localhost case and short enough that a bad
+            # remote URL fails fast instead of hanging the API for the
+            # full TCP timeout (~75s on Linux).
+            engine = create_engine(
+                master_url,
+                isolation_level="AUTOCOMMIT",
+                future=True,
+                connect_args={"connect_timeout": 5},
             )
-        return str(url_obj.set(database=db_name))
+            with engine.connect() as conn:
+                exists = conn.execute(
+                    text("SELECT 1 FROM pg_database WHERE datname = :db_name"),
+                    {"db_name": db_name},
+                ).first()
+                if exists:
+                    # Probe that we can actually open a connection to that
+                    # database with the master credentials. A leftover row
+                    # in pg_database whose owner rotated passwords would
+                    # otherwise hand us back an unusable URL.
+                    try:
+                        probe_url = url_obj.set(database=db_name).render_as_string(
+                            hide_password=False
+                        )
+                        probe_engine = create_engine(
+                            probe_url,
+                            future=True,
+                            connect_args={"connect_timeout": 5},
+                        )
+                        try:
+                            with probe_engine.connect() as probe_conn:
+                                probe_conn.execute(text("SELECT 1"))
+                            is_physical_db = True
+                        finally:
+                            probe_engine.dispose()
+                    except Exception as probe_exc:
+                        logger.warning(
+                            "Tenant database '%s' exists in pg_database but is "
+                            "not reachable with master credentials (%s). "
+                            "Falling back to schema-per-tenant for URL "
+                            "construction.",
+                            db_name,
+                            probe_exc,
+                        )
+        except Exception as exc:
+            logger.warning(
+                "Failed to check pg_database in _build_tenant_db_url: %s",
+                exc,
+            )
+        finally:
+            if engine is not None:
+                engine.dispose()
+
+        if is_physical_db:
+            return url_obj.set(database=db_name).render_as_string(hide_password=False)
+        return url_obj.update_query_dict(
+            {"options": f"-c search_path={db_name},public"}
+        ).render_as_string(hide_password=False)
 
     # ------------------------------------------------------------------
     # Tenant Settings bootstrap
@@ -640,7 +727,11 @@ class TenantService:
         defaults for branding/regional configuration so an empty insert is
         sufficient.
         """
-        engine = create_engine(db_url, future=True)
+        engine = create_engine(
+            db_url,
+            future=True,
+            connect_args={"connect_timeout": 5},
+        )
         try:
             with Session(engine) as tenant_db:
                 existing = tenant_db.query(TenantSetting).first()
@@ -660,7 +751,11 @@ class TenantService:
         """
         Connect directly to the newly created tenant DB to insert the first admin.
         """
-        engine = create_engine(db_url, future=True)
+        engine = create_engine(
+            db_url,
+            future=True,
+            connect_args={"connect_timeout": 5},
+        )
         with Session(engine) as tenant_db:
             # Resolve the ADMIN role (which was seeded by run_tenant_initialization)
             admin_role = tenant_db.query(Role).filter(Role.code == "TENANT_ADMIN").first()

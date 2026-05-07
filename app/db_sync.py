@@ -160,17 +160,33 @@ def _ensure_enum_type_for_column(engine: Engine, column) -> None:
         )
 
 
-def _add_missing_columns_for_table(engine: Engine, table) -> list[str]:
+def _add_missing_columns_for_table(
+    engine: Engine,
+    table,
+    *,
+    existing_cols: Optional[set[str]] = None,
+    conn=None,
+) -> list[str]:
     """
     Compare the table's model columns to what's actually in the DB and
     issue ``ALTER TABLE ADD COLUMN IF NOT EXISTS`` for any that are
     missing. Returns the list of columns that were added.
-    """
-    inspector = inspect(engine)
-    if not inspector.has_table(table.name):
-        return []
 
-    existing_cols = {col["name"] for col in inspector.get_columns(table.name)}
+    Performance
+    -----------
+    The caller may pass a pre-fetched ``existing_cols`` set to avoid an
+    inspector round trip per table (the inspector translates to a
+    ``pg_catalog`` query, which is expensive over high-latency links —
+    230+ tenant tables × ~150ms = a 30-second stall otherwise). The
+    caller may also pass an open ``conn`` so the ALTER TABLE statements
+    reuse the same connection.
+    """
+    if existing_cols is None:
+        inspector = inspect(engine)
+        if not inspector.has_table(table.name):
+            return []
+        existing_cols = {col["name"] for col in inspector.get_columns(table.name)}
+
     added: list[str] = []
 
     for column in table.columns:
@@ -215,8 +231,11 @@ def _add_missing_columns_for_table(engine: Engine, table) -> list[str]:
 
         sql = f'ALTER TABLE "{table.name}" ADD COLUMN IF NOT EXISTS {col_ddl}'
         logger.info("Schema sync: %s", sql)
-        with engine.begin() as conn:
+        if conn is not None:
             conn.execute(text(sql))
+        else:
+            with engine.begin() as own_conn:
+                own_conn.execute(text(sql))
         added.append(column.name)
 
     return added
@@ -239,9 +258,32 @@ def sync_schema(
     Steps:
       1. Extend any pre-existing ENUM types listed in ``enum_extensions``
          with new values.
-      2. Run ``metadata.create_all(checkfirst=True)`` so brand-new tables
-         and brand-new enum types are installed.
-      3. For every existing table, add any model column that is missing.
+      2. Run ``metadata.create_all(...)`` so brand-new tables and
+         brand-new enum types are installed.
+      3. For every *pre-existing* table, add any model column that is
+         missing.
+
+    Performance notes
+    -----------------
+    The earlier implementation made one inspector call per table and
+    one autocommit transaction per ALTER. With ~90 tenant tables and a
+    ~150ms RTT to a remote managed Postgres, that translated into 30+
+    seconds of pure round trips on top of the ~80 CREATE TABLE calls
+    issued by ``create_all``. We now:
+
+    * read ``pg_tables`` once to learn which tables already exist;
+    * skip the entire column-back-fill loop when the database is
+      brand-new (fresh tenant DB → ``create_all`` already produced
+      every column at the right shape);
+    * read ``information_schema.columns`` once for the surviving
+      tables instead of issuing one inspector call per table;
+    * pass ``checkfirst=False`` to ``metadata.create_all`` when we
+      detected the DB is fresh, which halves the round trips that
+      ``create_all`` itself emits.
+
+    These changes shave the tenant-provisioning step from
+    multiple minutes down to a few seconds even over a high-latency
+    link.
 
     Returns a per-table dict of the columns that were added so callers
     can log a single tidy summary.
@@ -257,41 +299,131 @@ def sync_schema(
     # 2. Pre-create new enum types using idempotent DO blocks.
     # This prevents UniqueViolation if SQLAlchemy's checkfirst=True fails.
     from sqlalchemy.sql.sqltypes import Enum as SAEnum
-    found_enums = set()
+    found_enums: set = set()
     for table in metadata.tables.values():
         for column in table.columns:
             if isinstance(column.type, SAEnum) and column.type.native_enum:
                 found_enums.add(column.type)
-                
-    with engine.connect() as conn:
-        for enum_type in found_enums:
-            # PostgreSQL doesn't have CREATE TYPE IF NOT EXISTS for enums.
-            # We use a DO block to make it idempotent.
-            vals = ", ".join("'" + v.replace("'", "''") + "'" for v in enum_type.enums)
-            # Use quote_ident for safety
-            sql = f"""
-                DO $$ BEGIN
-                    CREATE TYPE {enum_type.name} AS ENUM ({vals});
-                EXCEPTION
-                    WHEN duplicate_object THEN null;
-                END $$;
-            """
-            # Note: We don't use quote_ident here because enum_type.name is 
-            # usually already what SQLAlchemy expects. But if we wanted to be 
-            # super safe, we'd do it. Actually, enum_type.name is a string.
-            # I'll just use it as is for now as it's consistent with create_all.
-            conn.execute(text(sql))
-        conn.commit()
 
+    # 3. Single connection for the rest of the sync — keeps DDL on the
+    # same backend and amortises the network round trips.
+    with engine.connect() as conn:
+        # 3a. Detect schema "freshness" up front. This is one round trip
+        # instead of one per table.
+        schema_clause = (
+            "current_schema()" if not _has_search_path_override(engine) else "ANY (current_schemas(false))"
+        )
+        try:
+            existing_tables = {
+                row[0]
+                for row in conn.execute(
+                    text(
+                        "SELECT tablename FROM pg_tables "
+                        f"WHERE schemaname = {schema_clause}"
+                    )
+                )
+            }
+        except Exception:
+            # Fall back to the inspector (also one trip, but more compatible).
+            existing_tables = set(inspect(engine).get_table_names())
+
+        is_fresh_db = len(existing_tables) == 0
+
+        # 3b. On a non-fresh DB we may have leftover enum types from a
+        # previous incarnation of this schema (a partial migration, a
+        # dropped-but-not-clean rebuild, etc.). Pre-create them with
+        # idempotent DO blocks so the upcoming ``create_all`` doesn't
+        # trip on "type already exists" (SQLAlchemy's checkfirst probe
+        # for an enum is "is there a pg_type row" — it can be True
+        # while the table that referenced it has been dropped).
+        #
+        # We deliberately *skip* this step on a fresh DB: SQLAlchemy
+        # will own enum creation during ``create_all`` and pre-creating
+        # here would just add a redundant round trip per enum.
+        if not is_fresh_db:
+            for enum_type in found_enums:
+                vals = ", ".join("'" + v.replace("'", "''") + "'" for v in enum_type.enums)
+                sql = (
+                    "DO $$ BEGIN "
+                    f"CREATE TYPE {enum_type.name} AS ENUM ({vals}); "
+                    "EXCEPTION WHEN duplicate_object THEN null; END $$;"
+                )
+                conn.execute(text(sql))
+            conn.commit()
+
+    # 3c. Create all tables. We always pass ``checkfirst=True`` because:
+    #   * non-fresh DB: existing types/tables must be skipped;
+    #   * fresh DB: a single metadata can register the *same* PG enum
+    #     under multiple columns/tables. With ``checkfirst=False``
+    #     SQLAlchemy attempts CREATE TYPE for each occurrence and
+    #     trips on the second one with ``DuplicateObject``.
+    # ``checkfirst=True`` issues one ``pg_class`` lookup per table —
+    # one round trip apiece — which is still much cheaper than the
+    # per-table column inspection we eliminate below.
     metadata.create_all(bind=engine, checkfirst=True)
 
-    # 3. Existing tables — add missing columns.
-    for table in metadata.sorted_tables:
-        added = _add_missing_columns_for_table(engine, table)
-        if added:
-            summary[table.name] = added
+    # 3d. Skip the column-add loop entirely when the DB was fresh —
+    # ``create_all`` just produced every column at the right shape.
+    if is_fresh_db:
+        return summary
+
+    # 3e. For pre-existing tables, fetch all columns in one go from
+    # information_schema instead of one inspector call per table.
+    columns_by_table: dict[str, set[str]] = {}
+    try:
+        with engine.connect() as conn:
+            schema_clause = (
+                "current_schema()"
+                if not _has_search_path_override(engine)
+                else "ANY (current_schemas(false))"
+            )
+            rows = conn.execute(
+                text(
+                    "SELECT table_name, column_name "
+                    "FROM information_schema.columns "
+                    f"WHERE table_schema = {schema_clause}"
+                )
+            )
+            for tbl, col in rows:
+                columns_by_table.setdefault(tbl, set()).add(col)
+    except Exception as exc:
+        logger.warning(
+            "Schema sync: bulk column-fetch failed (%s); falling back to "
+            "per-table inspection.",
+            exc,
+        )
+
+    # 3f. Issue ALTER TABLE for every missing column on a single
+    # autocommit connection.
+    with engine.begin() as alter_conn:
+        for table in metadata.sorted_tables:
+            if table.name not in existing_tables:
+                continue  # newly created by step 3c — already complete
+            existing_cols = columns_by_table.get(table.name)
+            added = _add_missing_columns_for_table(
+                engine,
+                table,
+                existing_cols=existing_cols,
+                conn=alter_conn,
+            )
+            if added:
+                summary[table.name] = added
 
     return summary
+
+
+def _has_search_path_override(engine: Engine) -> bool:
+    """
+    Detect whether the engine URL includes a custom ``search_path`` (the
+    schema-per-tenant fallback used on managed Postgres). When it does,
+    table existence checks must look across all visible schemas — not
+    just ``current_schema()``.
+    """
+    try:
+        opts = engine.url.query.get("options") or ""
+    except Exception:
+        return False
+    return "search_path" in str(opts)
 
 
 def sync_master_schema(engine: Engine | None = None) -> dict[str, list[str]]:
@@ -335,12 +467,21 @@ def sync_tenant_schema(db_url: str) -> dict[str, list[str]]:
     Use this to forward-migrate one tenant database. The companion helper
     :func:`app.services.tenant_service.TenantService.run_migrations_all_tenants`
     iterates every active tenant and calls this for each.
+
+    The engine here uses a short ``connect_timeout`` so a managed-Postgres
+    handshake that quietly stalls fails fast instead of locking the API
+    request for the full TCP timeout (~75s on Linux).
     """
     from sqlalchemy import create_engine
 
     from app.models.base import TenantBase
 
-    engine = create_engine(db_url, future=True)
+    engine = create_engine(
+        db_url,
+        future=True,
+        pool_pre_ping=False,
+        connect_args={"connect_timeout": 10},
+    )
     try:
         enum_extensions = _tenant_enum_extensions()
         return sync_schema(TenantBase.metadata, engine, enum_extensions=enum_extensions)

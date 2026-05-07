@@ -1,0 +1,110 @@
+name: Test & Deploy
+
+# Triggers:
+#   * Every push to main runs the test job, then the deploy job (which only
+#     runs if tests passed AND the push hit main, not a PR).
+#   * Pull requests run the test job only.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch: {}     # lets you run the deploy manually from the UI
+
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false   # never cancel a running deploy mid-flight
+
+jobs:
+  # ─────────────────────────────────────────────────────────────────────
+  # 1. Run the integration test suite against an ephemeral Postgres.
+  # ─────────────────────────────────────────────────────────────────────
+  test:
+    name: pytest
+    runs-on: ubuntu-22.04
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: Admin123
+          POSTGRES_DB: carepoint_hms_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      CAREPOINT_HMS_TEST_DATABASE_URL: postgresql+psycopg2://postgres:Admin123@localhost:5432/carepoint_hms_test
+      CAREPOINT_HMS_DATABASE_URL:      postgresql+psycopg2://postgres:Admin123@localhost:5432/carepoint_hms_test
+      CAREPOINT_HMS_MASTER_DATABASE_URL: postgresql+psycopg2://postgres:Admin123@localhost:5432/carepoint_hms_test
+      CAREPOINT_HMS_ENVIRONMENT: test
+      CAREPOINT_HMS_SECRET_KEY: ci-secret-key-please-rotate-this-with-openssl-rand-hex-32-2026
+      CAREPOINT_HMS_RATE_LIMIT_ENABLED: "false"
+      CAREPOINT_HMS_EMAILS_ENABLED: "false"
+      CAREPOINT_HMS_SMS_ENABLED: "false"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          # Keep this in sync with PYTHON_VERSION in scripts/provision_droplet.sh
+          # so CI tests on the same interpreter the droplet runs.
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest pytest-mock python-dotenv
+
+      - name: Wait for Postgres
+        run: |
+          for i in {1..20}; do
+            pg_isready -h localhost -p 5432 -U postgres && break
+            sleep 1
+          done
+
+      - name: Run tests
+        run: pytest app/tests/integration -x --tb=short -q
+
+  # ─────────────────────────────────────────────────────────────────────
+  # 2. Deploy to the DigitalOcean droplet.
+  #    Runs only on push to main AND only if the test job passed.
+  # ─────────────────────────────────────────────────────────────────────
+  deploy:
+    name: deploy to droplet
+    runs-on: ubuntu-22.04
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    environment:
+      name: production
+      url: https://${{ secrets.DROPLET_DOMAIN }}
+    steps:
+      - name: Configure SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.DROPLET_SSH_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H "${{ secrets.DROPLET_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Run deploy script on droplet
+        run: |
+          ssh -i ~/.ssh/id_ed25519 \
+              "${{ secrets.DROPLET_USER }}@${{ secrets.DROPLET_HOST }}" \
+              "bash /opt/carepoint_hms/scripts/deploy.sh main"
+
+      - name: Smoke-test public endpoint
+        if: ${{ secrets.DROPLET_DOMAIN != '' }}
+        run: |
+          for i in 1 2 3 4 5; do
+            if curl -fsS --max-time 10 "https://${{ secrets.DROPLET_DOMAIN }}/health" >/dev/null; then
+              echo "Public smoke-test passed."
+              exit 0
+            fi
+            echo "attempt $i — waiting 5s"
+            sleep 5
+          done
+          echo "::warning::Public health-check did not respond — service may still be warming up."

@@ -2,23 +2,62 @@ from __future__ import annotations
 import os
 from dotenv import load_dotenv
 
-# Load .env file to ensure CAREPOINT_HMS_TEST_DATABASE_URL is picked up
+# Load .env file to ensure CAREPOINT_HMS_TEST_DATABASE_URL is picked up.
+# IMPORTANT: load_dotenv populates os.environ with whatever names the
+# .env declares (e.g. ``DATABASE_URL`` *without* the CAREPOINT_HMS_ prefix).
+# Pydantic settings uses ``AliasChoices("DATABASE_URL", "CAREPOINT_HMS_DATABASE_URL")``
+# and tries the *first* alias first, so a non-prefixed value in .env will
+# override anything we put in CAREPOINT_HMS_DATABASE_URL below. If .env
+# happens to point at a remote production database, the entire test suite
+# silently runs against production — and integration tests that try to
+# CREATE/DROP rows hang indefinitely or fail with confusing auth errors
+# (which is what test_tenant_routes.py was doing).
+#
+# To make the test environment truly hermetic we:
+#   1. force ``ENVIRONMENT=test`` *before* settings are imported,
+#   2. nuke any inherited unprefixed ``DATABASE_URL``/``MASTER_DATABASE_URL``
+#      that could have come from .env or the parent shell, and
+#   3. set BOTH the unprefixed and prefixed forms to the test DB so
+#      whichever AliasChoices entry pydantic picks resolves to the same
+#      hermetic test database.
 load_dotenv()
 
-# Set environment variables BEFORE any other imports to avoid Pydantic validation warnings
-# We force these for tests to ensure consistency and avoid short-key warnings.
-# We use 'carepoint_hms_test' to ensure we don't hit the dev/prod database.
+# Default to a locally-running test Postgres unless the operator has
+# explicitly pointed the suite somewhere else.
 test_db_url = os.environ.get(
-    "CAREPOINT_HMS_TEST_DATABASE_URL", 
-    "postgresql+psycopg2://postgres:Admin123@localhost:5432/carepoint_hms_test"
+    "CAREPOINT_HMS_TEST_DATABASE_URL",
+    "postgresql+psycopg2://postgres:Admin123@localhost:5432/carepoint_hms_test",
 )
+
+# Step 1 — make sure the production-shaped vars don't leak in via .env.
+for _leak in ("DATABASE_URL", "MASTER_DATABASE_URL"):
+    if os.environ.get(_leak) and not os.environ[_leak].endswith("/carepoint_hms_test"):
+        # Drop the leaked value; we'll set our own below.
+        os.environ.pop(_leak, None)
+
+# Step 2 — set BOTH alias variants so Settings.AliasChoices resolves to
+# the test DB regardless of which choice it tries first.
+os.environ["DATABASE_URL"] = test_db_url
+os.environ["MASTER_DATABASE_URL"] = test_db_url
 os.environ["CAREPOINT_HMS_DATABASE_URL"] = test_db_url
 os.environ["CAREPOINT_HMS_MASTER_DATABASE_URL"] = test_db_url
-os.environ["CAREPOINT_HMS_SECRET_KEY"] = "test-secret-key-please-change-to-something-longer-and-more-secure-2026"
+
+# Step 3 — force "test" environment + a long-enough secret key so the
+# pydantic settings model never trips its production safety guards.
+os.environ["CAREPOINT_HMS_ENVIRONMENT"] = "test"
+os.environ.setdefault("ENVIRONMENT", "test")
+os.environ["CAREPOINT_HMS_SECRET_KEY"] = (
+    "test-secret-key-please-change-to-something-longer-and-more-secure-2026"
+)
 # Disable in-memory rate limiting during tests.  The test suite fires 100+
 # login requests from the same TestClient IP within 60s, which exhausts the
 # per-path bucket and causes auth_header fixtures to receive 429 responses.
 os.environ["CAREPOINT_HMS_RATE_LIMIT_ENABLED"] = "false"
+# Disable email + SMS during tests so route handlers that lazily call
+# notification helpers do not try to reach SMTP / Twilio (those hangs
+# would otherwise look like the test suite itself is stalled).
+os.environ.setdefault("CAREPOINT_HMS_EMAILS_ENABLED", "false")
+os.environ.setdefault("CAREPOINT_HMS_SMS_ENABLED", "false")
 
 from typing import Generator
 import pytest
@@ -58,52 +97,67 @@ def database_engine():
     Uses the **default** engine (``DATABASE_URL``) and **master** engine
     (``MASTER_DATABASE_URL``). We monkeypatch ``get_master_engine`` to ensure
     all database operations hit the same test database instance.
+
+    Hermetic safety check
+    ---------------------
+    We refuse to run against a DB whose name does NOT end in ``_test``.
+    Without this guard, a stray ``DATABASE_URL`` in .env (or the
+    operator's shell) silently turns the test suite into a destructive
+    operation against a real environment.
     """
     if not HAS_TEST_DB:
         pytest.skip("CAREPOINT_HMS_DATABASE_URL not configured for integration tests.")
-    
+
     from app.core.database import engine, get_master_engine
     import app.core.database as db_mod
-    
+
+    # Refuse to run against any database whose name does not end in ``_test``.
+    # This is the last line of defence against a misconfigured .env that
+    # leaked production credentials into the test process.
+    db_name = engine.url.database or ""
+    if not db_name.endswith("_test"):
+        pytest.skip(
+            "Refusing to run integration tests against a non-test database "
+            f"(connected to '{db_name}'). Point CAREPOINT_HMS_TEST_DATABASE_URL "
+            "at a database whose name ends in '_test'."
+        )
+
     # Monkeypatch get_master_engine to always return the main test engine
     # This ensures SaaS admin routes (which use master DB) hit the same DB.
     db_mod.get_master_engine = lambda: engine
-    
-    # We no longer drop/recreate tables here aggressively. 
-    # Instead, we check if a core table exists. If not, we create all tables.
-    # This avoids the slow SSL connection closures on every run.
+
+    # Always run an idempotent forward-migrate so newly added master
+    # tables (saas_admin, tenant, subscription_plan, ...) and tenant
+    # tables show up automatically. Previously we only ran create_all
+    # when the ``user`` table was missing, which meant a pre-existing
+    # test DB never picked up new SaaS tables -> "relation
+    # 'saas_admin' does not exist" during tenant route tests.
+    print("\n[DB] Ensuring test schema is up to date (master + tenant)...")
+    import app.models.all_models  # noqa: F401  ensure all models loaded
+    from app.models.base import TenantBase, MasterBase
     from sqlalchemy import inspect, text
-    inspector = inspect(engine)
-    if not inspector.has_table("user"):
-        print("\n[DB] Tables missing or incomplete. Initializing schema...")
-        import app.models.all_models
-        from app.models.base import TenantBase, MasterBase
-        
-        with engine.connect() as conn:
-            # Postgres Enum workaround: if create_all fails because of existing types,
-            # we try to ignore those specific errors or handle them.
-            try:
-                TenantBase.metadata.create_all(bind=conn, checkfirst=True)
-                MasterBase.metadata.create_all(bind=conn, checkfirst=True)
-                conn.commit()
-            except Exception as e:
-                if "already exists" in str(e).lower():
-                    print(f"[DB] Note: Some types already exist, continuing... ({e})")
-                    conn.rollback()
-                    # Try creating tables one by one as a fallback
-                    for table in TenantBase.metadata.sorted_tables:
-                        try:
-                            table.create(conn, checkfirst=True)
-                        except Exception:
-                            pass
-                    for table in MasterBase.metadata.sorted_tables:
-                        try:
-                            table.create(conn, checkfirst=True)
-                        except Exception:
-                            pass
-                    conn.commit()
-                else:
-                    raise
+
+    try:
+        MasterBase.metadata.create_all(bind=engine, checkfirst=True)
+        TenantBase.metadata.create_all(bind=engine, checkfirst=True)
+    except Exception as e:
+        # Recover from "type already exists" by creating tables one at a
+        # time and swallowing the duplicate-type errors per table.
+        msg = str(e).lower()
+        if "already exists" in msg:
+            print(f"[DB] Note: Some types already exist, continuing... ({e})")
+            for table in MasterBase.metadata.sorted_tables:
+                try:
+                    table.create(engine, checkfirst=True)
+                except Exception:
+                    pass
+            for table in TenantBase.metadata.sorted_tables:
+                try:
+                    table.create(engine, checkfirst=True)
+                except Exception:
+                    pass
+        else:
+            raise
     
     # Ensure new columns exist on tables that may predate the model changes.
     # This is a lightweight migration for columns added after initial schema creation.
@@ -124,22 +178,35 @@ def database_engine():
                 pass
         conn.commit()
     
-    # (Optional) Ensure baseline security data exists if it's an empty DB
+    # Ensure baseline security data exists. Idempotent — adds only
+    # missing rows on subsequent runs so it stays fast on a warm DB.
     from app.core.database import SessionLocal
     from app.seeds.security_seed import seed_security_baseline
     db = SessionLocal()
     try:
-        # We run seed_security_baseline in non-fresh mode (is_fresh=False)
-        # so it only adds missing records without being slow.
         seed_security_baseline(db, is_fresh=False)
         db.commit()
-    except Exception as e:
+    except Exception:
         db.rollback()
         # Not fatal if it fails due to existing data
         pass
     finally:
         db.close()
-    
+
+    # Seed master-side reference data (subscription plans + a default
+    # SaaS Admin row) that some integration tests need. Idempotent.
+    db = SessionLocal()
+    try:
+        from app.init_db import seed_plans, seed_saas_admin
+
+        seed_plans(db)
+        seed_saas_admin(db)
+        db.commit()
+    except Exception:
+        db.rollback()
+    finally:
+        db.close()
+
     return engine
 
 

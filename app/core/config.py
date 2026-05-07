@@ -94,6 +94,7 @@ class Settings(BaseSettings):
     )
     MASTER_DATABASE_URL: Optional[str] = Field(
         None,
+        validation_alias=AliasChoices("MASTER_DATABASE_URL", "CAREPOINT_HMS_MASTER_DATABASE_URL"),
         description="Connection string for the shared/master database storing tenant info.",
     )
 
