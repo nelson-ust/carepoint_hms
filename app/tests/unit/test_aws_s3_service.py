@@ -8,17 +8,24 @@ from app.services.aws_s3_service import S3Service
 
 @pytest.fixture
 def service():
-    with patch("boto3.client") as mock_boto:
-        # Mock settings to return values for AWS config
+    """
+    NB: this fixture must ``yield`` (not ``return``) the service so the
+    ``patch`` context managers stay active for the duration of the
+    test body. Returning would tear the patches down before the test
+    runs — the live ``settings`` would then leak in, and assertions
+    that depend on the patched values (e.g. ``is_development``)
+    would flip with whatever ``CAREPOINT_HMS_ENVIRONMENT`` happens
+    to be set to in the runtime/test environment.
+    """
+    with patch("boto3.client"):
         with patch("app.services.aws_s3_service.settings") as mock_settings:
             mock_settings.AWS_ACCESS_KEY_ID.get_secret_value.return_value = "key"
             mock_settings.AWS_SECRET_ACCESS_KEY.get_secret_value.return_value = "secret"
             mock_settings.AWS_DEFAULT_REGION = "us-east-1"
             mock_settings.S3_ENABLED = True
             mock_settings.is_development = True
-            
-            svc = S3Service()
-            return svc
+
+            yield S3Service()
 
 class TestS3Service:
 
