@@ -195,16 +195,36 @@ step "Step 6/9 — Tuning PostgreSQL for production"
 PG_CONF="/etc/postgresql/${PG_VERSION}/main/postgresql.conf"
 PG_HBA="/etc/postgresql/${PG_VERSION}/main/pg_hba.conf"
 PG_EXTRA="/etc/postgresql/${PG_VERSION}/main/carepoint_hms.conf"
+PG_BIN="/usr/lib/postgresql/${PG_VERSION}/bin/postgres"
+PG_DATA="/var/lib/postgresql/${PG_VERSION}/main"
+
+# --- RESCUE LOGIC: Detect and fix corrupted config from previous runs ---
+info "Validating existing configuration..."
+if ! sudo -u postgres "${PG_BIN}" -D "${PG_DATA}" -C listen_addresses &>/dev/null; then
+    warn "PostgreSQL configuration appears corrupted. Attempting rescue..."
+    BACKUP=$(ls -t "${PG_CONF}.bak."* 2>/dev/null | head -1)
+    if [[ -n "$BACKUP" ]]; then
+        cp "$BACKUP" "$PG_CONF"
+        success "Restored configuration from backup: $(basename "$BACKUP")"
+    else
+        warn "No backup found. Cleaning up known problematic lines..."
+        # Remove any previous includes or corrupted listen_addresses lines
+        sed -i "/include = 'carepoint_hms.conf'/d" "${PG_CONF}"
+        sed -i "/^listen_addresses/d" "${PG_CONF}"
+        echo "listen_addresses = 'localhost'" >> "${PG_CONF}"
+    fi
+fi
 
 # Detect RAM for tuning
 TOTAL_RAM_MB=$(free -m | awk '/^Mem:/{print $2}')
 SHARED_BUFFERS_MB=$(( TOTAL_RAM_MB / 4 ))
 EFFECTIVE_CACHE_MB=$(( TOTAL_RAM_MB * 3 / 4 ))
+# work_mem: keep low on small servers — max_connections * work_mem must fit in RAM.
 WORK_MEM_MB=$(( TOTAL_RAM_MB / 200 / 3 ))
 [[ $WORK_MEM_MB -lt 2 ]] && WORK_MEM_MB=2
 [[ $WORK_MEM_MB -gt 8 && $TOTAL_RAM_MB -lt 4096 ]] && WORK_MEM_MB=8
 
-# Only use sed for the two simple settings — everything else goes in the include file
+# Only use sed for the two simple settings — use a safe delimiter |
 sed -i "s|^#*listen_addresses.*|listen_addresses = '*'|" "${PG_CONF}"
 sed -i "s|^#*max_connections.*|max_connections = 200|"   "${PG_CONF}"
 
@@ -254,7 +274,10 @@ chown postgres:postgres "${PG_EXTRA}"
 
 # Add include directive to main config (idempotent)
 INCLUDE_LINE="include = 'carepoint_hms.conf'"
-grep -qxF "${INCLUDE_LINE}" "${PG_CONF}" || echo "${INCLUDE_LINE}" >> "${PG_CONF}"
+if ! grep -qxF "${INCLUDE_LINE}" "${PG_CONF}"; then
+    echo "" >> "${PG_CONF}"
+    echo "${INCLUDE_LINE}" >> "${PG_CONF}"
+fi
 
 # pg_hba.conf — tighten auth
 cat > "${PG_HBA}" <<HBA
@@ -275,6 +298,14 @@ host    ${DB_NAME}      ${DB_APP_USER}          ${ALLOWED_CLIENT_CIDR}  scram-sh
 host    all             ${DB_SUPERUSER}         ${ALLOWED_CLIENT_CIDR}  scram-sha-256
 HBA
 
+# --- PRE-RESTART VALIDATION ---
+info "Validating new configuration..."
+if sudo -u postgres "${PG_BIN}" -D "${PG_DATA}" -C listen_addresses &>/dev/null; then
+    success "Configuration valid"
+else
+    error "New configuration is invalid. Please check ${PG_EXTRA}"
+fi
+
 systemctl restart postgresql
 
 # Wait for PostgreSQL to be fully ready before proceeding
@@ -285,7 +316,11 @@ for i in $(seq 1 30); do
         break
     fi
     if [[ $i -eq 30 ]]; then
-        error "PostgreSQL did not start within 30s. Check: journalctl -u postgresql --no-pager -n 50"
+        echo "----------------------------------------------------------------"
+        echo "POSTGRESQL FAILED TO START. LATEST LOGS:"
+        journalctl -u postgresql@16-main.service --no-pager -n 20
+        echo "----------------------------------------------------------------"
+        error "PostgreSQL did not start within 30s."
     fi
     sleep 1
 done
