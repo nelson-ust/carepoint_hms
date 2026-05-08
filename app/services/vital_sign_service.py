@@ -30,6 +30,42 @@ def _compute_bmi(weight_kg: Optional[Decimal], height_cm: Optional[Decimal]) -> 
         return None
 
 
+def _compute_mews(pulse_rate: Optional[int], respiratory_rate: Optional[int], systolic_bp: Optional[int], temp: Optional[Decimal]) -> Optional[int]:
+    """Calculates Modified Early Warning Score (MEWS). Returns None if not enough data."""
+    if pulse_rate is None or respiratory_rate is None or systolic_bp is None or temp is None:
+        return None
+    
+    score = 0
+    
+    # Respiratory Rate
+    if respiratory_rate <= 8: score += 2
+    elif 15 <= respiratory_rate <= 20: score += 1
+    elif 21 <= respiratory_rate <= 29: score += 2
+    elif respiratory_rate >= 30: score += 3
+
+    # Pulse
+    if pulse_rate <= 40: score += 2
+    elif 41 <= pulse_rate <= 50: score += 1
+    elif 101 <= pulse_rate <= 110: score += 1
+    elif 111 <= pulse_rate <= 129: score += 2
+    elif pulse_rate >= 130: score += 3
+
+    # Systolic BP
+    if systolic_bp <= 70: score += 3
+    elif 71 <= systolic_bp <= 80: score += 2
+    elif 81 <= systolic_bp <= 100: score += 1
+    elif systolic_bp >= 200: score += 2
+
+    # Temperature
+    t = float(temp)
+    if t <= 35.0: score += 2
+    elif 35.1 <= t <= 36.0: score += 1
+    elif 38.1 <= t <= 38.5: score += 1
+    elif t >= 38.6: score += 2
+
+    return score
+
+
 class VitalSignService:
     def __init__(self, db: Session) -> None:
         self.db = db
@@ -58,6 +94,15 @@ class VitalSignService:
             derived_bmi = _compute_bmi(data.get("weight_kg"), data.get("height_cm"))
             if derived_bmi is not None:
                 data["bmi"] = derived_bmi
+                
+        # Auto-compute MEWS
+        mews = _compute_mews(data.get("pulse_rate"), data.get("respiratory_rate"), data.get("systolic_bp"), data.get("temperature_celsius"))
+        if mews is not None:
+            data["mews_score"] = mews
+            # If MEWS is critically high (e.g., >= 5), we would trigger an emergency push notification to ward nurses
+            if mews >= 5:
+                # TODO: Trigger NotificationDispatcher.dispatch(SYSTEM_ALERT, message="Sepsis Alert / Code Blue Triggered!")
+                pass
 
         data.setdefault("recorded_at", datetime.now(timezone.utc))
         record = self.repository.create(**data)

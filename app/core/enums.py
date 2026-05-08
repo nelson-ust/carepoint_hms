@@ -1738,3 +1738,26 @@ class OnboardingDocumentType(StringEnum):
     NDA_SIGNED = "NDA_SIGNED"
     OTHER = "OTHER"
 
+
+# ============================================================
+# AI & CLINICAL DECISION SUPPORT
+# ============================================================
+
+class AllergySeverity(StringEnum):
+    MILD = "MILD"
+    MODERATE = "MODERATE"
+    SEVERE = "SEVERE"
+    UNKNOWN = "UNKNOWN"
+
+class CdssAlertType(StringEnum):
+    ALLERGY = "ALLERGY"
+    DRUG_INTERACTION = "DRUG_INTERACTION"
+    DUPLICATE_THERAPY = "DUPLICATE_THERAPY"
+    DOSAGE_WARNING = "DOSAGE_WARNING"
+    DISEASE_CONTRAINDICATION = "DISEASE_CONTRAINDICATION"
+
+class AiScribeJobStatus(StringEnum):
+    PENDING = "PENDING"
+    PROCESSING = "PROCESSING"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"

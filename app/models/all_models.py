@@ -49,6 +49,7 @@ from sqlalchemy import (
     Text,
     Time,
     UniqueConstraint,
+    func,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -208,6 +209,9 @@ from app.core.enums import (
     StaffTaskStatus,
     StaffTaskPriority,
     HolidayScope,
+    AllergySeverity,
+    CdssAlertType,
+    AiScribeJobStatus,
     TrainingStatus,
     OnboardingInvitationStatus,
     OnboardingDocumentType,
@@ -1359,6 +1363,7 @@ class VitalSign(TenantTable):
     height_cm: Mapped[Optional[Decimal]] = mapped_column(Numeric(8, 2), nullable=True)
     bmi: Mapped[Optional[Decimal]] = mapped_column(Numeric(8, 2), nullable=True)
     pain_score: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    mews_score: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, comment="Modified Early Warning Score")
 
     recorded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
@@ -8075,3 +8080,96 @@ class StaffOnboardingDocument(TenantTable):
     invitation: Mapped["StaffOnboardingInvitation"] = relationship(
         back_populates="documents",
     )
+
+
+class ClinicalMacro(TenantTable):
+    """Personalized clinical macros / shortcuts for clinicians."""
+
+    __tablename__ = "clinical_macro"
+
+    clinician_staff_id: Mapped[int] = mapped_column(
+        ForeignKey("staff_profile.id"), 
+        nullable=False, 
+        index=True,
+        comment="The clinician who owns this macro."
+    )
+    shortcut_code: Mapped[str] = mapped_column(
+        String(50), 
+        nullable=False, 
+        index=True,
+        comment="The shortcode that triggers the macro (e.g. .exam)."
+    )
+    expanded_text: Mapped[str] = mapped_column(
+        Text, 
+        nullable=False,
+        comment="The expanded text content of the macro."
+    )
+
+    __table_args__ = (
+        UniqueConstraint("clinician_staff_id", "shortcut_code", name="uq_clinician_shortcut"),
+    )
+
+    clinician_staff: Mapped["StaffProfile"] = relationship()
+
+
+# ============================================================
+# AI & CLINICAL DECISION SUPPORT
+# ============================================================
+
+class PatientAllergy(TenantTable):
+    """Tracks patient allergies to drugs, food, or environment for CDSS."""
+
+    __tablename__ = "patient_allergy"
+
+    patient_id: Mapped[int] = mapped_column(ForeignKey("patient.id"), nullable=False, index=True)
+    allergen_name: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    severity: Mapped[AllergySeverity] = mapped_column(Enum(AllergySeverity), default=AllergySeverity.UNKNOWN)
+    reaction_description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+    patient: Mapped["Patient"] = relationship()
+
+
+class CdssAlert(TenantTable):
+    """Audit log of CDSS alerts triggered during prescribing/clinical workflows."""
+
+    __tablename__ = "cdss_alert"
+
+    patient_id: Mapped[int] = mapped_column(ForeignKey("patient.id"), nullable=False, index=True)
+    clinician_staff_id: Mapped[int] = mapped_column(ForeignKey("staff_profile.id"), nullable=False, index=True)
+    visit_id: Mapped[Optional[int]] = mapped_column(ForeignKey("visit.id"), nullable=True)
+    
+    alert_type: Mapped[CdssAlertType] = mapped_column(Enum(CdssAlertType), nullable=False)
+    message: Mapped[str] = mapped_column(Text, nullable=False)
+    triggered_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=func.now(), nullable=False)
+    
+    was_overridden: Mapped[bool] = mapped_column(Boolean, default=False)
+    override_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    patient: Mapped["Patient"] = relationship()
+    clinician_staff: Mapped["StaffProfile"] = relationship()
+    visit: Mapped[Optional["Visit"]] = relationship()
+
+
+class AiScribeJob(TenantTable):
+    """Tracks the status and output of Ambient AI Medical Scribe transcription jobs."""
+
+    __tablename__ = "ai_scribe_job"
+
+    consultation_id: Mapped[int] = mapped_column(ForeignKey("consultation.id"), nullable=False, index=True, unique=True)
+    clinician_staff_id: Mapped[int] = mapped_column(ForeignKey("staff_profile.id"), nullable=False, index=True)
+    
+    status: Mapped[AiScribeJobStatus] = mapped_column(Enum(AiScribeJobStatus), default=AiScribeJobStatus.PENDING)
+    audio_s3_key: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    
+    transcription_text: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    generated_soap_note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    suggested_icd10_codes: Mapped[Optional[str]] = mapped_column(Text, nullable=True, comment="JSON array of codes")
+    
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=func.now(), nullable=False)
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    consultation: Mapped["Consultation"] = relationship()
+    clinician_staff: Mapped["StaffProfile"] = relationship()
+

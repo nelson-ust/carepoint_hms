@@ -112,9 +112,26 @@ except Exception as exc:  # pragma: no cover - tested via integration smoke
 
 API_PREFIX = getattr(settings, "API_V1_PREFIX", "/api/v1")
 APP_TIMEZONE = getattr(settings, "DEFAULT_TIMEZONE", "Africa/Lagos")
-ALLOW_ORIGINS = getattr(settings, "normalized_cors_origins", None) or getattr(
+import re
+
+_raw_origins = getattr(settings, "normalized_cors_origins", None) or getattr(
     settings, "BACKEND_CORS_ORIGINS", ["*"]
 ) or ["*"]
+
+ALLOW_ORIGINS = []
+_cors_regex_patterns = []
+
+for origin in _raw_origins:
+    if "*" in origin and origin != "*":
+        regex_str = "^" + origin.replace(".", r"\.").replace("*", ".*") + "$"
+        _cors_regex_patterns.append(regex_str)
+    else:
+        ALLOW_ORIGINS.append(origin)
+
+ALLOW_ORIGIN_REGEX = "|".join(_cors_regex_patterns) if _cors_regex_patterns else None
+
+if not ALLOW_ORIGINS and not ALLOW_ORIGIN_REGEX:
+    ALLOW_ORIGINS = ["*"]
 
 APP_NAME = getattr(settings, "APP_NAME", "Carepoint HMS")
 APP_VERSION = getattr(settings, "APP_VERSION", "1.0.0")
@@ -496,6 +513,7 @@ if APP_ENV.lower() in {"production", "staging"} and (
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOW_ORIGINS,
+    allow_origin_regex=ALLOW_ORIGIN_REGEX,
     allow_credentials=_CORS_ALLOW_CREDENTIALS,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=[

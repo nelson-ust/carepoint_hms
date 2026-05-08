@@ -596,6 +596,7 @@ def sync_tenant_schemas_all() -> dict[str, dict[str, list[str]] | str]:
     out: dict[str, dict[str, list[str]] | str] = {}
     master_engine = create_engine(MASTER_DATABASE_URL, future=True)
     try:
+        tenant_targets = []
         with Session(master_engine) as master_db:
             tenants = (
                 master_db.query(Tenant)
@@ -614,52 +615,55 @@ def sync_tenant_schemas_all() -> dict[str, dict[str, list[str]] | str]:
                     url = decrypt_string(tenant.db_connection_string)
                 except Exception:
                     url = tenant.db_connection_string
+                tenant_targets.append((tenant.id, tenant.code, url))
 
-                # Pre-flight probe: confirm the tenant database is
-                # reachable BEFORE we try to migrate it. This avoids the
-                # noisy "FATAL: database does not exist" stack trace from
-                # deep inside SQLAlchemy when a tenant DB has gone
-                # missing (e.g. dropped manually or master restored
-                # without a matching tenant restore).
-                reachable, reason = _tenant_db_reachable(url)
-                if not reachable:
-                    if reason == "missing":
-                        out[tenant.code] = (
-                            "skipped: tenant database is missing — "
-                            "re-approve to recreate (POST /api/v1/tenants/{id}/approve)"
-                        )
-                        _demote_stale_tenant(
-                            master_db,
-                            tenant,
-                            reason="physical PostgreSQL database missing",
-                        )
-                    else:
-                        logger.warning(
-                            "Tenant %s sync skipped: database unreachable (%s)",
-                            tenant.code,
-                            reason,
-                        )
-                        out[tenant.code] = f"skipped: database unreachable ({reason})"
+        for tenant_id, tenant_code, url in tenant_targets:
+            # Pre-flight probe: confirm the tenant database is
+            # reachable BEFORE we try to migrate it.
+            reachable, reason = _tenant_db_reachable(url)
+            if not reachable:
+                if reason == "missing":
+                    out[tenant_code] = (
+                        "skipped: tenant database is missing — "
+                        "re-approve to recreate (POST /api/v1/tenants/{id}/approve)"
+                    )
+                    with Session(master_engine) as master_db:
+                        tenant = master_db.query(Tenant).get(tenant_id)
+                        if tenant:
+                            _demote_stale_tenant(
+                                master_db,
+                                tenant,
+                                reason="physical PostgreSQL database missing",
+                            )
+                else:
+                    logger.warning(
+                        "Tenant %s sync skipped: database unreachable (%s)",
+                        tenant_code,
+                        reason,
+                    )
+                    out[tenant_code] = f"skipped: database unreachable ({reason})"
+                continue
+
+            try:
+                summary = sync_tenant_schema(url)
+                out[tenant_code] = summary or {}
+            except Exception as exc:
+                # Defensive second pass
+                if _is_missing_db_error(exc):
+                    out[tenant_code] = (
+                        "skipped: tenant database is missing — re-approve to recreate"
+                    )
+                    with Session(master_engine) as master_db:
+                        tenant = master_db.query(Tenant).get(tenant_id)
+                        if tenant:
+                            _demote_stale_tenant(
+                                master_db,
+                                tenant,
+                                reason="physical PostgreSQL database missing",
+                            )
                     continue
-
-                try:
-                    summary = sync_tenant_schema(url)
-                    out[tenant.code] = summary or {}
-                except Exception as exc:
-                    # Defensive second pass — should be rare now that the
-                    # pre-flight probe catches missing-DB cases.
-                    if _is_missing_db_error(exc):
-                        out[tenant.code] = (
-                            "skipped: tenant database is missing — re-approve to recreate"
-                        )
-                        _demote_stale_tenant(
-                            master_db,
-                            tenant,
-                            reason="physical PostgreSQL database missing",
-                        )
-                        continue
-                    logger.exception("Schema sync failed for tenant %s: %s", tenant.code, exc)
-                    out[tenant.code] = f"error: {exc}"
+                logger.exception("Schema sync failed for tenant %s: %s", tenant_code, exc)
+                out[tenant_code] = f"error: {exc}"
     finally:
         master_engine.dispose()
 
