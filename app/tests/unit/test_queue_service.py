@@ -23,9 +23,10 @@ def service(mock_db):
 class TestQueueService:
 
     def test_call_ticket_updates_status_and_time(self, service, mock_db):
-        ticket = MagicMock(id=1, status=QueueStatus.WAITING, called_at=None)
+        ticket = MagicMock(id=1, visit_id=10, status=QueueStatus.WAITING, called_at=None)
         service.repository.get_required_by_id = MagicMock(return_value=ticket)
         service._link_step_status = MagicMock()
+        service._populate_history = MagicMock()
         
         result = service.call_ticket(1)
         
@@ -43,9 +44,10 @@ class TestQueueService:
         assert "reached a terminal state" in str(excinfo.value)
 
     def test_start_serving_updates_times(self, service, mock_db):
-        ticket = MagicMock(id=1, status=QueueStatus.WAITING, called_at=None, service_started_at=None)
+        ticket = MagicMock(id=1, visit_id=10, status=QueueStatus.WAITING, called_at=None, service_started_at=None)
         service.repository.get_required_by_id = MagicMock(return_value=ticket)
         service._link_step_status = MagicMock()
+        service._populate_history = MagicMock()
         
         service.start_serving(1)
         
@@ -79,3 +81,24 @@ class TestQueueService:
         assert mock_step.status == VisitFlowStepStatus.IN_PROGRESS
         assert mock_step.started_at is not None
         mock_db.add.assert_called_once_with(mock_step)
+
+    def test_populate_history_injects_steps(self, service):
+        ticket = MagicMock(id=100, visit_id=50)
+        mock_sdp = MagicMock()
+        mock_sdp.name = "Triage Clinic"
+        prev_ticket = MagicMock(
+            id=99, 
+            status=QueueStatus.SERVED,
+            service_delivery_point_id=5,
+            service_delivery_point=mock_sdp,
+            service_started_at=datetime.now(timezone.utc),
+            service_ended_at=datetime.now(timezone.utc)
+        )
+        service.repository.get_previous_tickets_for_visit.return_value = [prev_ticket]
+        
+        service._populate_history([ticket])
+        
+        assert hasattr(ticket, "previous_steps")
+        assert len(ticket.previous_steps) == 1
+        assert ticket.previous_steps[0]["service_delivery_point_name"] == "Triage Clinic"
+        assert any("Vitals" in s for s in ticket.previous_steps[0]["services_provided"])

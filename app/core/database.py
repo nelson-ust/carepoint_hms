@@ -103,15 +103,23 @@ DB_POOL_PRE_PING: bool = bool(getattr(settings, "DB_POOL_PRE_PING", True)) if se
 DB_ISOLATION_LEVEL: Optional[str] = getattr(settings, "DB_ISOLATION_LEVEL", None) if settings else None
 
 
+from sqlalchemy.pool import NullPool
+
 _engine_kwargs: dict = {
     "echo": SQLALCHEMY_ECHO,
     "future": True,
     "pool_pre_ping": DB_POOL_PRE_PING,
-    "pool_size": DB_POOL_SIZE,
-    "max_overflow": DB_MAX_OVERFLOW,
-    "pool_timeout": DB_POOL_TIMEOUT,
-    "pool_recycle": DB_POOL_RECYCLE,
 }
+
+if DB_POOL_SIZE == 0:
+    _engine_kwargs["poolclass"] = NullPool
+else:
+    _engine_kwargs.update({
+        "pool_size": DB_POOL_SIZE,
+        "max_overflow": DB_MAX_OVERFLOW,
+        "pool_timeout": DB_POOL_TIMEOUT,
+        "pool_recycle": DB_POOL_RECYCLE,
+    })
 
 if DB_ISOLATION_LEVEL:
     _engine_kwargs["isolation_level"] = DB_ISOLATION_LEVEL

@@ -21,10 +21,15 @@ from app.schemas.inventory_schema import (
     InventoryStoreListResponseSchema,
     InventoryStoreReadSchema,
     InventoryStoreUpdateSchema,
+    StockMovementActionResponseSchema,
+    StockMovementCreateSchema,
+    StockMovementListResponseSchema,
+    StockMovementReadSchema,
 )
 from app.services.inventory_service import (
     InventoryStockItemService,
     InventoryStoreService,
+    StockMovementService,
 )
 from app.utils.pagination import paginate_response
 
@@ -41,6 +46,10 @@ def get_store_service(db: Annotated[Session, Depends(get_db)]) -> InventoryStore
 
 def get_stock_item_service(db: Annotated[Session, Depends(get_db)]) -> InventoryStockItemService:
     return InventoryStockItemService(db)
+
+
+def get_movement_service(db: Annotated[Session, Depends(get_db)]) -> StockMovementService:
+    return StockMovementService(db)
 
 
 def _serialize_store(s) -> dict:
@@ -74,6 +83,21 @@ def _serialize_item(i) -> dict:
     }
 
 
+def _serialize_movement(m) -> dict:
+    return {
+        "id": m.id,
+        "store_id": m.store_id,
+        "stock_item_id": m.stock_item_id,
+        "performed_by_staff_id": m.performed_by_staff_id,
+        "movement_type": str(m.movement_type),
+        "reference_no": m.reference_no,
+        "quantity": m.quantity,
+        "balance_after": m.balance_after,
+        "movement_date": m.movement_date,
+        "note": m.note,
+    }
+
+
 # ----- STORES -----
 
 @router.get(
@@ -88,6 +112,11 @@ def list_stores(
     limit: int = Query(50, ge=1, le=200),
     search: Optional[str] = Query(None),
 ):
+    """
+    Fetch a paginated list of all inventory stores.
+    
+    Permissions: INVENTORY_READ
+    """
     items, total = service.list(skip=skip, limit=limit, search=search)
     return paginate_response(
         items=[_serialize_store(s) for s in items],
@@ -107,6 +136,11 @@ def create_store(
     _: Annotated[User, Depends(require_permission("INVENTORY_MANAGE"))],
     service: Annotated[InventoryStoreService, Depends(get_store_service)],
 ):
+    """
+    Register a new inventory store (e.g., Pharmacy, Lab Store).
+    
+    Permissions: INVENTORY_MANAGE
+    """
     s = service.create(payload)
     return {"success": True, "message": "Store created.", "store": _serialize_store(s)}
 
@@ -121,6 +155,11 @@ def get_store(
     _: Annotated[User, Depends(require_permission("INVENTORY_READ"))],
     service: Annotated[InventoryStoreService, Depends(get_store_service)],
 ):
+    """
+    Retrieve details of a specific store.
+    
+    Permissions: INVENTORY_READ
+    """
     return _serialize_store(service.get(store_id))
 
 
@@ -135,6 +174,11 @@ def update_store(
     _: Annotated[User, Depends(require_permission("INVENTORY_MANAGE"))],
     service: Annotated[InventoryStoreService, Depends(get_store_service)],
 ):
+    """
+    Update store name or description.
+    
+    Permissions: INVENTORY_MANAGE
+    """
     s = service.update(store_id, payload)
     return {"success": True, "message": "Store updated.", "store": _serialize_store(s)}
 
@@ -148,6 +192,11 @@ def delete_store(
     _: Annotated[User, Depends(require_permission("INVENTORY_MANAGE"))],
     service: Annotated[InventoryStoreService, Depends(get_store_service)],
 ):
+    """
+    Mark a store as inactive.
+    
+    Permissions: INVENTORY_MANAGE
+    """
     s = service.soft_delete(store_id)
     return {"success": True, "message": "Store deactivated.", "store_id": s.id}
 
@@ -171,6 +220,16 @@ def list_items(
     only_expiring_within_days: Optional[int] = Query(None, ge=0, le=365),
     search: Optional[str] = Query(None),
 ):
+    """
+    Search and filter stock items across all stores.
+    
+    Includes filters for:
+    - store_id: Find items in a specific department
+    - only_low_stock: Find items below reorder level
+    - only_expiring_within_days: Find items nearing expiry
+    
+    Permissions: INVENTORY_READ
+    """
     items, total = service.list(
         skip=skip, limit=limit, search=search,
         store_id=store_id, drug_id=drug_id, item_type=item_type,
@@ -195,6 +254,11 @@ def create_item(
     _: Annotated[User, Depends(require_permission("INVENTORY_MANAGE"))],
     service: Annotated[InventoryStockItemService, Depends(get_stock_item_service)],
 ):
+    """
+    Register a specific batch/item in a store.
+    
+    Permissions: INVENTORY_MANAGE
+    """
     i = service.create(payload)
     return {"success": True, "message": "Stock item created.", "stock_item": _serialize_item(i)}
 
@@ -209,6 +273,11 @@ def get_item(
     _: Annotated[User, Depends(require_permission("INVENTORY_READ"))],
     service: Annotated[InventoryStockItemService, Depends(get_stock_item_service)],
 ):
+    """
+    Retrieve current balance and metadata for a stock item.
+    
+    Permissions: INVENTORY_READ
+    """
     return _serialize_item(service.get(item_id))
 
 
@@ -223,6 +292,11 @@ def update_item(
     _: Annotated[User, Depends(require_permission("INVENTORY_MANAGE"))],
     service: Annotated[InventoryStockItemService, Depends(get_stock_item_service)],
 ):
+    """
+    Update metadata like SKU, batch number, or unit cost.
+    
+    Permissions: INVENTORY_MANAGE
+    """
     i = service.update(item_id, payload)
     return {"success": True, "message": "Stock item updated.", "stock_item": _serialize_item(i)}
 
@@ -236,5 +310,83 @@ def delete_item(
     _: Annotated[User, Depends(require_permission("INVENTORY_MANAGE"))],
     service: Annotated[InventoryStockItemService, Depends(get_stock_item_service)],
 ):
+    """
+    Mark a stock item record as deleted.
+    
+    Permissions: INVENTORY_MANAGE
+    """
     i = service.soft_delete(item_id)
     return {"success": True, "message": "Stock item deactivated.", "stock_item_id": i.id}
+
+
+# ----- STOCK MOVEMENTS -----
+
+@router.get(
+    "/movements",
+    response_model=StockMovementListResponseSchema,
+    summary="List stock movements",
+)
+def list_movements(
+    _: Annotated[User, Depends(require_permission("INVENTORY_READ"))],
+    service: Annotated[StockMovementService, Depends(get_movement_service)],
+    skip: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=200),
+    store_id: Optional[int] = Query(None),
+    stock_item_id: Optional[int] = Query(None),
+    movement_type: Optional[str] = Query(None),
+):
+    """
+    Fetch historical audit of all stock movements.
+    
+    Permissions: INVENTORY_READ
+    """
+    items, total = service.list(
+        skip=skip, limit=limit,
+        store_id=store_id, stock_item_id=stock_item_id, movement_type=movement_type
+    )
+    return paginate_response(
+        items=[_serialize_movement(m) for m in items],
+        total=total, skip=skip, limit=limit,
+        message="Stock movements fetched successfully.",
+    )
+
+
+@router.post(
+    "/movements",
+    response_model=StockMovementActionResponseSchema,
+    status_code=status.HTTP_201_CREATED,
+    summary="Record a stock movement",
+)
+def record_movement(
+    payload: StockMovementCreateSchema,
+    _: Annotated[User, Depends(require_permission("INVENTORY_MANAGE"))],
+    service: Annotated[StockMovementService, Depends(get_movement_service)],
+):
+    """
+    Record a stock movement (Purchase, Issue, Dispense, etc.).
+    
+    This endpoint atomically updates the stock item's live balance and
+    records the movement in the audit ledger.
+    
+    Permissions: INVENTORY_MANAGE
+    """
+    m = service.create(payload)
+    return {"success": True, "message": "Stock movement recorded.", "movement": _serialize_movement(m)}
+
+
+@router.get(
+    "/movements/{movement_id}",
+    response_model=StockMovementReadSchema,
+    summary="Get a stock movement",
+)
+def get_movement(
+    movement_id: int,
+    _: Annotated[User, Depends(require_permission("INVENTORY_READ"))],
+    service: Annotated[StockMovementService, Depends(get_movement_service)],
+):
+    """
+    Retrieve details of a specific movement event.
+    
+    Permissions: INVENTORY_READ
+    """
+    return _serialize_movement(service.get(movement_id))

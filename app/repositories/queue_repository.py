@@ -236,3 +236,20 @@ class QueueRepository:
             .order_by(QueueTicket.id.desc())
             .first()
         )
+
+    def get_previous_tickets_for_visit(self, visit_id: int, current_ticket_id: int) -> list[QueueTicket]:
+        """
+        Fetch all historical tickets for the visit that occurred before the current one.
+        """
+        return (
+            self.db.query(QueueTicket)
+            .options(joinedload(QueueTicket.service_delivery_point))
+            .filter(
+                QueueTicket.visit_id == visit_id,
+                QueueTicket.id < current_ticket_id,
+                QueueTicket.is_deleted.is_(False),
+                QueueTicket.status.in_([QueueStatus.SERVED, QueueStatus.TRANSFERRED]),
+            )
+            .order_by(QueueTicket.id.asc())
+            .all()
+        )

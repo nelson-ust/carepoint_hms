@@ -32,7 +32,7 @@
     },
     {
       "key": "admin_email",
-      "value": "admin@stnicholas.com"
+      "value": "nelson.attah@live.com"
     },
     {
       "key": "admin_password",
@@ -204,6 +204,302 @@
             }
           },
           "response": []
+        },
+        {
+          "name": "GET /settings",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/settings",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "settings"
+              ]
+            },
+            "description": "Get current tenant settings."
+          },
+          "response": []
+        },
+        {
+          "name": "PUT /settings",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/settings",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "settings"
+              ]
+            },
+            "description": "Update tenant settings.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"timezone\": \"Africa/Lagos\",\n  \"currency\": \"NGN\",\n  \"theme_color\": \"#1a73e8\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "GET /tenant-modules/catalog",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/tenant-modules/catalog",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "tenant-modules",
+                "catalog"
+              ]
+            },
+            "description": "List all supported modules in the SaaS platform."
+          },
+          "response": []
+        },
+        {
+          "name": "GET /tenant-modules/me/list",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/tenant-modules/me/list",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "tenant-modules",
+                "me",
+                "list"
+              ]
+            },
+            "description": "List effective modules for the current tenant."
+          },
+          "response": []
+        },
+        {
+          "name": "GET /saas/dashboard/overview",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/saas/dashboard/overview",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "saas",
+                "dashboard",
+                "overview"
+              ]
+            },
+            "description": ""
+          },
+          "response": []
+        },
+        {
+          "name": "GET /saas/dashboard/tenants",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/saas/dashboard/tenants",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "saas",
+                "dashboard",
+                "tenants"
+              ]
+            },
+            "description": ""
+          },
+          "response": []
+        },
+        {
+          "name": "GET /saas/dashboard/billing",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/saas/dashboard/billing",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "saas",
+                "dashboard",
+                "billing"
+              ]
+            },
+            "description": ""
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "41 Tenant Dashboard",
+      "item": [
+        {
+          "name": "GET /tenant-dashboard/overview",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/tenant-dashboard/overview",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "tenant-dashboard",
+                "overview"
+              ]
+            },
+            "description": ""
+          },
+          "response": []
+        },
+        {
+          "name": "GET /tenant-dashboard/clinical",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/tenant-dashboard/clinical",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "tenant-dashboard",
+                "clinical"
+              ]
+            },
+            "description": ""
+          },
+          "response": []
+        },
+        {
+          "name": "GET /tenant-dashboard/finance",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/tenant-dashboard/finance",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "tenant-dashboard",
+                "finance"
+              ]
+            },
+            "description": ""
+          },
+          "response": []
         }
       ]
     },
@@ -364,6 +660,10 @@
               {
                 "key": "x-device-fingerprint",
                 "value": "postman-device-fingerprint"
+              },
+              {
+                "key": "X-Tenant-Code",
+                "value": "{{tenant_slug}}"
               }
             ],
             "url": {
@@ -2790,6 +3090,218 @@
       ]
     },
     {
+      "name": "06b Facilities",
+      "item": [
+        {
+          "name": "GET /facilities",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/facilities",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "facilities"
+              ]
+            },
+            "description": "List all facilities/branches for the current tenant."
+          },
+          "response": []
+        },
+        {
+          "name": "POST /facilities",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/facilities",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "facilities"
+              ]
+            },
+            "description": "Provision a new facility/branch.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"code\": \"BRANCH-01\",\n  \"name\": \"City Clinic Annex\",\n  \"facility_type\": \"CLINIC\",\n  \"status\": \"ACTIVE\",\n  \"phone_number\": \"+2348000000001\",\n  \"email\": \"annex@hospital.com\",\n  \"address_line_1\": \"456 Health St\",\n  \"city\": \"Lagos\",\n  \"state\": \"Lagos\",\n  \"country\": \"Nigeria\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "GET /facilities/networks/all",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/facilities/networks/all",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "facilities",
+                "networks",
+                "all"
+              ]
+            },
+            "description": "Retrieve all hospital networks."
+          },
+          "response": []
+        },
+        {
+          "name": "POST /facilities/networks/create",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/facilities/networks/create",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "facilities",
+                "networks",
+                "create"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Carepoint Global\",\n  \"code\": \"CP-GLO\",\n  \"description\": \"Main group\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "GET /facilities/service-areas/all",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/facilities/service-areas/all",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "facilities",
+                "service-areas",
+                "all"
+              ]
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "06c Departments",
+      "item": [
+        {
+          "name": "GET /departments",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/departments",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "departments"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "POST /departments",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/departments",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "departments"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Internal Medicine\",\n  \"code\": \"INT-MED\",\n  \"facility_id\": 1\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
       "name": "07 Service Delivery Points",
       "item": [
         {
@@ -4118,6 +4630,90 @@
             "body": {
               "mode": "raw",
               "raw": "{}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "10b Patient Identity & Insurance",
+      "item": [
+        {
+          "name": "POST /patient-master/{patient_id}/identifiers",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/patient-master/:patient_id/identifiers",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "patient-master",
+                ":patient_id",
+                "identifiers"
+              ],
+              "variable": [
+                {
+                  "key": "patient_id",
+                  "value": "{{patient_id}}"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"identifier_type\": \"NATIONAL_ID\",\n  \"identifier_value\": \"1234567890\",\n  \"issuing_authority\": \"NIMC\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "POST /patient-master/insurance-providers",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/patient-master/insurance-providers",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "patient-master",
+                "insurance-providers"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Reliance HMO\",\n  \"code\": \"REL-HMO\",\n  \"provider_type\": \"HMO\"\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -16194,6 +16790,405 @@
             "description": "Get patient portal profile"
           },
           "response": []
+        },
+        {
+          "name": "POST /portal/register",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/portal/register",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "portal",
+                "register"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"patient_id\": 1,\n  \"portal_username\": \"john_wick\",\n  \"password\": \"SecurePassword123!\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "POST /portal/auth/request-otp",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/portal/auth/request-otp",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "portal",
+                "auth",
+                "request-otp"
+              ]
+            },
+            "description": "Request a 5-digit OTP for portal login.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"identifier\": \"patient@example.com\",\n  \"channel\": \"EMAIL\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "POST /portal/auth/verify-otp",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/portal/auth/verify-otp",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "portal",
+                "auth",
+                "verify-otp"
+              ]
+            },
+            "description": "Verify OTP and get JWT tokens.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"otp_id\": 1,\n  \"otp_code\": \"12345\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "GET /portal/dashboard",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/portal/dashboard",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "portal",
+                "dashboard"
+              ]
+            },
+            "description": "Summarized dashboard data for the patient."
+          },
+          "response": []
+        },
+        {
+          "name": "GET /portal/profile",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/portal/profile",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "portal",
+                "profile"
+              ]
+            },
+            "description": "Detailed profile info for the logged-in patient."
+          },
+          "response": []
+        },
+        {
+          "name": "POST /portal/fund-card",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/portal/fund-card",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "portal",
+                "fund-card"
+              ]
+            },
+            "description": "Initiate card funding via Paystack.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"amount\": 5000.0\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "POST /portal/{account_id}/messages",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/portal/:account_id/messages",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "portal",
+                ":account_id",
+                "messages"
+              ],
+              "variable": [
+                {
+                  "key": "account_id",
+                  "value": "1"
+                }
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"subject\": \"Follow-up\",\n  \"body\": \"I still feel pain in my back.\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "POST /portal/{account_id}/document-shares",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/portal/:account_id/document-shares",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "portal",
+                ":account_id",
+                "document-shares"
+              ],
+              "variable": [
+                {
+                  "key": "account_id",
+                  "value": "1"
+                }
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"document_title\": \"Lab Result May\",\n  \"attachment_id\": 10\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "39 Invitations",
+      "item": [
+        {
+          "name": "POST /invitations",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/invitations",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "invitations"
+              ]
+            },
+            "description": "Create and dispatch a new staff invitation.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"new.staff@hospital.com\",\n  \"first_name\": \"John\",\n  \"last_name\": \"Doe\",\n  \"role_ids\": [\n    2\n  ]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "POST /invitations/accept",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/invitations/accept",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "invitations",
+                "accept"
+              ]
+            },
+            "description": "Accept invitation and setup account.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"token\": \"INV-TOKEN\",\n  \"username\": \"johndoe\",\n  \"password\": \"S3curePassword!\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "GET /invitations",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/invitations",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "invitations"
+              ]
+            },
+            "description": ""
+          },
+          "response": []
         }
       ]
     },
@@ -16329,6 +17324,297 @@
               ]
             },
             "description": "Get full medical history for a patient"
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "36 Salary Advance",
+      "item": [
+        {
+          "name": "POST /salary-advances",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/salary-advances",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "salary-advances"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"staff_profile_id\": 1,\n  \"amount_requested\": 50000.0,\n  \"reason\": \"Family emergency\",\n  \"repayment_months\": 3\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "GET /salary-advances",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/salary-advances",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "salary-advances"
+              ]
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "37 HR & Payroll",
+      "item": [
+        {
+          "name": "GET /shifts",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/shifts",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "shifts"
+              ]
+            },
+            "description": "List all staff shifts."
+          },
+          "response": []
+        },
+        {
+          "name": "POST /shifts",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/shifts",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "shifts"
+              ]
+            },
+            "description": "Schedule a shift.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"staff_profile_id\": 1,\n  \"shift_type\": \"MORNING\",\n  \"start_time\": \"2026-05-15T08:00:00Z\",\n  \"end_time\": \"2026-05-15T16:00:00Z\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "40 Medication Adherence",
+      "item": [
+        {
+          "name": "GET /medication-adherence/profiles",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/medication-adherence/profiles",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "medication-adherence",
+                "profiles"
+              ],
+              "query": [
+                {
+                  "key": "patient_id",
+                  "value": "1"
+                }
+              ]
+            },
+            "description": "List medication profiles for patients."
+          },
+          "response": []
+        },
+        {
+          "name": "POST /medication-adherence/schedules",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/medication-adherence/schedules",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "medication-adherence",
+                "schedules"
+              ]
+            },
+            "description": "Create a medication schedule.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"medication_profile_id\": 1,\n  \"frequency\": \"DAILY\",\n  \"start_date\": \"2026-05-10\",\n  \"notes\": \"Take with food\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "POST /medication-adherence/doses/{dose_id}/confirm",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/medication-adherence/doses/:dose_id/confirm",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "medication-adherence",
+                "doses",
+                ":dose_id",
+                "confirm"
+              ],
+              "variable": [
+                {
+                  "key": "dose_id",
+                  "value": "1"
+                }
+              ]
+            },
+            "description": "Confirm intake of a medication dose.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"status\": \"TAKEN\",\n  \"source\": \"PATIENT_PORTAL\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "38 Loyalty & Rewards",
+      "item": [
+        {
+          "name": "GET /loyalty/points/{patient_id}",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/loyalty/points/:patient_id",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "loyalty",
+                "points",
+                ":patient_id"
+              ],
+              "variable": [
+                {
+                  "key": "patient_id",
+                  "value": "{{patient_id}}"
+                }
+              ]
+            },
+            "description": "Read loyalty points balance."
           },
           "response": []
         }

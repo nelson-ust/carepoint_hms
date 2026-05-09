@@ -68,6 +68,7 @@ def _serialize_ticket(t) -> dict:
         "transferred_from_ticket_id": t.transferred_from_ticket_id,
         "created_at": getattr(t, "created_at", None),
         "updated_at": getattr(t, "updated_at", None),
+        "previous_steps": getattr(t, "previous_steps", []),
     }
 
 

@@ -59,6 +59,17 @@ class QueueTicketCancelSchema(BaseModel):
     reason: Optional[str] = Field(None, max_length=500)
 
 
+class QueueTicketPreviousStepSchema(BaseModel):
+    """Summarizes a previous step in the patient's current visit."""
+
+    service_delivery_point_id: int
+    service_delivery_point_name: str
+    status: str
+    services_provided: list[str] = Field(default_factory=list)
+    started_at: Optional[datetime] = None
+    ended_at: Optional[datetime] = None
+
+
 class QueueTicketReadSchema(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -76,6 +87,9 @@ class QueueTicketReadSchema(BaseModel):
     transferred_from_ticket_id: Optional[int] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
+
+    # Extended info for providers
+    previous_steps: list[QueueTicketPreviousStepSchema] = Field(default_factory=list)
 
 
 class QueueTicketListResponseSchema(BaseModel):

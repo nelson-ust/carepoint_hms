@@ -49,6 +49,36 @@ class TestInventoryRoutes:
         data = response.json()
         assert "items" in data
 
+    def _create_item(self, client, auth_header, store_id):
+        payload = {
+            "store_id": store_id,
+            "item_name": _unique("Test Item"),
+            "item_type": "DRUG",
+            "quantity_on_hand": 100,
+            "unit_of_measure": "Tablet"
+        }
+        response = client.post("/api/v1/inventory/items", json=payload, headers=auth_header)
+        assert response.status_code == 201
+        return response.json()["stock_item"]
+
+    def test_record_movement(self, client, auth_header):
+        store = self._create_store(client, auth_header)
+        item = self._create_item(client, auth_header, store["id"])
+        
+        # Record a purchase (additive)
+        payload = {
+            "store_id": store["id"],
+            "stock_item_id": item["id"],
+            "movement_type": "PURCHASE",
+            "quantity": 50,
+            "note": "Initial stock purchase"
+        }
+        response = client.post("/api/v1/inventory/movements", json=payload, headers=auth_header)
+        assert response.status_code == 201
+        data = response.json()["movement"]
+        assert float(data["quantity"]) == 50.0
+        assert float(data["balance_after"]) == 150.0 # 100 initial + 50 purchase
+
     def test_reject_anonymous(self, client):
         response = client.get("/api/v1/inventory/stores")
         assert response.status_code == 401

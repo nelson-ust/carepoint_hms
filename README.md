@@ -105,3 +105,8 @@ Carepoint HMS supports highly customizable visit flows. A standard Outpatient (O
 * **Database:** PostgreSQL (with Schema/Database per Tenant isolation)
 * **Authentication:** JWT, Fernet encryption
 * **Integrations:** AWS S3, Twilio (SMS), Paystack (Payments)
+
+## 📚 API Documentation
+For detailed information on integrating with the Carepoint HMS API:
+* **[API Usage Guide](file:///Users/nelsonattah/Projects/carepoint_hms/API_USAGE_GUIDE.md)**: A comprehensive guide covering the application flow, request payloads, and response structures.
+* **[Postman Collection](file:///Users/nelsonattah/Projects/carepoint_hms/carepoint_hms_postman_collection.json)**: The complete API collection for local testing and environment setup.

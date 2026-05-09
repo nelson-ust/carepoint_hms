@@ -59,9 +59,12 @@ class QueueService:
         normalized = None
         if statuses:
             normalized = [QueueStatus(s.strip().upper()) for s in statuses]
-        return self.repository.list_for_service_point(
+        
+        items, total = self.repository.list_for_service_point(
             service_delivery_point_id, statuses=normalized, skip=skip, limit=limit
         )
+        self._populate_history(items)
+        return items, total
 
     def get_worklist(self, service_delivery_point_id: int) -> dict:
         sdp = self.repository.get_service_delivery_point(service_delivery_point_id)
@@ -83,6 +86,10 @@ class QueueService:
             skip=0,
             limit=20,
         )
+        
+        self._populate_history(waiting)
+        self._populate_history(serving)
+        
         served_today = self.repository.count_today_by_status(service_delivery_point_id, QueueStatus.SERVED)
         cancelled_today = self.repository.count_today_by_status(service_delivery_point_id, QueueStatus.CANCELLED)
 
@@ -95,11 +102,56 @@ class QueueService:
             "cancelled_today": cancelled_today,
         }
 
+    def _populate_history(self, tickets: list[QueueTicket]) -> None:
+        """
+        Injects historical step information into each ticket object for the frontend.
+        """
+        for t in tickets:
+            previous_tickets = self.repository.get_previous_tickets_for_visit(t.visit_id, t.id)
+            t.previous_steps = []
+            
+            for p in previous_tickets:
+                services = []
+                # Handle cases where relationship might not be loaded or name is missing
+                raw_name = getattr(p.service_delivery_point, "name", "Unknown Service Point")
+                sdp_name = raw_name.lower()
+                
+                # Heuristic for "Services Provided" based on SDP name
+                if any(x in sdp_name for x in ["triage", "nursing", "vitals"]):
+                    services.append("Vitals & Triage")
+                elif any(x in sdp_name for x in ["consult", "clinic", "doctor", "physician"]):
+                    services.append("Clinical Consultation")
+                elif "lab" in sdp_name:
+                    services.append("Laboratory Investigation")
+                elif "pharmacy" in sdp_name:
+                    services.append("Pharmacy Dispensing")
+                elif any(x in sdp_name for x in ["radiology", "imaging", "scan", "xray"]):
+                    services.append("Radiology/Imaging")
+                elif any(x in sdp_name for x in ["billing", "cashier", "account", "payment"]):
+                    services.append("Payment & Billing")
+                elif any(x in sdp_name for x in ["front", "reception", "records"]):
+                    services.append("Patient Registration/Check-in")
+                
+                # Fallback if no heuristic matched but we want to show something
+                if not services:
+                    services.append(f"Service at {raw_name}")
+                
+                t.previous_steps.append({
+                    "service_delivery_point_id": p.service_delivery_point_id,
+                    "service_delivery_point_name": raw_name,
+                    "status": str(p.status),
+                    "services_provided": services,
+                    "started_at": p.service_started_at,
+                    "ended_at": p.service_ended_at,
+                })
+
     def list_for_visit(self, visit_id: int) -> list[QueueTicket]:
         return self.repository.list_for_visit(visit_id)
 
     def get_ticket(self, ticket_id: int) -> QueueTicket:
-        return self.repository.get_required_by_id(ticket_id)
+        ticket = self.repository.get_required_by_id(ticket_id)
+        self._populate_history([ticket])
+        return ticket
 
     def resolve_user_sdp_id(self, user) -> Optional[int]:
         """
@@ -140,7 +192,7 @@ class QueueService:
         self.repository.save(ticket)
         self._link_step_status(ticket, VisitFlowStepStatus.CALLED)
         self.db.commit()
-        return self.repository.get_required_by_id(ticket.id)
+        return self.get_ticket(ticket.id)
 
     def start_serving(self, ticket_id: int, *, actor_user_id: Optional[int] = None) -> QueueTicket:
         ticket = self.repository.get_required_by_id(ticket_id)
@@ -157,7 +209,7 @@ class QueueService:
         self.repository.save(ticket)
         self._link_step_status(ticket, VisitFlowStepStatus.IN_PROGRESS, started=True)
         self.db.commit()
-        return self.repository.get_required_by_id(ticket.id)
+        return self.get_ticket(ticket.id)
 
     def complete_ticket(self, ticket_id: int, *, actor_user_id: Optional[int] = None) -> QueueTicket:
         ticket = self.repository.get_required_by_id(ticket_id)
@@ -174,7 +226,7 @@ class QueueService:
         self.repository.save(ticket)
         self._link_step_status(ticket, VisitFlowStepStatus.COMPLETED, completed=True)
         self.db.commit()
-        return self.repository.get_required_by_id(ticket.id)
+        return self.get_ticket(ticket.id)
 
     def mark_missed(self, ticket_id: int, *, actor_user_id: Optional[int] = None) -> QueueTicket:
         ticket = self.repository.get_required_by_id(ticket_id)
@@ -187,7 +239,7 @@ class QueueService:
         ticket.status = QueueStatus.MISSED
         self.repository.save(ticket)
         self.db.commit()
-        return self.repository.get_required_by_id(ticket.id)
+        return self.get_ticket(ticket.id)
 
     def cancel_ticket(
         self,
@@ -210,7 +262,7 @@ class QueueService:
             event_metadata={"reason": reason, "ticket_id": ticket.id},
         )
         self.db.commit()
-        return self.repository.get_required_by_id(ticket.id)
+        return self.get_ticket(ticket.id)
 
     def complete_and_route_to(
         self,
@@ -284,7 +336,7 @@ class QueueService:
         )
 
         self.db.commit()
-        return self.repository.get_required_by_id(new_ticket.id)
+        return self.get_ticket(new_ticket.id)
 
     def complete_and_end_visit(
         self,
@@ -378,7 +430,7 @@ class QueueService:
             },
         )
         self.db.commit()
-        return self.repository.get_required_by_id(new_ticket.id)
+        return self.get_ticket(new_ticket.id)
 
     # ============================================================
     # INTERNAL HELPERS

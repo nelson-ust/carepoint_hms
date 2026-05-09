@@ -583,7 +583,7 @@ def ensure_master_database_exists(db_url: str) -> None:
         admin_uri,
         isolation_level="AUTOCOMMIT",
         future=True,
-        connect_args={"connect_timeout": 5},
+        connect_args={"connect_timeout": 10},
     )
     try:
         with admin_engine.connect() as conn:
@@ -662,7 +662,7 @@ def create_new_database(db_name: str, base_url: str = MASTER_DATABASE_URL) -> No
             admin_uri,
             isolation_level="AUTOCOMMIT",
             future=True,
-            connect_args={"connect_timeout": 5},
+            connect_args={"connect_timeout": 10},
         )
         try:
             with admin_engine.connect() as conn:
@@ -709,7 +709,7 @@ def create_new_database(db_name: str, base_url: str = MASTER_DATABASE_URL) -> No
     fallback_engine = create_engine(
         base_url,
         future=True,
-        connect_args={"connect_timeout": 5},
+        connect_args={"connect_timeout": 10},
     )
     try:
         with fallback_engine.connect() as conn:
@@ -1214,7 +1214,7 @@ def run_master_initialization(
     master_engine = create_engine(
         MASTER_DATABASE_URL,
         future=True,
-        connect_args={"connect_timeout": 5},
+        connect_args={"connect_timeout": 10},
     )
 
     try:
@@ -1596,6 +1596,14 @@ def parse_args() -> argparse.Namespace:
             "sync ticks skip them cleanly until re-approved)."
         ),
     )
+    parser.add_argument(
+        "--reset",
+        action="store_true",
+        help=(
+            "Destructive wipe! Drops all physical tenant databases "
+            "and resets the master database schema from scratch."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -1603,7 +1611,49 @@ if __name__ == "__main__":
     args = parse_args()
 
     try:
-        if args.heal_missing_tenant_dbs:
+        if args.reset:
+            check_production_safety(destructive=True)
+            logger.warning("Initiating FULL RESET. Dropping all tenant databases...")
+            
+            from app.core.cryptography import decrypt_string
+            try:
+                master_engine = create_engine(MASTER_DATABASE_URL, future=True)
+                with Session(master_engine) as master_db:
+                    tenants = master_db.query(Tenant).all()
+                    
+                    for tenant in tenants:
+                        if tenant.db_connection_string:
+                            try:
+                                conn_str = decrypt_string(tenant.db_connection_string)
+                                # Target database name
+                                target_db_name = make_url(conn_str).database
+                                target_identifier = f'"{target_db_name}"'
+                                
+                                # Connect to admin/postgres db
+                                admin_url = make_url(MASTER_DATABASE_URL).set(database="postgres")
+                                admin_engine = create_engine(admin_url, isolation_level="AUTOCOMMIT", future=True)
+                                
+                                logger.info(f"Dropping tenant database: {target_db_name}")
+                                with admin_engine.connect() as conn:
+                                    conn.execute(text(f"""
+                                        SELECT pg_terminate_backend(pid) 
+                                        FROM pg_stat_activity 
+                                        WHERE datname = '{target_db_name}' AND pid <> pg_backend_pid()
+                                    """))
+                                    conn.execute(text(f"DROP DATABASE IF EXISTS {target_identifier}"))
+                                admin_engine.dispose()
+                            except Exception as e:
+                                logger.error(f"Failed to drop tenant database for {tenant.code}: {e}")
+            except Exception as e:
+                logger.error(f"Error accessing master database to list tenants: {e}")
+            finally:
+                if 'master_engine' in locals():
+                    master_engine.dispose()
+            
+            logger.info("Proceeding to recreate master database schema...")
+            run_master_initialization(recreate=True, physical_recreate=False)
+
+        elif args.heal_missing_tenant_dbs:
             from app.db_sync import heal_stale_tenants
 
             results = heal_stale_tenants()

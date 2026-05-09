@@ -665,7 +665,7 @@ class TenantService:
                 master_url,
                 isolation_level="AUTOCOMMIT",
                 future=True,
-                connect_args={"connect_timeout": 5},
+                connect_args={"connect_timeout": 10},
             )
             with engine.connect() as conn:
                 exists = conn.execute(
@@ -684,7 +684,7 @@ class TenantService:
                         probe_engine = create_engine(
                             probe_url,
                             future=True,
-                            connect_args={"connect_timeout": 5},
+                            connect_args={"connect_timeout": 10},
                         )
                         try:
                             with probe_engine.connect() as probe_conn:
@@ -730,7 +730,7 @@ class TenantService:
         engine = create_engine(
             db_url,
             future=True,
-            connect_args={"connect_timeout": 5},
+            connect_args={"connect_timeout": 10},
         )
         try:
             with Session(engine) as tenant_db:
@@ -754,7 +754,7 @@ class TenantService:
         engine = create_engine(
             db_url,
             future=True,
-            connect_args={"connect_timeout": 5},
+            connect_args={"connect_timeout": 10},
         )
         with Session(engine) as tenant_db:
             # Resolve the ADMIN role (which was seeded by run_tenant_initialization)

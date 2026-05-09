@@ -105,6 +105,7 @@ class Settings(BaseSettings):
     DB_POOL_RECYCLE: int = 1800
     DB_POOL_PRE_PING: bool = True
     DB_ISOLATION_LEVEL: str = "READ COMMITTED"
+    AUTO_SYNC_TENANT_SCHEMAS: bool = True
 
     # Optional discrete PostgreSQL settings for documentation/future composition
     POSTGRES_SERVER: Optional[str] = None

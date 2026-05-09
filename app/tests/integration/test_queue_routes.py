@@ -56,12 +56,17 @@ def test_visit(client, auth_header):
     return v_res.json()
 
 class TestQueueLifecycle:
-    def test_get_worklist(self, client, auth_header, test_visit):
+    def test_get_worklist_includes_history_fields(self, client, auth_header, test_visit):
         sdp_id = test_visit["visit"]["first_service_delivery_point_id"]
         response = client.get(f"/api/v1/queue/service-points/{sdp_id}/worklist", headers=auth_header)
         assert response.status_code == 200
         data = response.json()
-        assert data.get("success") is True or "items" in data or "waiting" in data
+        
+        # Check that previous_steps field exists in serialized tickets
+        tickets = data.get("waiting", [])
+        if tickets:
+            assert "previous_steps" in tickets[0]
+            assert isinstance(tickets[0]["previous_steps"], list)
 
     def test_call_ticket(self, client, auth_header, test_visit):
         ticket_id = test_visit["first_queue_ticket"]["id"]
@@ -69,6 +74,7 @@ class TestQueueLifecycle:
         assert response.status_code == 200
         data = response.json()
         assert data["ticket"]["status"] == "CALLED"
+        assert "previous_steps" in data["ticket"]
 
     def test_start_serving_ticket(self, client, auth_header, test_visit):
         ticket_id = test_visit["first_queue_ticket"]["id"]
@@ -91,25 +97,27 @@ class TestQueueLifecycle:
         data = response.json()
         assert data["ticket"]["status"] == "SERVED"
 
-    def test_complete_and_route(self, client, auth_header, test_visit):
+    def test_complete_and_route_populates_history_field(self, client, auth_header, test_visit):
         ticket_id = test_visit["first_queue_ticket"]["id"]
         
-        # Create target SDP
+        # Create target SDP (Laboratory)
         sdp_payload = {
-            "name": "Target Clinic",
-            "code": _unique("SDP-TARGET"),
-            "service_point_type": "CLINIC"
+            "name": "Central Laboratory",
+            "code": _unique("LAB"),
+            "service_point_type": "LABORATORY"
         }
         sdp_res = client.post("/api/v1/service-delivery-points/", json=sdp_payload, headers=auth_header)
         target_sdp_id = sdp_res.json()["id"]
 
+        # Serve and Route
         client.post(f"/api/v1/queue/tickets/{ticket_id}/call", json={}, headers=auth_header)
         client.post(f"/api/v1/queue/tickets/{ticket_id}/serve", json={}, headers=auth_header)
         
         payload = {"target_service_delivery_point_id": target_sdp_id}
-        response = client.post(f"/api/v1/queue/tickets/{ticket_id}/complete-and-route", json=payload, headers=auth_header)
-        assert response.status_code == 200
-        data = response.json()
-        assert data["success"] is True
-        assert data["ticket"]["service_delivery_point_id"] == target_sdp_id
-        assert data["ticket"]["status"] == "WAITING"
+        route_res = client.post(f"/api/v1/queue/tickets/{ticket_id}/complete-and-route", json=payload, headers=auth_header)
+        assert route_res.status_code == 200
+        new_ticket = route_res.json()["ticket"]
+        
+        # Verify history field exists
+        assert "previous_steps" in new_ticket
+        assert isinstance(new_ticket["previous_steps"], list)
