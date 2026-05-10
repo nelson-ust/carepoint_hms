@@ -54,6 +54,14 @@ from typing import Any, Optional
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
+from app.core.enums import (
+    BloodGroup,
+    Gender,
+    Genotype,
+    MaritalStatus,
+    PatientType,
+)
+
 
 # ============================================================
 # SHARED / EMBEDDED LITE SCHEMAS
@@ -642,8 +650,8 @@ class PatientBaseSchema(BaseModel):
     middle_name: Optional[str] = Field(None, max_length=100)
 
     date_of_birth: Optional[date] = None
-    gender: Optional[str] = Field(None, max_length=50)
-    marital_status: Optional[str] = Field(None, max_length=50)
+    gender: Optional[Gender] = None
+    marital_status: Optional[MaritalStatus] = None
 
     phone_number: Optional[str] = Field(None, max_length=30)
     alternate_phone_number: Optional[str] = Field(None, max_length=30)
@@ -654,8 +662,8 @@ class PatientBaseSchema(BaseModel):
     state: Optional[str] = Field(None, max_length=100)
     country: Optional[str] = Field(None, max_length=100)
 
-    blood_group: Optional[str] = Field(None, max_length=20)
-    genotype: Optional[str] = Field(None, max_length=20)
+    blood_group: Optional[BloodGroup] = None
+    genotype: Optional[Genotype] = None
     allergies: Optional[str] = None
 
     emergency_contact_name: Optional[str] = Field(None, max_length=200)
@@ -667,7 +675,7 @@ class PatientBaseSchema(BaseModel):
     next_of_kin_relationship: Optional[str] = Field(None, max_length=100)
     next_of_kin_address: Optional[str] = None
 
-    patient_type: Optional[str] = Field(None, max_length=50)
+    patient_type: Optional[PatientType] = Field(PatientType.OUTPATIENT)
 
     preferred_payer_id: Optional[int] = None
     payer_type: Optional[str] = Field(None, max_length=100)
@@ -702,6 +710,25 @@ class PatientBaseSchema(BaseModel):
             return value
         normalized = value.strip()
         return normalized or None
+
+    @field_validator("patient_type", mode="before")
+    @classmethod
+    def map_and_normalize_patient_type(cls, value: Any) -> Any:
+        """
+        Maps legacy or incorrect frontend values to valid PatientType enum values.
+        Specifically handles 'INDIVIDUAL' which is often sent by the frontend
+        but should be treated as 'OUTPATIENT' in the clinical flow.
+        """
+        if value is None:
+            return value
+        
+        if isinstance(value, str):
+            val_upper = value.strip().upper()
+            if val_upper == "INDIVIDUAL":
+                return PatientType.OUTPATIENT
+            return val_upper
+        
+        return value
 
     @field_validator(
         "phone_number",
@@ -790,8 +817,8 @@ class PatientUpdateSchema(BaseModel):
     middle_name: Optional[str] = Field(None, max_length=100)
 
     date_of_birth: Optional[date] = None
-    gender: Optional[str] = Field(None, max_length=50)
-    marital_status: Optional[str] = Field(None, max_length=50)
+    gender: Optional[Gender] = None
+    marital_status: Optional[MaritalStatus] = None
 
     phone_number: Optional[str] = Field(None, max_length=30)
     alternate_phone_number: Optional[str] = Field(None, max_length=30)
@@ -802,8 +829,8 @@ class PatientUpdateSchema(BaseModel):
     state: Optional[str] = Field(None, max_length=100)
     country: Optional[str] = Field(None, max_length=100)
 
-    blood_group: Optional[str] = Field(None, max_length=20)
-    genotype: Optional[str] = Field(None, max_length=20)
+    blood_group: Optional[BloodGroup] = None
+    genotype: Optional[Genotype] = None
     allergies: Optional[str] = None
 
     emergency_contact_name: Optional[str] = Field(None, max_length=200)
@@ -815,7 +842,7 @@ class PatientUpdateSchema(BaseModel):
     next_of_kin_relationship: Optional[str] = Field(None, max_length=100)
     next_of_kin_address: Optional[str] = None
 
-    patient_type: Optional[str] = Field(None, max_length=50)
+    patient_type: Optional[PatientType] = None
 
     preferred_payer_id: Optional[int] = None
     payer_type: Optional[str] = Field(None, max_length=100)
@@ -850,6 +877,18 @@ class PatientUpdateSchema(BaseModel):
             return value
         normalized = value.strip()
         return normalized or None
+
+    @field_validator("patient_type", mode="before")
+    @classmethod
+    def map_and_normalize_patient_type(cls, value: Any) -> Any:
+        if value is None:
+            return value
+        if isinstance(value, str):
+            val_upper = value.strip().upper()
+            if val_upper == "INDIVIDUAL":
+                return PatientType.OUTPATIENT
+            return val_upper
+        return value
 
     @field_validator(
         "phone_number",
@@ -899,9 +938,9 @@ class PatientLiteSchema(BaseModel):
     last_name: str
     middle_name: Optional[str] = None
     date_of_birth: Optional[date] = None
-    gender: Optional[str] = None
+    gender: Optional[Gender] = None
     phone_number: Optional[str] = None
-    patient_type: Optional[str] = None
+    patient_type: Optional[PatientType] = None
 
 
 class PatientReadSchema(BaseModel):
@@ -920,8 +959,8 @@ class PatientReadSchema(BaseModel):
     middle_name: Optional[str] = None
 
     date_of_birth: Optional[date] = None
-    gender: Optional[str] = None
-    marital_status: Optional[str] = None
+    gender: Optional[Gender] = None
+    marital_status: Optional[MaritalStatus] = None
 
     phone_number: Optional[str] = None
     alternate_phone_number: Optional[str] = None
@@ -932,8 +971,8 @@ class PatientReadSchema(BaseModel):
     state: Optional[str] = None
     country: Optional[str] = None
 
-    blood_group: Optional[str] = None
-    genotype: Optional[str] = None
+    blood_group: Optional[BloodGroup] = None
+    genotype: Optional[Genotype] = None
     allergies: Optional[str] = None
 
     emergency_contact_name: Optional[str] = None
@@ -945,7 +984,7 @@ class PatientReadSchema(BaseModel):
     next_of_kin_relationship: Optional[str] = None
     next_of_kin_address: Optional[str] = None
 
-    patient_type: Optional[str] = None
+    patient_type: Optional[PatientType] = None
 
     preferred_payer_id: Optional[int] = None
     payer_type: Optional[str] = None
@@ -989,12 +1028,12 @@ class PatientListItemSchema(BaseModel):
     last_name: str
     middle_name: Optional[str] = None
     date_of_birth: Optional[date] = None
-    gender: Optional[str] = None
+    gender: Optional[Gender] = None
     phone_number: Optional[str] = None
     email: Optional[str] = None
     city: Optional[str] = None
     state: Optional[str] = None
-    patient_type: Optional[str] = None
+    patient_type: Optional[PatientType] = None
     payer_type: Optional[str] = None
     national_identifier: Optional[str] = None
 
@@ -1079,7 +1118,7 @@ class PatientMPISearchSchema(BaseModel):
     email: Optional[str] = None
     city: Optional[str] = None
     state: Optional[str] = None
-    patient_type: Optional[str] = None
+    patient_type: Optional[PatientType] = None
     payer_type: Optional[str] = None
     national_identifier: Optional[str] = None
 
