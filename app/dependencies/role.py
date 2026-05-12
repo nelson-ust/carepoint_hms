@@ -16,20 +16,30 @@ from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.core.exceptions import ForbiddenError
-from app.models.all_models import User
+from app.models.all_models import User, SaaSAdmin
 from app.dependencies.auth import get_current_active_user
 
 
-def _extract_role_names(user: User) -> set[str]:
+def _extract_role_names(user: User | SaaSAdmin) -> set[str]:
     """
     Extract normalized role names from the current user.
 
     The current model links users to roles through UserRoleAssociation and Role.
+    For SaaSAdmin, we use the platform_role field.
     """
     role_names: set[str] = set()
 
+    # Handle SaaSAdmin (Master DB)
+    if hasattr(user, "platform_role"):
+        role = getattr(user, "platform_role", None)
+        role_value = str(getattr(role, "value", role) or "").upper()
+        if role_value:
+            role_names.add(role_value)
+        return role_names
+
+    # Handle regular User (Tenant DB)
     # Defensive iteration in case the relationship is empty or partially loaded.
-    for user_role in user.user_roles or []:
+    for user_role in getattr(user, "user_roles", []) or []:
         if user_role.role and user_role.role.name:
             role_names.add(user_role.role.name.strip().upper())
         elif user_role.role and user_role.role.code:
@@ -43,21 +53,24 @@ def require_roles(*allowed_roles: str):
     Build a dependency that requires the current user to have at least one
     of the supplied roles.
 
-    Example:
-        current_user: Annotated[
-            User,
-            Depends(require_roles("TENANT_ADMIN", "REGISTRAR"))
-        ]
+    Note: SaaS Administrators are explicitly blocked from these tenant-level
+    roles to ensure data isolation.
     """
     normalized_allowed = {role.strip().upper() for role in allowed_roles if role.strip()}
 
     def dependency(
-        current_user: Annotated[User, Depends(get_current_active_user)],
+        current_user: Annotated[User | SaaSAdmin, Depends(get_current_active_user)],
     ) -> User:
-        user_roles = _extract_role_names(current_user)
+        if isinstance(current_user, SaaSAdmin):
+            raise ForbiddenError(
+                message="SaaS Administrators cannot access tenant-level resources.",
+                detail={"user_type": "SaaSAdmin"}
+            )
 
-        if current_user.is_superuser:
+        if getattr(current_user, "is_superuser", False):
             return current_user
+
+        user_roles = _extract_role_names(current_user)
 
         if not user_roles.intersection(normalized_allowed):
             raise ForbiddenError(
@@ -76,16 +89,25 @@ def require_roles(*allowed_roles: str):
 def require_all_roles(*required_roles: str):
     """
     Build a dependency that requires the current user to have all supplied roles.
+
+    Note: SaaS Administrators are explicitly blocked from these tenant-level
+    roles to ensure data isolation.
     """
     normalized_required = {role.strip().upper() for role in required_roles if role.strip()}
 
     def dependency(
-        current_user: Annotated[User, Depends(get_current_active_user)],
+        current_user: Annotated[User | SaaSAdmin, Depends(get_current_active_user)],
     ) -> User:
-        user_roles = _extract_role_names(current_user)
+        if isinstance(current_user, SaaSAdmin):
+            raise ForbiddenError(
+                message="SaaS Administrators cannot access tenant-level resources.",
+                detail={"user_type": "SaaSAdmin"}
+            )
 
-        if current_user.is_superuser:
+        if getattr(current_user, "is_superuser", False):
             return current_user
+
+        user_roles = _extract_role_names(current_user)
 
         missing = normalized_required - user_roles
         if missing:
@@ -104,22 +126,28 @@ def require_all_roles(*required_roles: str):
 
 
 def require_superuser(
-    current_user: Annotated[User, Depends(get_current_active_user)],
+    current_user: Annotated[User | SaaSAdmin, Depends(get_current_active_user)],
 ) -> User:
     """
-    Require superuser access.
+    Require superuser access. Only Tenant superusers are allowed.
     """
-    if not current_user.is_superuser:
+    if isinstance(current_user, SaaSAdmin):
+        raise ForbiddenError(message="SaaS Administrators cannot access tenant superuser resources.")
+        
+    if not getattr(current_user, "is_superuser", False):
         raise ForbiddenError(message="Superuser access is required.")
     return current_user
 
 
 def require_any_authenticated_user(
-    current_user: Annotated[User, Depends(get_current_active_user)],
+    current_user: Annotated[User | SaaSAdmin, Depends(get_current_active_user)],
 ) -> User:
     """
-    Simple passthrough dependency for authenticated active users.
+    Require a tenant-level authenticated active user.
     """
+    if isinstance(current_user, SaaSAdmin):
+        raise ForbiddenError(message="This resource is only available to tenant users.")
+        
     return current_user
 
 
@@ -154,26 +182,26 @@ def require_permission(*permission_codes: str, require_all: bool = False):
     - Superusers always pass.
     - When `require_all` is True, the user must have every supplied permission.
     - Otherwise, having any one permission is sufficient.
-
-    Example
-    -------
-        @router.post("/patients")
-        def create_patient(
-            current_user: Annotated[User, Depends(require_permission("PATIENT_CREATE"))],
-        ): ...
+    - SaaS Administrators are blocked.
     """
     normalized_required = _normalize_permission_codes(permission_codes)
     if not normalized_required:
         raise ValueError("require_permission needs at least one permission code.")
 
     def dependency(
-        current_user: Annotated[User, Depends(get_current_active_user)],
+        current_user: Annotated[User | SaaSAdmin, Depends(get_current_active_user)],
         db: Annotated[Session, Depends(get_db)],
     ) -> User:
         # Lazy import to avoid circular dependency at module import time.
         from app.repositories.permission_repository import PermissionRepository
 
-        if current_user.is_superuser:
+        if isinstance(current_user, SaaSAdmin):
+            raise ForbiddenError(
+                message="SaaS Administrators cannot access tenant-level permissions.",
+                detail={"user_type": "SaaSAdmin"}
+            )
+
+        if getattr(current_user, "is_superuser", False):
             return current_user
 
         repo = PermissionRepository(db)

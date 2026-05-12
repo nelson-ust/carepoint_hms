@@ -420,6 +420,18 @@ class VisitFlowCombinedCreateResultSchema(BaseModel):
 # LIST / ACTION RESPONSE SCHEMAS
 # ============================================================
 
+class VisitFlowTemplateStepListItemSchema(BaseModel):
+    """
+    Flat list item schema for a step inside a visit flow template.
+    """
+    id: int
+    template_id: int
+    service_delivery_point_id: int
+    service_delivery_point_name: Optional[str] = None
+    step_order: int
+    notes: Optional[str] = None
+
+
 class VisitFlowTemplateListItemSchema(BaseModel):
     """
     List item schema for visit flow templates.
@@ -429,6 +441,7 @@ class VisitFlowTemplateListItemSchema(BaseModel):
     name: str
     code: str
     description: Optional[str] = None
+    associated_visit_flow_templates_steps: list[VisitFlowTemplateStepListItemSchema] = Field(default_factory=list)
 
 
 class VisitFlowTemplateListResponseSchema(BaseModel):
@@ -462,41 +475,3 @@ class VisitFlowActionResponseSchema(BaseModel):
 
     success: bool = True
     message: str
-
-
-'''
-{
-  "template": {
-    "name": "Standard Outpatient Flow",
-    "code": "OPD_STANDARD",
-    "description": "Registration to clinician to lab to pharmacy"
-  },
-  "template_steps": [
-    {
-      "service_delivery_point_id": 1,
-      "step_order": 1,
-      "is_required": true,
-      "notes": "Initial clinician review"
-    },
-    {
-      "service_delivery_point_id": 2,
-      "step_order": 2,
-      "is_required": false,
-      "notes": "Lab as needed"
-    }
-  ],
-  "visit_id": 25,
-  "visit_steps": [
-    {
-      "service_delivery_point_id": 1,
-      "step_order": 1,
-      "status": "PENDING",
-      "is_current": true,
-      "is_required": true,
-      "is_skipped": false,
-      "notes": "Current step for this visit"
-    }
-  ]
-}
-
-'''    

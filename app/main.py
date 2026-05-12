@@ -41,6 +41,7 @@ Design notes
 """
 
 import os
+import asyncio
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -328,9 +329,22 @@ async def lifespan(app: FastAPI):
 
     app.state.startup_completed = True
 
+    # Start background monitoring probes
+    async def monitoring_loop():
+        from app.services.monitoring_service import monitoring_service
+        while True:
+            try:
+                await monitoring_service.run_probe()
+            except Exception as e:
+                logger.error("[monitoring] Probe loop error: %s", e)
+            await asyncio.sleep(60)
+
+    probe_task = asyncio.create_task(monitoring_loop())
+
     try:
         yield
     finally:
+        probe_task.cancel()
         # Best-effort scheduler stop. We only attempt this when we successfully
         # started it earlier so we don't trip on a half-initialized state.
         if (
@@ -607,13 +621,17 @@ async def read_root() -> dict[str, Any]:
 @app.get("/health", tags=["Health"])
 async def health_check() -> dict[str, Any]:
     """
-    General health endpoint.
+    General health endpoint enhanced with real-time network connectivity metrics.
 
-    Returns a broad application health snapshot including database state and
-    scheduler runtime state. Designed to be polled by load balancers, K8s
-    liveness probes and on-call dashboards.
+    Returns a broad application health snapshot including database state,
+    scheduler runtime state, and live network performance metrics from
+    the MonitoringService.
     """
+    from app.services.monitoring_service import monitoring_service
+    
     db_connected = check_database_connection()
+    network_metrics = monitoring_service.get_metrics()
+
     return {
         "status": "ok" if db_connected else "degraded",
         "application": APP_NAME,
@@ -623,15 +641,13 @@ async def health_check() -> dict[str, Any]:
         "database": {
             "connected": db_connected,
         },
-        # The scheduler block lets operators distinguish between "configured
-        # to run", "available to run", and "currently running" — which is
-        # critical when a deploy lands without the scheduler module included.
         "scheduler": {
             "configured_enabled": SCHEDULER_ENABLED,
             "available": start_scheduler is not None,
             "running": bool(getattr(app.state, "scheduler_running", False)),
             "import_error": getattr(app.state, "scheduler_import_error", None),
         },
+        "network": network_metrics
     }
 
 

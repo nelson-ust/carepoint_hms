@@ -157,15 +157,35 @@ def _serialize_runtime_step(step) -> dict[str, Any]:
     }
 
 
+def _serialize_template_list_step(step) -> dict[str, Any]:
+    """
+    Serialize a template step for the list view (flat).
+    """
+    sdp = getattr(step, "service_delivery_point", None)
+    return {
+        "id": step.id,
+        "template_id": step.template_id,
+        "service_delivery_point_id": step.service_delivery_point_id,
+        "service_delivery_point_name": getattr(sdp, "name", None) if sdp else None,
+        "step_order": step.step_order,
+        "notes": step.notes,
+    }
+
+
 def _serialize_template_list_item(template) -> dict[str, Any]:
     """
-    Serialize a template list item.
+    Serialize a template list item with flat steps.
     """
     return {
         "id": template.id,
         "name": template.name,
         "code": template.code,
         "description": template.description,
+        "associated_visit_flow_templates_steps": [
+            _serialize_template_list_step(step)
+            for step in (getattr(template, "steps", []) or [])
+            if not getattr(step, "is_deleted", False)
+        ],
     }
 
 
