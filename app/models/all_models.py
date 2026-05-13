@@ -52,6 +52,7 @@ from sqlalchemy import (
     func,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.ext.associationproxy import association_proxy, AssociationProxy
 
 from app.models.base import MasterTable, TenantTable, utc_now
 from app.core.enums import (
@@ -570,7 +571,13 @@ class ServiceDeliveryPoint(TenantTable):
     supports_walk_in: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
     department: Mapped[Optional["Department"]] = relationship(back_populates="service_delivery_points")
-    assigned_staff: Mapped[list["StaffProfile"]] = relationship(back_populates="service_delivery_point")
+    staff_assignments: Mapped[list["StaffServiceDeliveryPointAssociation"]] = relationship(
+        back_populates="service_delivery_point",
+        cascade="all, delete-orphan",
+    )
+    assigned_staff: AssociationProxy[list["StaffProfile"]] = association_proxy(
+        "staff_assignments", "staff_profile", creator=lambda v: StaffServiceDeliveryPointAssociation(staff_profile=v)
+    )
     queue_tickets: Mapped[list["QueueTicket"]] = relationship(back_populates="service_delivery_point")
     visit_flow_steps: Mapped[list["VisitFlowStep"]] = relationship(back_populates="service_delivery_point")
     employee_shifts: Mapped[list["EmployeeShift"]] = relationship(back_populates="service_delivery_point")
@@ -587,11 +594,6 @@ class StaffProfile(TenantTable):
     user_id: Mapped[int] = mapped_column(ForeignKey("user.id"), nullable=False, unique=True, index=True)
     facility_id: Mapped[Optional[int]] = mapped_column(ForeignKey("facility.id"), nullable=True, index=True)
     department_id: Mapped[Optional[int]] = mapped_column(ForeignKey("department.id"), nullable=True, index=True)
-    service_delivery_point_id: Mapped[Optional[int]] = mapped_column(
-        ForeignKey("service_delivery_point.id"),
-        nullable=True,
-        index=True,
-    )
 
     staff_no: Mapped[str] = mapped_column(String(100), unique=True, nullable=False, index=True)
     job_title: Mapped[Optional[str]] = mapped_column(String(150), nullable=True)
@@ -659,8 +661,31 @@ class StaffProfile(TenantTable):
 
     user: Mapped["User"] = relationship(back_populates="staff_profile")
     department: Mapped[Optional["Department"]] = relationship(back_populates="staff_profiles")
-    service_delivery_point: Mapped[Optional["ServiceDeliveryPoint"]] = relationship(back_populates="assigned_staff")
+    service_delivery_points: Mapped[list["StaffServiceDeliveryPointAssociation"]] = relationship(
+        back_populates="staff_profile",
+        cascade="all, delete-orphan",
+    )
+    assigned_sdps: AssociationProxy[list["ServiceDeliveryPoint"]] = association_proxy(
+        "service_delivery_points", "service_delivery_point", creator=lambda v: StaffServiceDeliveryPointAssociation(service_delivery_point=v)
+    )
 
+    @property
+    def assigned_sdp_ids(self) -> list[int]:
+        return [link.service_delivery_point_id for link in self.service_delivery_points]
+
+
+class StaffServiceDeliveryPointAssociation(TenantTable):
+    """Join table between staff profiles and service delivery points."""
+
+    staff_profile_id: Mapped[int] = mapped_column(ForeignKey("staff_profile.id"), nullable=False, index=True)
+    service_delivery_point_id: Mapped[int] = mapped_column(ForeignKey("service_delivery_point.id"), nullable=False, index=True)
+
+    staff_profile: Mapped["StaffProfile"] = relationship(back_populates="service_delivery_points")
+    service_delivery_point: Mapped["ServiceDeliveryPoint"] = relationship(back_populates="staff_assignments")
+
+    __table_args__ = (
+        UniqueConstraint("staff_profile_id", "service_delivery_point_id", name="uq_staff_sdp_association"),
+    )
 
 # # ============================================================
 # # PATIENTS / REGISTRATION

@@ -7,8 +7,11 @@ from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.core.dependencies import CurrentActiveUser
-from app.dependencies.role import require_permission
+from app.core.dependencies import (
+    AnyAuthenticatedUser,
+    CurrentActiveUser,
+)
+from app.dependencies.role import require_permission, require_any_permission
 from app.dependencies.service_delivery_point import (
     require_assigned_to_sdp,
     require_assigned_to_ticket_sdp,
@@ -78,16 +81,16 @@ def _serialize_ticket(t) -> dict:
     summary="Worklist for the caller's assigned service delivery point",
 )
 def get_my_worklist(
-    actor: CurrentActiveUser,
+    actor: AnyAuthenticatedUser,
     service: Annotated[QueueService, Depends(get_queue_service)],
-    _: Annotated[User, Depends(require_permission("QUEUE_MANAGE", "VISIT_READ"))],
+    service_delivery_point_id: Optional[int] = Query(None, description="Optional SDP ID to view if user has multiple assignments."),
 ):
     """
     Returns the worklist for the staff member's assigned service delivery
     point. Errors with 400 if the caller has no assigned SDP on their
-    StaffProfile.
+    StaffProfile or if the requested SDP is not assigned to them.
     """
-    data = service.get_my_worklist(actor)
+    data = service.get_my_worklist(actor, sdp_id=service_delivery_point_id)
     return {
         "success": True,
         "message": "Worklist fetched successfully.",
@@ -107,7 +110,7 @@ def get_my_worklist(
 )
 def get_worklist(
     service_delivery_point_id: int,
-    _: Annotated[User, Depends(require_permission("QUEUE_MANAGE", "VISIT_READ"))],
+    _: Annotated[User, Depends(require_assigned_to_sdp(sdp_param_name="service_delivery_point_id"))],
     service: Annotated[QueueService, Depends(get_queue_service)],
 ):
     data = service.get_worklist(service_delivery_point_id)
@@ -130,7 +133,7 @@ def get_worklist(
 )
 def list_service_point_tickets(
     service_delivery_point_id: int,
-    _: Annotated[User, Depends(require_permission("QUEUE_MANAGE", "VISIT_READ"))],
+    _: Annotated[User, Depends(require_assigned_to_sdp(sdp_param_name="service_delivery_point_id"))],
     service: Annotated[QueueService, Depends(get_queue_service)],
     skip: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=200),
@@ -157,7 +160,7 @@ def list_service_point_tickets(
 )
 def list_visit_tickets(
     visit_id: int,
-    _: Annotated[User, Depends(require_permission("VISIT_READ"))],
+    _: Annotated[User, Depends(require_any_permission("VISIT_READ", "PATIENTS:VIEW"))],
     service: Annotated[QueueService, Depends(get_queue_service)],
 ):
     items = service.list_for_visit(visit_id)
@@ -177,7 +180,7 @@ def list_visit_tickets(
 )
 def get_ticket(
     ticket_id: int,
-    _: Annotated[User, Depends(require_permission("VISIT_READ"))],
+    _: Annotated[User, Depends(require_any_permission("VISIT_READ", "PATIENTS:VIEW"))],
     service: Annotated[QueueService, Depends(get_queue_service)],
 ):
     return _serialize_ticket(service.get_ticket(ticket_id))
@@ -194,7 +197,7 @@ def call_ticket(
     payload: QueueTicketCallSchema,
     actor: CurrentActiveUser,
     service: Annotated[QueueService, Depends(get_queue_service)],
-    _: Annotated[User, Depends(require_permission("QUEUE_MANAGE"))],
+    _: Annotated[User, Depends(require_any_permission("QUEUE_MANAGE", "QUEUE:MANAGE"))],
     __: Annotated[User, Depends(require_assigned_to_ticket_sdp())],
 ):
     ticket = service.call_ticket(ticket_id, actor_user_id=actor.id)
@@ -211,7 +214,7 @@ def start_serving_ticket(
     payload: QueueTicketServeSchema,
     actor: CurrentActiveUser,
     service: Annotated[QueueService, Depends(get_queue_service)],
-    _: Annotated[User, Depends(require_permission("QUEUE_MANAGE"))],
+    _: Annotated[User, Depends(require_any_permission("QUEUE_MANAGE", "QUEUE:MANAGE"))],
     __: Annotated[User, Depends(require_assigned_to_ticket_sdp())],
 ):
     ticket = service.start_serving(ticket_id, actor_user_id=actor.id)
@@ -228,7 +231,7 @@ def complete_ticket(
     payload: QueueTicketCompleteSchema,
     actor: CurrentActiveUser,
     service: Annotated[QueueService, Depends(get_queue_service)],
-    _: Annotated[User, Depends(require_permission("QUEUE_MANAGE"))],
+    _: Annotated[User, Depends(require_any_permission("QUEUE_MANAGE", "QUEUE:MANAGE"))],
     __: Annotated[User, Depends(require_assigned_to_ticket_sdp())],
 ):
     ticket = service.complete_ticket(ticket_id, actor_user_id=actor.id)
@@ -245,7 +248,7 @@ def complete_and_route_ticket(
     payload: QueueTicketCompleteAndRouteSchema,
     actor: CurrentActiveUser,
     service: Annotated[QueueService, Depends(get_queue_service)],
-    _: Annotated[User, Depends(require_permission("QUEUE_MANAGE", "VISIT_ROUTE"))],
+    _: Annotated[User, Depends(require_any_permission("QUEUE_MANAGE", "QUEUE:MANAGE", "VISIT_ROUTE", "VISITS:ROUTE"))],
     __: Annotated[User, Depends(require_assigned_to_ticket_sdp())],
 ):
     """
@@ -277,7 +280,7 @@ def complete_and_end_visit_ticket(
     payload: QueueTicketCompleteAndEndVisitSchema,
     actor: CurrentActiveUser,
     service: Annotated[QueueService, Depends(get_queue_service)],
-    _: Annotated[User, Depends(require_permission("QUEUE_MANAGE", "VISIT_ROUTE"))],
+    _: Annotated[User, Depends(require_any_permission("QUEUE_MANAGE", "QUEUE:MANAGE", "VISIT_ROUTE", "VISITS:ROUTE"))],
     __: Annotated[User, Depends(require_assigned_to_ticket_sdp())],
 ):
     """
@@ -307,7 +310,7 @@ def miss_ticket(
     ticket_id: int,
     actor: CurrentActiveUser,
     service: Annotated[QueueService, Depends(get_queue_service)],
-    _: Annotated[User, Depends(require_permission("QUEUE_MANAGE"))],
+    _: Annotated[User, Depends(require_any_permission("QUEUE_MANAGE", "QUEUE:MANAGE"))],
     __: Annotated[User, Depends(require_assigned_to_ticket_sdp())],
 ):
     ticket = service.mark_missed(ticket_id, actor_user_id=actor.id)
@@ -324,7 +327,7 @@ def cancel_ticket(
     payload: QueueTicketCancelSchema,
     actor: CurrentActiveUser,
     service: Annotated[QueueService, Depends(get_queue_service)],
-    _: Annotated[User, Depends(require_permission("QUEUE_MANAGE"))],
+    _: Annotated[User, Depends(require_any_permission("QUEUE_MANAGE", "QUEUE:MANAGE"))],
     __: Annotated[User, Depends(require_assigned_to_ticket_sdp())],
 ):
     ticket = service.cancel_ticket(ticket_id, reason=payload.reason, actor_user_id=actor.id)
@@ -341,7 +344,7 @@ def transfer_ticket(
     payload: QueueTicketTransferSchema,
     actor: CurrentActiveUser,
     service: Annotated[QueueService, Depends(get_queue_service)],
-    _: Annotated[User, Depends(require_permission("QUEUE_MANAGE", "VISIT_ROUTE"))],
+    _: Annotated[User, Depends(require_any_permission("QUEUE_MANAGE", "QUEUE:MANAGE", "VISIT_ROUTE", "VISITS:ROUTE"))],
     __: Annotated[User, Depends(require_assigned_to_ticket_sdp())],
 ):
     """

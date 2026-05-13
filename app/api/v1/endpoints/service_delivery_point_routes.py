@@ -37,8 +37,11 @@ from app.schemas.service_delivery_point_schemas import (
     ServiceDeliveryPointReadSchema,
     ServiceDeliveryPointStatusToggleSchema,
     ServiceDeliveryPointUpdateSchema,
+    StaffAssignmentSchema,
+    StaffUnassignmentSchema,
 )
 from app.services.service_delivery_point_service import ServiceDeliveryService
+from app.services.staff_profile_service import StaffProfileService
 from app.utils.pagination import paginate_response
 
 router = APIRouter(
@@ -54,6 +57,15 @@ def get_service_delivery_service(
     Dependency provider for the service delivery service.
     """
     return ServiceDeliveryService(db)
+
+
+def get_staff_profile_service(
+    db: Annotated[Session, Depends(get_db)],
+) -> StaffProfileService:
+    """
+    Dependency provider for the staff profile service.
+    """
+    return StaffProfileService(db)
 
 
 # ============================================================
@@ -298,3 +310,93 @@ def delete_service_delivery_point(
         "success": True,
         "message": f"Service delivery point '{record.code}' deleted successfully.",
     }
+
+
+# ============================================================
+# STAFF ASSIGNMENT ROUTES
+# ============================================================
+
+@router.post(
+    "/{service_delivery_point_id}/assign-staff",
+    response_model=ServiceDeliveryPointActionResponseSchema,
+    status_code=status.HTTP_200_OK,
+    summary="Assign staff to service delivery point",
+)
+def assign_staff_to_sdp(
+    service_delivery_point_id: int,
+    payload: StaffAssignmentSchema,
+    _: AdminUser,
+    staff_service: Annotated[StaffProfileService, Depends(get_staff_profile_service)],
+):
+    """
+    Assign one or more staff profiles to this service delivery point.
+    """
+    count = staff_service.assign_staff_to_sdp(
+        payload.staff_profile_ids,
+        service_delivery_point_id
+    )
+    return {
+        "success": True,
+        "message": f"{count} staff member(s) assigned successfully.",
+    }
+
+
+@router.post(
+    "/{service_delivery_point_id}/unassign-staff",
+    response_model=ServiceDeliveryPointActionResponseSchema,
+    status_code=status.HTTP_200_OK,
+    summary="Unassign staff from service delivery point",
+)
+def unassign_staff_from_sdp(
+    service_delivery_point_id: int,
+    payload: StaffUnassignmentSchema,
+    _: AdminUser,
+    staff_service: Annotated[StaffProfileService, Depends(get_staff_profile_service)],
+):
+    """
+    Unassign one or more staff profiles from this service delivery point.
+    """
+    count = staff_service.unassign_staff_from_sdp(
+        service_delivery_point_id,
+        payload.staff_profile_ids
+    )
+    return {
+        "success": True,
+        "message": f"{count} staff member(s) unassigned successfully.",
+    }
+
+
+@router.get(
+    "/{service_delivery_point_id}/staff",
+    status_code=status.HTTP_200_OK,
+    summary="List staff assigned to service delivery point",
+)
+def list_sdp_staff(
+    service_delivery_point_id: int,
+    _: AdminUser,
+    staff_service: Annotated[StaffProfileService, Depends(get_staff_profile_service)],
+    skip: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=200),
+):
+    """
+    Return a paginated list of staff profiles assigned to this service delivery point.
+    """
+    items, total = staff_service.list_staff_by_sdp(
+        service_delivery_point_id,
+        skip=skip,
+        limit=limit
+    )
+    return paginate_response(
+        items=[{
+            "id": item.id,
+            "staff_no": item.staff_no,
+            "job_title": item.job_title,
+            "first_name": item.user.first_name if item.user else None,
+            "last_name": item.user.last_name if item.user else None,
+            "email": item.user.email if item.user else None,
+        } for item in items],
+        total=total,
+        skip=skip,
+        limit=limit,
+        message="Staff members fetched successfully.",
+    )

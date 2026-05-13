@@ -404,6 +404,7 @@ class TenantBackupService:
             bucket = tenant.aws_s3_bucket_name or getattr(settings, "AWS_S3_BUCKET_NAME", None) or ""
             return tenant, db_url, bucket
 
+
     def _run_pg_dump(self, db_url: str, dump_path: Path) -> None:
         """
         Executes the pg_dump system command.
@@ -436,6 +437,7 @@ class TenantBackupService:
                     f"Action: Install PostgreSQL {server_ver} tools OR start Docker to enable the Universal Fallback."
                 )
             raise BadRequestError(message=f"pg_dump failed: {msg}")
+
 
     def _run_pg_restore(self, db_url: str, dump_path: Path) -> None:
         """

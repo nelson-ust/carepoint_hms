@@ -153,27 +153,42 @@ class QueueService:
         self._populate_history([ticket])
         return ticket
 
-    def resolve_user_sdp_id(self, user) -> Optional[int]:
+    def resolve_user_sdp_ids(self, user) -> list[int]:
         """
-        Pull the SDP id off the caller's StaffProfile, if any.
+        Pull the assigned SDP IDs from the caller's StaffProfile.
         """
         profile = getattr(user, "staff_profile", None)
         if profile is None:
-            return None
-        return getattr(profile, "service_delivery_point_id", None)
+            return []
+        
+        # Access the property I added to all_models
+        return getattr(profile, "assigned_sdp_ids", [])
 
-    def get_my_worklist(self, user) -> dict:
+    def get_my_worklist(self, user, sdp_id: Optional[int] = None) -> dict:
         """
-        Worklist for the caller's assigned SDP. Raises if the user has no
-        SDP assignment on their staff profile.
+        Worklist for the caller's assigned SDP(s).
+        
+        If sdp_id is provided, it returns the worklist for that specific point
+        (verifying the user is assigned to it).
+        
+        If sdp_id is NOT provided, it defaults to the first assigned point.
         """
-        sdp_id = self.resolve_user_sdp_id(user)
-        if sdp_id is None:
+        assigned_ids = self.resolve_user_sdp_ids(user)
+        if not assigned_ids:
             raise BadRequestError(
                 message="You are not assigned to any service delivery point.",
                 detail={"user_id": getattr(user, "id", None)},
             )
-        return self.get_worklist(sdp_id)
+        
+        target_id = sdp_id or assigned_ids[0]
+        
+        if target_id not in assigned_ids:
+            raise BadRequestError(
+                message="You are not assigned to the requested service delivery point.",
+                detail={"requested_sdp_id": target_id, "assigned_sdp_ids": assigned_ids}
+            )
+            
+        return self.get_worklist(target_id)
 
     # ============================================================
     # TRANSITIONS

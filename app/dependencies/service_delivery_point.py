@@ -63,14 +63,16 @@ def _user_is_privileged(user: User) -> bool:
     return False
 
 
-def _resolve_user_sdp_id(user: User) -> Optional[int]:
+def _resolve_user_sdp_ids(user: User) -> list[int]:
     """
-    Pull the SDP id off the user's StaffProfile, if any.
+    Pull the SDP IDs from the user's StaffProfile, if any.
     """
     profile = getattr(user, "staff_profile", None)
     if profile is None:
-        return None
-    return getattr(profile, "service_delivery_point_id", None)
+        return []
+    
+    # Using the property I added to StaffProfile
+    return getattr(profile, "assigned_sdp_ids", [])
 
 
 def require_assigned_to_sdp(
@@ -104,8 +106,8 @@ def require_assigned_to_sdp(
                 detail={"service_delivery_point_id": sdp_id},
             )
 
-        user_sdp = _resolve_user_sdp_id(current_user)
-        if user_sdp is None:
+        user_sdp_ids = _resolve_user_sdp_ids(current_user)
+        if not user_sdp_ids:
             raise ForbiddenError(
                 message=(
                     "You are not assigned to any service delivery point. "
@@ -114,14 +116,14 @@ def require_assigned_to_sdp(
                 detail={"service_delivery_point_id": sdp_id},
             )
 
-        if int(user_sdp) != int(sdp_id):
+        if int(sdp_id) not in user_sdp_ids:
             raise ForbiddenError(
                 message=(
                     "You are not assigned to this service delivery point. "
                     "Action denied."
                 ),
                 detail={
-                    "user_service_delivery_point_id": int(user_sdp),
+                    "user_assigned_sdp_ids": user_sdp_ids,
                     "target_service_delivery_point_id": int(sdp_id),
                 },
             )
@@ -161,8 +163,8 @@ def require_assigned_to_ticket_sdp(
                 detail={"ticket_id": ticket_id},
             )
 
-        user_sdp = _resolve_user_sdp_id(current_user)
-        if user_sdp is None:
+        user_sdp_ids = _resolve_user_sdp_ids(current_user)
+        if not user_sdp_ids:
             raise ForbiddenError(
                 message=(
                     "You are not assigned to any service delivery point. "
@@ -171,11 +173,11 @@ def require_assigned_to_ticket_sdp(
                 detail={"ticket_id": ticket_id},
             )
 
-        if int(user_sdp) != int(ticket.service_delivery_point_id):
+        if int(ticket.service_delivery_point_id) not in user_sdp_ids:
             raise ForbiddenError(
-                message="You are not assigned to this service delivery point.",
+                message="You are not assigned to the service delivery point managing this ticket.",
                 detail={
-                    "user_service_delivery_point_id": int(user_sdp),
+                    "user_assigned_sdp_ids": user_sdp_ids,
                     "ticket_service_delivery_point_id": int(ticket.service_delivery_point_id),
                 },
             )

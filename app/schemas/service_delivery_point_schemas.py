@@ -323,3 +323,17 @@ class ServiceDeliveryPointStatusToggleSchema(BaseModel):
     """
 
     is_active: bool
+
+
+class StaffAssignmentSchema(BaseModel):
+    """
+    Schema for assigning multiple staff profiles to a service delivery point.
+    """
+    staff_profile_ids: list[int] = Field(..., min_length=1)
+
+
+class StaffUnassignmentSchema(BaseModel):
+    """
+    Schema for unassigning multiple staff profiles from a service delivery point.
+    """
+    staff_profile_ids: list[int] = Field(..., min_length=1)

@@ -31,9 +31,10 @@ Design notes
 """
 
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Any
+from pydantic import BaseModel, ConfigDict, Field, field_validator, EmailStr
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
+from app.schemas.service_delivery_point_schemas import ServiceDeliveryPointLiteSchema
 
 
 # ============================================================
@@ -134,9 +135,9 @@ class StaffProfileBaseSchema(BaseModel):
         None,
         description="Department ID the staff member belongs to.",
     )
-    service_delivery_point_id: Optional[int] = Field(
-        None,
-        description="Optional service delivery point assignment.",
+    service_delivery_point_ids: list[int] = Field(
+        default_factory=list,
+        description="Optional list of service delivery point assignments.",
     )
     facility_id: Optional[int] = Field(
         None,
@@ -200,7 +201,7 @@ class StaffProfileUpdateSchema(BaseModel):
     """
 
     department_id: Optional[int] = None
-    service_delivery_point_id: Optional[int] = None
+    service_delivery_point_ids: Optional[list[int]] = None
     facility_id: Optional[int] = None
     staff_no: Optional[str] = Field(None, min_length=2, max_length=100)
     job_title: Optional[str] = Field(None, max_length=150)
@@ -242,7 +243,7 @@ class StaffProfileReadSchema(BaseModel):
     id: int
     user_id: int
     department_id: Optional[int] = None
-    service_delivery_point_id: Optional[int] = None
+    service_delivery_point_ids: list[int] = Field(default_factory=list, validation_alias="assigned_sdp_ids")
     staff_no: str
     job_title: Optional[str] = None
     professional_license_no: Optional[str] = None
@@ -296,7 +297,7 @@ class StaffProfileDetailedReadSchema(BaseModel):
     id: int
     user_id: int
     department_id: Optional[int] = None
-    service_delivery_point_id: Optional[int] = None
+    service_delivery_points: list[ServiceDeliveryPointLiteSchema] = Field(default_factory=list, validation_alias="assigned_sdps")
     facility_id: Optional[int] = None
     staff_no: str
     job_title: Optional[str] = None
@@ -307,7 +308,6 @@ class StaffProfileDetailedReadSchema(BaseModel):
 
     user: StaffProfileDetailedUserSchema
     department: Optional[DepartmentLiteSchema] = None
-    service_delivery_point: Optional[ServiceDeliveryPointLiteSchema] = None
     roles: list[RoleLiteSchema] = Field(default_factory=list)
 
 

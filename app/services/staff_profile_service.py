@@ -310,7 +310,9 @@ class StaffProfileService:
                 )
 
             self._validate_department_exists(payload.department_id)
-            self._validate_service_delivery_point_exists(payload.service_delivery_point_id)
+            if payload.service_delivery_point_ids:
+                for sdp_id in payload.service_delivery_point_ids:
+                    self._validate_service_delivery_point_exists(sdp_id)
 
             existing_staff_no = self.repository.get_staff_profile_by_staff_no(payload.staff_no)
             if existing_staff_no:
@@ -332,13 +334,16 @@ class StaffProfileService:
             staff_profile = StaffProfile(
                 user_id=user.id,
                 department_id=payload.department_id,
-                service_delivery_point_id=payload.service_delivery_point_id,
                 staff_no=payload.staff_no,
                 job_title=payload.job_title,
                 professional_license_no=payload.professional_license_no,
                 specialty=payload.specialty,
             )
             self.repository.create_staff_profile(staff_profile)
+
+            if payload.service_delivery_point_ids:
+                self.repository.replace_sdp_assignments(staff_profile.id, payload.service_delivery_point_ids)
+
             return staff_profile
 
         # --------------------------------------------------------
@@ -376,8 +381,8 @@ class StaffProfileService:
         # --------------------------------------------------------
         if payload.department_id is not None:
             staff_profile.department_id = payload.department_id
-        if payload.service_delivery_point_id is not None:
-            staff_profile.service_delivery_point_id = payload.service_delivery_point_id
+        if payload.service_delivery_point_ids is not None:
+            self.repository.replace_sdp_assignments(staff_profile.id, payload.service_delivery_point_ids)
         if payload.staff_no is not None:
             staff_profile.staff_no = payload.staff_no
         if payload.job_title is not None:
@@ -496,6 +501,49 @@ class StaffProfileService:
             tuple[list[StaffProfile], int]: Staff profile rows and total count.
         """
         return self.repository.list_staff_profiles(skip=skip, limit=limit)
+
+    def list_staff_by_sdp(self, sdp_id: int, *, skip: int = 0, limit: int = 100):
+        """
+        Return paginated staff profiles assigned to a specific service delivery point.
+        """
+        # Validate that the SDP exists first
+        self._validate_service_delivery_point_exists(sdp_id)
+        return self.repository.list_staff_by_sdp_id(sdp_id, skip=skip, limit=limit)
+
+    def assign_staff_to_sdp(self, staff_profile_ids: list[int], sdp_id: int) -> int:
+        """
+        Assign multiple staff profiles to a service delivery point.
+        """
+        if sdp_id is not None:
+            self._validate_service_delivery_point_exists(sdp_id)
+
+        # Validate that all staff profiles exist
+        profiles = self.repository.db.query(StaffProfile).filter(
+            StaffProfile.id.in_(staff_profile_ids),
+            StaffProfile.is_deleted.is_(False)
+        ).all()
+        
+        found_ids = {p.id for p in profiles}
+        missing_ids = set(staff_profile_ids) - found_ids
+        
+        if missing_ids:
+            raise NotFoundError(
+                message="One or more staff profiles were not found.",
+                detail={"missing_staff_profile_ids": list(missing_ids)}
+            )
+
+        count = self.repository.assign_multiple_to_sdp(staff_profile_ids, sdp_id)
+        self.db.commit()
+        return count
+
+    def unassign_staff_from_sdp(self, sdp_id: int, staff_profile_ids: list[int]) -> int:
+        """
+        Remove staff profiles from a service delivery point.
+        """
+        self._validate_service_delivery_point_exists(sdp_id)
+        count = self.repository.remove_multiple_from_sdp(staff_profile_ids, sdp_id)
+        self.db.commit()
+        return count
 
     def soft_delete_staff_profile(self, staff_profile_id: int) -> StaffProfile:
         """

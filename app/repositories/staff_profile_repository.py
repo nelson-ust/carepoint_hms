@@ -51,6 +51,7 @@ from app.models.all_models import (
     RolePermissionAssociation,
     ServiceDeliveryPoint,
     StaffProfile,
+    StaffServiceDeliveryPointAssociation,
     User,
     UserRoleAssociation,
     UserSession,
@@ -97,7 +98,9 @@ class StaffProfileRepository:
             .options(
                 joinedload(User.user_roles).joinedload(UserRoleAssociation.role),
                 joinedload(User.staff_profile).joinedload(StaffProfile.department),
-                joinedload(User.staff_profile).joinedload(StaffProfile.service_delivery_point),
+                joinedload(User.staff_profile)
+                .joinedload(StaffProfile.service_delivery_points)
+                .joinedload(StaffServiceDeliveryPointAssociation.service_delivery_point),
             )
             .filter(User.id == user_id, User.is_deleted.is_(False))
             .first()
@@ -192,12 +195,14 @@ class StaffProfileRepository:
                     "is_superuser": user.is_superuser,
                     "is_two_factor_enabled": user.is_two_factor_enabled,
                     "last_login_at": user.last_login_at,
+                    "personal_phone": getattr(user, "personal_phone", None),
                     "role_count": int(role_count or 0),
                     "staff_no": staff_profile.staff_no if staff_profile else None,
                     "department_id": staff_profile.department_id if staff_profile else None,
-                    "service_delivery_point_id": (
-                        staff_profile.service_delivery_point_id if staff_profile else None
-                    ),
+                    "service_delivery_point_ids": [
+                        link.service_delivery_point_id 
+                        for link in (staff_profile.service_delivery_points or [])
+                    ] if staff_profile else [],
                 }
             )
 
@@ -388,7 +393,8 @@ class StaffProfileRepository:
                 .joinedload(User.user_roles)
                 .joinedload(UserRoleAssociation.role),
                 joinedload(StaffProfile.department),
-                joinedload(StaffProfile.service_delivery_point),
+                joinedload(StaffProfile.service_delivery_points)
+                .joinedload(StaffServiceDeliveryPointAssociation.service_delivery_point),
             )
             .filter(
                 StaffProfile.id == staff_profile_id,
@@ -421,7 +427,8 @@ class StaffProfileRepository:
                 .joinedload(User.user_roles)
                 .joinedload(UserRoleAssociation.role),
                 joinedload(StaffProfile.department),
-                joinedload(StaffProfile.service_delivery_point),
+                joinedload(StaffProfile.service_delivery_points)
+                .joinedload(StaffServiceDeliveryPointAssociation.service_delivery_point),
             )
             .filter(
                 StaffProfile.user_id == user_id,
@@ -463,7 +470,8 @@ class StaffProfileRepository:
                 .joinedload(User.user_roles)
                 .joinedload(UserRoleAssociation.role),
                 joinedload(StaffProfile.department),
-                joinedload(StaffProfile.service_delivery_point),
+                joinedload(StaffProfile.service_delivery_points)
+                .joinedload(StaffServiceDeliveryPointAssociation.service_delivery_point),
             )
             .filter(StaffProfile.is_deleted.is_(False))
             .order_by(StaffProfile.staff_no.asc())
@@ -473,6 +481,109 @@ class StaffProfileRepository:
         )
 
         return items, int(total)
+
+    def list_staff_by_sdp_id(
+        self,
+        sdp_id: int,
+        *,
+        skip: int = 0,
+        limit: int = 100,
+    ) -> tuple[list[StaffProfile], int]:
+        """
+        Return paginated staff profiles assigned to a specific service delivery point.
+        """
+        query = (
+            self.db.query(StaffProfile)
+            .join(StaffServiceDeliveryPointAssociation)
+            .options(
+                joinedload(StaffProfile.user),
+                joinedload(StaffProfile.department),
+            )
+            .filter(
+                StaffServiceDeliveryPointAssociation.service_delivery_point_id == sdp_id,
+                StaffProfile.is_deleted.is_(False),
+            )
+        )
+
+        total = query.with_entities(func.count(StaffProfile.id)).scalar() or 0
+        items = (
+            query.order_by(StaffProfile.staff_no.asc())
+            .offset(skip)
+            .limit(limit)
+            .all()
+        )
+        return items, int(total)
+
+    def assign_multiple_to_sdp(self, staff_profile_ids: list[int], sdp_id: int) -> int:
+        """
+        Bulk assign staff profiles to a service delivery point (adding them).
+        """
+        if not staff_profile_ids or sdp_id is None:
+            return 0
+
+        # Find existing assignments to avoid duplicates
+        existing = (
+            self.db.query(StaffServiceDeliveryPointAssociation)
+            .filter(
+                StaffServiceDeliveryPointAssociation.service_delivery_point_id == sdp_id,
+                StaffServiceDeliveryPointAssociation.staff_profile_id.in_(staff_profile_ids)
+            )
+            .all()
+        )
+        existing_staff_ids = {link.staff_profile_id for link in existing}
+
+        added_count = 0
+        for staff_id in staff_profile_ids:
+            if staff_id not in existing_staff_ids:
+                self.db.add(
+                    StaffServiceDeliveryPointAssociation(
+                        staff_profile_id=staff_id,
+                        service_delivery_point_id=sdp_id
+                    )
+                )
+                added_count += 1
+        
+        self.db.flush()
+        return added_count
+
+    def replace_sdp_assignments(self, staff_profile_id: int, sdp_ids: list[int]) -> None:
+        """
+        Replace all SDP assignments for a staff member.
+        """
+        # Remove existing
+        (
+            self.db.query(StaffServiceDeliveryPointAssociation)
+            .filter(StaffServiceDeliveryPointAssociation.staff_profile_id == staff_profile_id)
+            .delete(synchronize_session=False)
+        )
+
+        # Add new
+        for sdp_id in sdp_ids:
+            self.db.add(
+                StaffServiceDeliveryPointAssociation(
+                    staff_profile_id=staff_profile_id,
+                    service_delivery_point_id=sdp_id
+                )
+            )
+        self.db.flush()
+
+    def remove_multiple_from_sdp(self, staff_profile_ids: list[int], sdp_id: int) -> int:
+        """
+        Remove multiple staff profiles from a specific service delivery point.
+        """
+        if not staff_profile_ids:
+            return 0
+        
+        count = (
+            self.db.query(StaffServiceDeliveryPointAssociation)
+            .filter(
+                StaffServiceDeliveryPointAssociation.service_delivery_point_id == sdp_id,
+                StaffServiceDeliveryPointAssociation.staff_profile_id.in_(staff_profile_ids)
+            )
+            .delete(synchronize_session=False)
+        )
+        self.db.flush()
+        return count
 
     def create_staff_profile(self, staff_profile: StaffProfile) -> StaffProfile:
         """
