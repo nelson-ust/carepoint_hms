@@ -281,6 +281,10 @@ class TenantBackupService:
             self._notify(event="backup.completed", subject="Backup Successful", body=f"Backup {record.filename} for tenant {self.tenant_code} has completed successfully.")
             
         except Exception as exc:
+            # Crucial: Rollback the session to clear any poisoned transaction state
+            # before attempting to log the failure.
+            self.db.rollback()
+            
             # Update record to FAILED state on any error
             self.repo.update(record, {"status": "FAILED", "error_message": str(exc)[:500], "backup_finished_at": datetime.now(timezone.utc)})
             self._notify(event="backup.failed", subject="Backup Failed", body=f"Critical: Database backup for tenant {self.tenant_code} failed: {exc}")
@@ -401,34 +405,95 @@ class TenantBackupService:
             return tenant, db_url, bucket
 
     def _run_pg_dump(self, db_url: str, dump_path: Path) -> None:
-        """Executes the pg_dump system command."""
+        """
+        Executes the pg_dump system command.
+        
+        Falls back to a Docker-based execution if the local tool is missing or 
+        incompatible (version mismatch).
+        """
         cleaned = db_url.replace("+psycopg2", "")
         tool_path = self._get_pg_tool_path("pg_dump")
         
+        # Attempt 1: Native Execution
         proc = subprocess.run([tool_path, "-d", cleaned, "-F", "c", "-f", str(dump_path)], capture_output=True, text=True)
+        
+        # Attempt 2: Universal Docker Fallback (if native fails due to version mismatch or missing tool)
+        if proc.returncode != 0 and ("version mismatch" in proc.stderr.lower() or "not found" in proc.stderr.lower()):
+            logger.info("Native pg_dump failed or version mismatch. Attempting Universal Docker Fallback...")
+            docker_proc = self._run_via_docker("pg_dump", cleaned, dump_path)
+            if docker_proc and docker_proc.returncode == 0:
+                return # Success via Docker
+
         if proc.returncode != 0:
             msg = proc.stderr[:500]
             if "version mismatch" in msg:
-                # Provide a more actionable error for version mismatch
                 server_ver = self._get_server_version()
                 local_ver = self._get_tool_version(tool_path)
                 msg = (
                     f"PostgreSQL Version Mismatch detected.\n"
                     f"Server Version: {server_ver}\n"
                     f"Local Tool Version: {local_ver}\n"
-                    f"Action: Please install PostgreSQL {server_ver} tools on this machine "
-                    f"or update your PG_DUMP_PATH environment variable."
+                    f"Action: Install PostgreSQL {server_ver} tools OR start Docker to enable the Universal Fallback."
                 )
             raise BadRequestError(message=f"pg_dump failed: {msg}")
 
     def _run_pg_restore(self, db_url: str, dump_path: Path) -> None:
-        """Executes the pg_restore system command."""
+        """
+        Executes the pg_restore system command.
+        
+        Falls back to Docker if the native tool version is incompatible.
+        """
         cleaned = db_url.replace("+psycopg2", "")
         tool_path = self._get_pg_tool_path("pg_restore")
         
+        # Attempt 1: Native Execution
         proc = subprocess.run([tool_path, "-d", cleaned, "--clean", "--if-exists", "--no-owner", str(dump_path)], capture_output=True, text=True)
+        
+        # Attempt 2: Universal Docker Fallback
+        if proc.returncode != 0 and ("version mismatch" in proc.stderr.lower() or "not found" in proc.stderr.lower()):
+            logger.info("Native pg_restore failed or version mismatch. Attempting Universal Docker Fallback...")
+            docker_proc = self._run_via_docker("pg_restore", cleaned, dump_path)
+            if docker_proc and docker_proc.returncode == 0:
+                return # Success via Docker
+
         if proc.returncode != 0:
             raise BadRequestError(message=f"pg_restore failed: {proc.stderr[:500]}")
+
+    def _run_via_docker(self, tool_name: str, db_url: str, dump_path: Path) -> Optional[subprocess.CompletedProcess]:
+        """
+        Runs a PostgreSQL tool inside a temporary Docker container.
+        
+        This provides a version-agnostic solution that works on any OS 
+        with Docker installed, without requiring native PG tools.
+        """
+        try:
+            # Verify docker is available
+            if not shutil.which("docker"):
+                return None
+            
+            # Map the host temp directory to the container
+            host_dir = str(dump_path.parent)
+            container_file = f"/tmp/{dump_path.name}"
+            
+            # Use 'postgres:latest' to ensure we have the most modern client tools
+            cmd = [
+                "docker", "run", "--rm",
+                "-v", f"{host_dir}:/tmp",
+                "postgres:latest",
+                tool_name, "-d", db_url, "-f", container_file
+            ]
+            
+            # Add tool-specific flags
+            if tool_name == "pg_dump":
+                cmd.insert(-4, "-F")
+                cmd.insert(-4, "c")
+            elif tool_name == "pg_restore":
+                cmd.extend(["--clean", "--if-exists", "--no-owner"])
+
+            return subprocess.run(cmd, capture_output=True, text=True)
+        except Exception as e:
+            logger.error(f"Docker fallback failed: {e}")
+            return None
 
     def _get_pg_tool_path(self, tool_name: str) -> str:
         """
@@ -474,6 +539,7 @@ class TenantBackupService:
             res = self.db.execute(text("SHOW server_version")).first()
             return res[0] if res else "Unknown"
         except Exception:
+            self.db.rollback()
             return "Unknown"
 
     def _get_tool_version(self, tool_path: str) -> str:
@@ -489,14 +555,17 @@ class TenantBackupService:
         try:
             db_name = db_url.rsplit("/", 1)[-1].split("?")[0]
             self.db.execute(text("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = :db AND pid <> pg_backend_pid()"), {"db": db_name})
-        except Exception: pass
+        except Exception:
+            self.db.rollback()
 
     def _capture_lsn(self) -> Optional[str]:
         """Captures the current WAL LSN location for bookkeeping."""
         try:
             row = self.db.execute(text("SELECT pg_current_wal_lsn()")).first()
             return str(row[0]) if row else None
-        except Exception: return None
+        except Exception:
+            self.db.rollback()
+            return None
 
     @staticmethod
     def _sha256_of_file(path: Path) -> str:
