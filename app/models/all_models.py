@@ -3214,6 +3214,27 @@ class SaaSAdminSession(MasterTable):
     saas_admin: Mapped["SaaSAdmin"] = relationship()
 
 
+class SaaSAdminTwoFactorChallenge(MasterTable):
+    """
+    Two-factor authentication challenges for SaaS Administrators.
+    Stored in the Master Database.
+    """
+    __tablename__ = "saas_admin_two_factor_challenge"
+
+    saas_admin_id: Mapped[int] = mapped_column(ForeignKey("saas_admin.id"), nullable=False, index=True)
+    challenge_type: Mapped[TwoFactorType] = mapped_column(Enum(TwoFactorType), nullable=False)
+    purpose: Mapped[TwoFactorPurpose] = mapped_column(Enum(TwoFactorPurpose), nullable=False)
+    destination: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    code_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0)
+    max_attempts: Mapped[int] = mapped_column(Integer, default=5)
+    is_verified: Mapped[bool] = mapped_column(Boolean, default=False)
+    verified_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    saas_admin: Mapped["SaaSAdmin"] = relationship()
+
+
 class SaaSNotification(MasterTable):
     """
     In-App notifications specifically for SaaS Administrators.

@@ -362,8 +362,15 @@ def change_password(
     """
     Change password for the currently authenticated user.
     """
-    result = service.change_password(current_user.id, payload)
-    return result
+    # Partition logic similar to Login flow
+    if get_current_tenant() is None:
+        # SaaS Admin Change Password (Master DB)
+        with get_master_db_context() as master_db:
+            saas_service = SaaSAuthService(master_db)
+            return saas_service.change_password(current_user.id, payload)
+
+    # Tenant User Change Password (Tenant DB)
+    return service.change_password(current_user.id, payload)
 
 
 @router.post(
@@ -379,8 +386,23 @@ def forgot_password(
     """
     Begin password reset flow.
     """
-    result = service.forgot_password(payload)
-    return result
+    # Partition logic similar to Login flow
+    from app.core.multitenancy import get_current_tenant, get_current_tenant_code
+    tenant_obj = get_current_tenant()
+    tenant_code = get_current_tenant_code()
+    
+    print(f"DEBUG: forgot_password - tenant_obj: {tenant_obj}, tenant_code: {tenant_code}")
+    
+    if tenant_code is None:
+        # SaaS Admin Forgot Password (Master DB)
+        print("DEBUG: Routing to SaaSAuthService")
+        with get_master_db_context() as master_db:
+            saas_service = SaaSAuthService(master_db)
+            return saas_service.forgot_password(payload)
+
+    # Tenant User Forgot Password (Tenant DB)
+    print(f"DEBUG: Routing to AuthService (Tenant: {tenant_code})")
+    return service.forgot_password(payload)
 
 
 @router.post(
@@ -396,8 +418,15 @@ def reset_password(
     """
     Complete password reset using a reset token.
     """
-    result = service.reset_password(payload)
-    return result
+    # Partition logic similar to Login flow
+    if get_current_tenant() is None:
+        # SaaS Admin Reset Password (Master DB)
+        with get_master_db_context() as master_db:
+            saas_service = SaaSAuthService(master_db)
+            return saas_service.reset_password(payload)
+
+    # Tenant User Reset Password (Tenant DB)
+    return service.reset_password(payload)
 
 
 @router.post(
@@ -416,8 +445,22 @@ def verify_otp(
     - email verification
     - phone verification
     """
-    result = service.verify_otp(payload)
+    # Partition logic similar to Login flow
+    if get_current_tenant() is None:
+        # SaaS Admin OTP Verify (Master DB)
+        with get_master_db_context() as master_db:
+            saas_service = SaaSAuthService(master_db)
+            result = saas_service.verify_otp(payload)
+            return {
+                "success": True,
+                "message": result["message"],
+                "verified": result.get("verified", True),
+                "user": None,
+                "tokens": result.get("tokens"),
+            }
 
+    # Tenant User OTP Verify (Tenant DB)
+    result = service.verify_otp(payload)
     return {
         "success": True,
         "message": result["message"],
@@ -439,15 +482,15 @@ def resend_otp(
 ):
     """
     Resend OTP for supported verification flows.
-
-    Example payload:
-    {
-      "user_id": 1,
-      "identifier": "user@example.com",
-      "purpose": "LOGIN",
-      "delivery_method": "EMAIL"
-    }
     """
+    # Partition logic similar to Login flow
+    if get_current_tenant() is None:
+        # SaaS Admin OTP Resend (Master DB)
+        with get_master_db_context() as master_db:
+            saas_service = SaaSAuthService(master_db)
+            return saas_service.resend_otp(payload)
+
+    # Tenant User OTP Resend (Tenant DB)
     return service.resend_otp(payload)
 
 

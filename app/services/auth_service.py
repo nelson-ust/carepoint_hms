@@ -24,6 +24,7 @@ from app.core.security import (
     build_login_result,
     build_post_2fa_access_token,
     create_otp_challenge_payload,
+    create_reset_token,
     decode_token,
     get_password_hash,
     validate_password_strength,
@@ -518,12 +519,26 @@ class AuthService:
             self.repository.mark_phone_verified(user, verified=True)
 
         self.db.commit()
+        
+        # If purpose was password reset, issue a reset token
+        tokens = None
+        if str(challenge.purpose) == str(TwoFactorPurpose.PASSWORD_RESET):
+            reset_token = create_reset_token(
+                subject=str(user.id),
+                tenant_id=get_current_tenant_id(),
+                tenant_code=get_current_tenant_code()
+            )
+            tokens = {
+                "reset_token": reset_token,
+                "token_type": "bearer"
+            }
+
         return {
             "success": True,
             "message": "Verification successful.",
             "verified": True,
             "user": self._serialize_auth_user(user),
-            "tokens": None,
+            "tokens": tokens,
         }
 
     def resend_otp(self, payload: OTPResendSchema) -> dict[str, Any]:
@@ -1094,35 +1109,36 @@ class AuthService:
         challenge_type_str = str(challenge_type).upper()
 
         if "EMAIL" in challenge_type_str:
-            # Prefer the tenant's own configured email system (so OTPs come
-            # from a sender the tenant controls); fall back to the
-            # platform-wide ``send_email`` helper only when no tenant
-            # configuration is available.
             try:
-                from app.services.tenant_email_service import send_tenant_email
-
-                ok = send_tenant_email(
-                    self.db,
+                from app.utils.email_utils import send_otp_email
+                send_otp_email(destination, plain_code, purpose)
+                return
+            except Exception:
+                # Fallback to tenant email service if available
+                try:
+                    from app.services.tenant_email_service import send_tenant_email
+                    ok = send_tenant_email(
+                        self.db,
+                        subject="Verification Code",
+                        recipients=[destination],
+                        body_text=message,
+                    )
+                    if ok:
+                        return
+                except Exception:
+                    pass
+            
+            # Final fallback to standard send_email
+            if send_email:
+                send_email(
                     subject="Verification Code",
                     recipients=[destination],
                     body_text=message,
                 )
-                if ok:
-                    return
-            except Exception as exc:
-                # Best-effort fallback below.
-                pass
-
-            if send_email is None:
-                raise BadRequestError(message="Email delivery helper is not configured.")
-            send_email(
-                subject="Verification Code",
-                recipients=[destination],
-                body_text=message,
-            )
             return
 
         if "SMS" in challenge_type_str:
+            message = f"Your verification code is: {plain_code}. Purpose: {purpose}."
             if send_sms is None:
                 raise BadRequestError(message="SMS delivery helper is not configured.")
             send_sms(to=destination, body=message)

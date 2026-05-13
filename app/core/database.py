@@ -131,7 +131,7 @@ SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
 
 
 # Cache for tenant engines
-_tenant_engines: dict[str, Engine] = {}
+_tenant_engines: dict[str, Engine] = {DATABASE_URL: engine}
 
 def get_engine_for_url(url: str) -> Engine:
     """Return a cached engine for a given database URL."""

@@ -102,6 +102,18 @@ class AccessTokenSchema(BaseModel):
     expires_in: Optional[int] = None
 
 
+class OTPTokenSchema(BaseModel):
+    """
+    Token response schema for OTP verification.
+    """
+
+    access_token: Optional[str] = None
+    refresh_token: Optional[str] = None
+    reset_token: Optional[str] = None
+    token_type: str = "bearer"
+    expires_in: Optional[int] = None
+
+
 class RefreshTokenRequestSchema(BaseModel):
     """
     Request schema for refreshing an access token.
@@ -479,7 +491,7 @@ class OTPVerificationSuccessSchema(BaseModel):
     message: str = "Verification successful."
     verified: bool = True
     user: Optional[AuthUserLiteSchema] = None
-    tokens: Optional[TokenSchema] = None
+    tokens: Optional[OTPTokenSchema] = None
 
 
 # ============================================================

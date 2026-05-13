@@ -437,3 +437,126 @@ def send_templated_email(
         attachments=attachments,
         timeout=timeout,
     )
+
+
+def send_otp_email(email: str, code: str, purpose: str) -> dict[str, Any]:
+    """
+    Send a styled OTP email for authentication / password reset.
+    """
+    title = "Verification Code"
+    if "PASSWORD_RESET" in purpose.upper():
+        title = "Reset Your Password"
+    elif "LOGIN" in purpose.upper():
+        title = "Two-Factor Authentication"
+
+    context = {
+        "title": title,
+        "purpose": purpose.lower().replace("_", " "),
+        "otp": code
+    }
+
+    text_template = (
+        "Carepoint HMS\n\n"
+        "{title}\n"
+        "Hello,\n\n"
+        "Your verification code for {purpose} is: {otp}\n\n"
+        "This code will expire in 10 minutes. If you did not request this, please ignore this email.\n"
+    )
+
+    html_template = """
+<!DOCTYPE html>
+<html>
+<head>
+    <style>
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+            background-color: #f9fafb;
+            margin: 0;
+            padding: 40px;
+            -webkit-font-smoothing: antialiased;
+        }
+        .container {
+            max-width: 600px;
+            margin: 0 auto;
+            background-color: #ffffff;
+            border-radius: 16px;
+            padding: 48px;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+        }
+        .header {
+            text-align: center;
+            margin-bottom: 32px;
+        }
+        .logo {
+            font-weight: 800;
+            font-size: 24px;
+            color: #0d9488;
+            letter-spacing: -0.025em;
+        }
+        h1 {
+            color: #111827;
+            font-size: 24px;
+            font-weight: 700;
+            margin-bottom: 16px;
+            text-align: center;
+        }
+        p {
+            color: #4b5563;
+            font-size: 16px;
+            line-height: 1.6;
+            margin-bottom: 24px;
+        }
+        .otp-container {
+            background-color: #f0fdfa;
+            border: 1px solid #ccfbf1;
+            border-radius: 12px;
+            padding: 24px;
+            text-align: center;
+            margin: 32px 0;
+        }
+        .otp-code {
+            font-family: 'Courier New', monospace;
+            font-size: 36px;
+            font-weight: 800;
+            color: #0f766e;
+            letter-spacing: 0.25em;
+        }
+        .footer {
+            text-align: center;
+            margin-top: 48px;
+            color: #9ca3af;
+            font-size: 14px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <span class="logo">CAREPOINT</span>
+        </div>
+        <h1>{title}</h1>
+        <p>Hello,</p>
+        <p>You requested a <strong>{purpose}</strong> for your Carepoint HMS account. Use the verification code below to complete the process:</p>
+        
+        <div class="otp-container">
+            <div class="otp-code">{otp}</div>
+        </div>
+        
+        <p>This code will expire in 10 minutes. If you did not request this, please ignore this email or contact support if you have concerns.</p>
+        
+        <div class="footer">
+            &copy; 2026 Carepoint HMS. All rights reserved.<br>
+            Carepoint Hospital Management System
+        </div>
+    </div>
+</body>
+</html>
+    """
+
+    return send_templated_email(
+        subject=f"Carepoint HMS - {title}",
+        recipients=email,
+        text_template=text_template,
+        html_template=html_template,
+        context=context
+    )

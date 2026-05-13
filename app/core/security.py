@@ -198,6 +198,33 @@ def create_refresh_token(
     return token, payload
 
 
+def create_reset_token(
+    *,
+    subject: str,
+    tenant_id: Optional[int] = None,
+    tenant_code: Optional[str] = None,
+    expires_minutes: int = 15,
+    extra_claims: Optional[dict[str, Any]] = None,
+) -> str:
+    """
+    Create a signed JWT password reset token.
+    """
+    payload = create_token_payload(
+        subject=subject,
+        token_type="reset",
+        expires_delta=timedelta(minutes=expires_minutes),
+        tenant_id=tenant_id,
+        tenant_code=tenant_code,
+        extra_claims=extra_claims,
+    )
+    token = jwt.encode(
+        payload,
+        settings.secret_key_value,
+        algorithm=settings.ALGORITHM,
+    )
+    return token
+
+
 def decode_token(token: str) -> dict[str, Any]:
     """
     Decode and validate a JWT token.
