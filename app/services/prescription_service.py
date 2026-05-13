@@ -15,7 +15,7 @@ from typing import Optional
 
 from sqlalchemy.orm import Session
 
-from app.core.enums import PrescriptionStatus, VisitStatus
+from app.core.enums import PrescriptionStatus, ServicePointType, VisitStatus
 from app.core.exceptions import BadRequestError, NotFoundError
 from app.models.all_models import Prescription
 from app.repositories.drug_repository import DrugRepository
@@ -30,7 +30,7 @@ from app.utils.charge_capture import (
 )
 from app.utils.payment_policy import requires_pre_payment
 from app.utils.security_event_util import record_security_event
-from app.utils.visit_routing import route_visit_to_next_sdp
+from app.utils.visit_routing import route_visit_to_next_sdp, validate_visit_sdp_activity
 
 
 class PrescriptionService:
@@ -71,6 +71,14 @@ class PrescriptionService:
                 detail={"visit_status": str(visit.status)},
             )
 
+        # Enforce SDP validation and get current step
+        current_step = validate_visit_sdp_activity(
+            self.db,
+            visit_id=visit.id,
+            required_sdp_types=[ServicePointType.CLINIC, ServicePointType.EMERGENCY, ServicePointType.WARD],
+            activity_name="Prescription authoring",
+        )
+
         items_payload: list[dict] = []
         drugs_by_id = {}
         for entry in payload.items:
@@ -88,6 +96,7 @@ class PrescriptionService:
 
         prescription = self.repository.create_prescription(
             visit_id=visit.id,
+            visit_flow_step_id=current_step.id,
             consultation_id=payload.consultation_id,
             prescribed_by_staff_id=payload.prescribed_by_staff_id,
             note=payload.note,

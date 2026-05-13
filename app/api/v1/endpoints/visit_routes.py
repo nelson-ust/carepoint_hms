@@ -27,7 +27,7 @@ from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.core.dependencies import AdminUser
+from app.core.dependencies import AdminUser, AnyAuthenticatedUser
 from app.schemas.visit_schemas import (
     QueueTicketReadSchema,
     VisitActionResponseSchema,
@@ -38,6 +38,8 @@ from app.schemas.visit_schemas import (
     VisitReadSchema,
     VisitRerouteResultSchema,
     VisitRerouteSchema,
+    VisitSwitchFlowResultSchema,
+    VisitSwitchFlowSchema,
     VisitUpdateSchema,
 )
 from app.services.visit_service import VisitService
@@ -360,6 +362,35 @@ def reroute_visit(
     }
 
 
+@router.post(
+    "/{visit_id}/switch-flow",
+    response_model=VisitSwitchFlowResultSchema,
+    status_code=status.HTTP_200_OK,
+    summary="Switch visit flow template",
+)
+def switch_visit_flow(
+    visit_id: int,
+    payload: VisitSwitchFlowSchema,
+    current_user: AdminUser,
+    service: Annotated[VisitService, Depends(get_visit_service)],
+):
+    """
+    Switch the entire remaining care pathway for a patient by applying a new
+    visit flow template. Existing pending steps are cancelled and replaced
+    by steps from the new template.
+    """
+    payload.routed_by_id = current_user.id
+    result = service.switch_visit_flow(visit_id, payload)
+
+    return {
+        "success": True,
+        "message": result["message"],
+        "visit": _serialize_detailed_visit(result["visit"]),
+        "added_steps": [_serialize_flow_step(step) for step in result["added_steps"]],
+        "new_queue_ticket": _serialize_queue_ticket(result.get("new_queue_ticket")),
+    }
+
+
 @router.get(
     "/",
     response_model=VisitListResponseSchema,
@@ -367,7 +398,7 @@ def reroute_visit(
     summary="List visits",
 )
 def list_visits(
-    _: AdminUser,
+    _: AnyAuthenticatedUser,
     service: Annotated[VisitService, Depends(get_visit_service)],
     skip: int = Query(0, ge=0, description="Pagination offset."),
     limit: int = Query(20, ge=1, le=100, description="Pagination size."),
@@ -407,7 +438,7 @@ def list_visits(
 )
 def get_visit(
     visit_id: int,
-    _: AdminUser,
+    _: AnyAuthenticatedUser,
     service: Annotated[VisitService, Depends(get_visit_service)],
 ):
     """
@@ -425,7 +456,7 @@ def get_visit(
 )
 def get_detailed_visit(
     visit_id: int,
-    _: AdminUser,
+    _: AnyAuthenticatedUser,
     service: Annotated[VisitService, Depends(get_visit_service)],
 ):
     """

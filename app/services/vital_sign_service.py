@@ -7,11 +7,12 @@ from typing import Optional
 
 from sqlalchemy.orm import Session
 
-from app.core.enums import VisitStatus
+from app.core.enums import ServicePointType, VisitStatus
 from app.core.exceptions import BadRequestError
 from app.models.all_models import VitalSign
 from app.repositories.vital_sign_repository import VitalSignRepository
 from app.schemas.vital_sign_schema import VitalSignCreateSchema
+from app.utils.visit_routing import validate_visit_sdp_activity
 
 
 _TERMINAL = {VisitStatus.COMPLETED, VisitStatus.CANCELLED}
@@ -88,7 +89,16 @@ class VitalSignService:
                 detail={"visit_status": str(visit.status)},
             )
 
+        # Enforce SDP validation and get current step
+        current_step = validate_visit_sdp_activity(
+            self.db,
+            visit_id=visit.id,
+            required_sdp_types=[ServicePointType.TRIAGE, ServicePointType.EMERGENCY, ServicePointType.WARD],
+            activity_name="Vital Signs capture",
+        )
+
         data = payload.model_dump(exclude_unset=True)
+        data["visit_flow_step_id"] = current_step.id
         # Auto-derive BMI when weight + height are given but BMI is not.
         if data.get("bmi") is None:
             derived_bmi = _compute_bmi(data.get("weight_kg"), data.get("height_cm"))

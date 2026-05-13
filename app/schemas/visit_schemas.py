@@ -482,6 +482,35 @@ class VisitRerouteSchema(BaseModel):
         return normalized or None
 
 
+class VisitSwitchFlowSchema(BaseModel):
+    """
+    Schema for switching the entire remaining visit flow to a new template.
+    """
+
+    visit_flow_template_id: int = Field(..., gt=0)
+    routed_by_id: Optional[int] = None
+    reason: Optional[str] = None
+    create_queue_ticket: bool = True
+    queue_status: Optional[str] = Field(default="WAITING", max_length=50)
+    mark_first_step_as_current: bool = True
+
+    @field_validator("queue_status")
+    @classmethod
+    def normalize_queue_status(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return value
+        normalized = value.strip().upper()
+        return normalized or None
+
+    @field_validator("reason")
+    @classmethod
+    def normalize_reason(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return value
+        normalized = value.strip()
+        return normalized or None
+
+
 class VisitUpdateSchema(BaseModel):
     """
     Partial update schema for visit records.
@@ -588,6 +617,18 @@ class VisitRerouteResultSchema(BaseModel):
     message: str
     visit: VisitDetailedReadSchema
     new_flow_step: VisitFlowStepReadSchema
+    new_queue_ticket: Optional[QueueTicketReadSchema] = None
+
+
+class VisitSwitchFlowResultSchema(BaseModel):
+    """
+    Response schema for visit flow template switching.
+    """
+
+    success: bool = True
+    message: str
+    visit: VisitDetailedReadSchema
+    added_steps: list[VisitFlowStepReadSchema] = Field(default_factory=list)
     new_queue_ticket: Optional[QueueTicketReadSchema] = None
 
 

@@ -15830,3 +15830,152 @@ This section contains **every form and page** in the system, mapped to their spe
 
 ### 📦 Module: REPORT (File: report_routes.py)
 
+
+---
+
+## 🛡️ 10. Visit Flow & Operational Governance
+
+### 10.1 Service Delivery Point (SDP) Validation Matrix
+The system enforces strict location-based validation. Activities are blocked if the patient's current `VisitFlowStep` does not match the allowed `ServicePointType`.
+
+| Activity | Required SDP Type(s) | Primary Role | Mandatory Audit Field |
+| :--- | :--- | :--- | :--- |
+| **Vital Signs Capture** | `TRIAGE`, `EMERGENCY`, `WARD` | Nurse | `visit_flow_step_id` |
+| **Clinical Consultation** | `CLINIC`, `EMERGENCY`, `WARD` | Doctor | `visit_flow_step_id` |
+| **Laboratory Ordering** | `CLINIC`, `EMERGENCY`, `WARD` | Doctor | `visit_flow_step_id` |
+| **Specimen Collection** | `LABORATORY` | Lab Scientist | `visit_flow_step_id` |
+| **Lab Result Entry** | `LABORATORY` | Lab Scientist | `visit_flow_step_id` |
+| **Drug Prescription** | `CLINIC`, `EMERGENCY`, `WARD` | Doctor | `visit_flow_step_id` |
+| **Drug Dispensing** | `PHARMACY` | Pharmacist | `visit_flow_step_id` |
+| **Payment Settlement** | `CASHIER` | Cashier | `visit_flow_step_id` |
+
+### 10.2 Core Visit Management API
+
+#### 10.2.1 Visit Initiation
+- **Endpoint**: `POST /api/v1/visits/initiate`
+- **Payload (`VisitInitiateSchema`)**:
+  ```json
+  {
+    "patient_id": "int (required)",
+    "appointment_id": "int (optional)",
+    "visit_reason": "string (optional)",
+    "priority": "NORMAL | URGENT | EMERGENCY",
+    "first_service_delivery_point_id": "int (optional)",
+    "visit_flow_template_id": "int (optional)",
+    "fast_track": "boolean (default: false)"
+  }
+  ```
+- **Response**: `VisitInitiationResultSchema` containing `visit`, `first_flow_step`, and `first_queue_ticket`.
+
+#### 10.2.2 Visit Rerouting
+- **Endpoint**: `POST /api/v1/visits/{visit_id}/reroute`
+- **Payload (`VisitRerouteSchema`)**:
+  ```json
+  {
+    "service_delivery_point_id": "int (required)",
+    "reason": "string (optional)",
+    "create_queue_ticket": "boolean (default: true)",
+    "queue_status": "string (default: 'WAITING')"
+  }
+  ```
+
+#### 10.2.3 Visit Flow Template Switching
+- **Endpoint**: `POST /api/v1/visits/{visit_id}/switch-flow`
+- **Payload (`VisitSwitchFlowSchema`)**:
+  ```json
+  {
+    "visit_flow_template_id": "int (required)",
+    "reason": "string (optional)",
+    "create_queue_ticket": "boolean (default: true)"
+  }
+  ```
+
+### 10.3 Clinical & Operational Activity Details
+
+#### 10.3.1 Vital Signs (`POST /api/v1/clinical/vital-signs`)
+- **Payload**:
+  ```json
+  {
+    "visit_id": "int (required)",
+    "temperature_celsius": "decimal",
+    "pulse_rate": "int",
+    "respiratory_rate": "int",
+    "systolic_bp": "int",
+    "diastolic_bp": "int",
+    "oxygen_saturation": "decimal",
+    "weight_kg": "decimal",
+    "height_cm": "decimal",
+    "pain_score": "int (0-10)"
+  }
+  ```
+
+#### 10.3.2 Lab Orders (`POST /api/v1/clinical/lab-orders`)
+- **Payload**:
+  ```json
+  {
+    "visit_id": "int (required)",
+    "consultation_id": "int (optional)",
+    "clinical_note": "string",
+    "items": [
+      { "lab_test_catalog_id": "int", "note": "string" }
+    ],
+    "auto_capture_charge": "boolean (default: true)"
+  }
+  ```
+
+#### 10.3.3 Sample Collection (`POST /api/v1/clinical/lab-orders/collect-specimen`)
+- **Payload**:
+  ```json
+  {
+    "lab_order_item_id": "int (required)",
+    "specimen_id": "string",
+    "collected_by_staff_id": "int",
+    "note": "string"
+  }
+  ```
+
+#### 10.3.4 Prescription Authoring (`POST /api/v1/clinical/prescriptions`)
+- **Payload**:
+  ```json
+  {
+    "visit_id": "int (required)",
+    "consultation_id": "int (optional)",
+    "items": [
+      {
+        "drug_id": "int",
+        "dosage": "string",
+        "frequency": "string",
+        "duration": "string",
+        "quantity_prescribed": "decimal"
+      }
+    ]
+  }
+  ```
+
+#### 10.3.5 Drug Dispensing (`POST /api/v1/pharmacy/dispense`)
+- **Payload**:
+  ```json
+  {
+    "prescription_item_id": "int (required)",
+    "quantity_dispensed": "decimal",
+    "pharmacist_id": "int"
+  }
+  ```
+
+#### 10.3.6 Patient Payment (`POST /api/v1/billing/payments/pay`)
+- **Payload**:
+  ```json
+  {
+    "invoice_id": "int (required)",
+    "amount": "decimal",
+    "channel": "CASHIER | GATEWAY | MEMBERSHIP_CARD | LOYALTY",
+    "cashier_staff_id": "int (required for CASHIER)"
+  }
+  ```
+
+### 10.4 Retrieval & Audit Endpoints
+- **Visit List**: `GET /api/v1/visits/` (Open to all staff roles).
+- **Detailed Audit**: `GET /api/v1/visits/{visit_id}/detailed`. Returns `VisitDetailedReadSchema` which includes a full history of `flow_steps` and `queue_tickets`.
+
+---
+*Carepoint HMS UI/UX Specification v1.4 — Operational Governance & Visit Flow*

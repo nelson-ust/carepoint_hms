@@ -19,7 +19,7 @@ from typing import Optional
 
 from sqlalchemy.orm import Session
 
-from app.core.enums import DispenseStatus, PrescriptionStatus, StockMovementType
+from app.core.enums import DispenseStatus, PrescriptionStatus, ServicePointType, StockMovementType
 from app.core.exceptions import BadRequestError, NotFoundError
 from app.models.all_models import Dispense, InventoryStockItem
 from app.repositories.dispense_repository import DispenseRepository
@@ -30,6 +30,7 @@ from app.schemas.dispense_schema import DispenseCreateSchema
 from app.utils.charge_capture import has_outstanding_charges
 from app.utils.payment_policy import requires_pre_payment
 from app.utils.security_event_util import record_security_event
+from app.utils.visit_routing import validate_visit_sdp_activity
 
 
 class DispenseService:
@@ -64,6 +65,14 @@ class DispenseService:
         actor_user_id: Optional[int] = None,
     ) -> Dispense:
         prescription = self.prescription_repository.get_required_by_id(payload.prescription_id)
+
+        # Enforce SDP validation and get current step
+        current_step = validate_visit_sdp_activity(
+            self.db,
+            visit_id=prescription.visit_id,
+            required_sdp_types=[ServicePointType.PHARMACY],
+            activity_name="Drug Dispensing",
+        )
 
         if prescription.status in {PrescriptionStatus.CANCELLED}:
             raise BadRequestError(
@@ -114,6 +123,7 @@ class DispenseService:
         # Create the dispense header first.
         dispense = self.repository.create_dispense(
             prescription_id=prescription.id,
+            visit_flow_step_id=current_step.id,
             dispensed_by_staff_id=payload.dispensed_by_staff_id,
             note=payload.note,
         )

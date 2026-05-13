@@ -655,6 +655,63 @@ class VisitRepository:
         self.db.refresh(flow_step)
         return flow_step
 
+    def cancel_pending_flow_steps(self, visit_id: int) -> int:
+        """
+        Cancel all PENDING or QUEUED runtime steps for a visit.
+        """
+        steps = (
+            self.db.query(VisitFlowStep)
+            .filter(
+                VisitFlowStep.visit_id == visit_id,
+                VisitFlowStep.status.in_([VisitFlowStepStatus.PENDING, VisitFlowStepStatus.QUEUED]),
+                VisitFlowStep.is_deleted.is_(False),
+            )
+            .all()
+        )
+        for step in steps:
+            step.status = VisitFlowStepStatus.CANCELLED
+            step.is_current = False
+            self.db.add(step)
+        self.db.flush()
+        return len(steps)
+
+    def append_flow_steps_from_template(
+        self,
+        *,
+        visit_id: int,
+        template: VisitFlowTemplate,
+        first_step_status: VisitFlowStepStatus = VisitFlowStepStatus.PENDING,
+        routed_by_id: Optional[int] = None,
+        started_at_for_first: Optional[datetime] = None,
+        mark_first_as_current: bool = True,
+    ) -> list[VisitFlowStep]:
+        """
+        Append runtime visit flow steps from a template to an existing visit flow.
+        """
+        next_order = self.get_next_visit_flow_step_order(visit_id)
+        created_steps: list[VisitFlowStep] = []
+
+        if mark_first_as_current:
+            self.clear_current_flags_for_visit(visit_id)
+
+        steps = sorted(template.steps, key=lambda x: x.step_order)
+        for index, template_step in enumerate(steps):
+            step = self.create_visit_flow_step(
+                visit_id=visit_id,
+                service_delivery_point_id=template_step.service_delivery_point_id,
+                step_order=next_order + index,
+                status=first_step_status if index == 0 else VisitFlowStepStatus.PENDING,
+                is_current=mark_first_as_current if index == 0 else False,
+                is_required=template_step.is_required,
+                is_skipped=False,
+                routed_by_id=routed_by_id,
+                started_at=started_at_for_first if index == 0 else None,
+                notes=template_step.notes,
+            )
+            created_steps.append(step)
+
+        return created_steps
+
     # ============================================================
     # QUEUE HELPERS / TRANSFERS
     # ============================================================

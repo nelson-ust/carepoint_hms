@@ -20,10 +20,11 @@ from sqlalchemy.orm import Session
 
 from app.core.enums import (
     QueueStatus,
+    ServicePointType,
     VisitFlowStepStatus,
     VisitStatus,
 )
-from app.core.exceptions import NotFoundError
+from app.core.exceptions import BadRequestError, NotFoundError
 from app.models.all_models import (
     QueueTicket,
     ServiceDeliveryPoint,
@@ -146,3 +147,42 @@ def end_visit(
     db.add(visit)
     db.flush()
     return visit
+
+
+def validate_visit_sdp_activity(
+    db: Session,
+    *,
+    visit_id: int,
+    required_sdp_types: list[ServicePointType],
+    activity_name: str,
+) -> VisitFlowStep:
+    """
+    Validate that the visit's current SDP matches one of the required types for
+    the specified activity.
+
+    Raises BadRequestError if the patient is not currently at a valid SDP.
+    """
+    from app.repositories.visit_flow_repository import VisitFlowRepository
+    flow_repo = VisitFlowRepository(db)
+
+    current_step = flow_repo.get_current_visit_step(visit_id)
+    if not current_step:
+        raise BadRequestError(
+            message=f"No active visit flow step found. Cannot perform {activity_name}.",
+            detail={"visit_id": visit_id}
+        )
+
+    sdp = flow_repo.get_service_delivery_point_by_id(current_step.service_delivery_point_id)
+    if not sdp or sdp.service_point_type not in required_sdp_types:
+        allowed_types_str = ", ".join([str(t) for t in required_sdp_types])
+        raise BadRequestError(
+            message=f"{activity_name} can only be performed at a {allowed_types_str} service delivery point.",
+            detail={
+                "visit_id": visit_id,
+                "current_sdp": sdp.name if sdp else "Unknown",
+                "current_sdp_type": str(sdp.service_point_type) if sdp else "Unknown",
+                "required_types": [str(t) for t in required_sdp_types]
+            }
+        )
+
+    return current_step

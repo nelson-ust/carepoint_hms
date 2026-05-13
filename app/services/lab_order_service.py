@@ -18,7 +18,7 @@ from typing import Optional
 
 from sqlalchemy.orm import Session
 
-from app.core.enums import OrderStatus, VisitStatus
+from app.core.enums import OrderStatus, ServicePointType, VisitStatus
 from app.core.exceptions import BadRequestError, NotFoundError
 from app.models.all_models import LabOrder, LabOrderItem, LabTestCatalog
 from app.repositories.lab_order_repository import LabOrderRepository
@@ -33,7 +33,7 @@ from app.utils.charge_capture import (
 )
 from app.utils.payment_policy import requires_pre_payment
 from app.utils.security_event_util import record_security_event
-from app.utils.visit_routing import route_visit_to_next_sdp
+from app.utils.visit_routing import route_visit_to_next_sdp, validate_visit_sdp_activity
 
 
 class LabOrderService:
@@ -82,6 +82,13 @@ class LabOrderService:
                 detail={"visit_status": str(visit.status)},
             )
 
+        current_step = validate_visit_sdp_activity(
+            self.db,
+            visit_id=visit.id,
+            required_sdp_types=[ServicePointType.CLINIC, ServicePointType.EMERGENCY, ServicePointType.WARD],
+            activity_name="Lab Order creation",
+        )
+
         # Validate every requested test exists.
         items_payload: list[dict] = []
         tests_by_id: dict[int, LabTestCatalog] = {}
@@ -97,6 +104,7 @@ class LabOrderService:
 
         order = self.repository.create_order(
             visit_id=visit.id,
+            visit_flow_step_id=current_step.id,
             consultation_id=payload.consultation_id,
             ordered_by_staff_id=payload.ordered_by_staff_id,
             clinical_note=payload.clinical_note,
@@ -179,9 +187,17 @@ class LabOrderService:
                 detail={"status": str(item.status)},
             )
 
+        current_step = validate_visit_sdp_activity(
+            self.db,
+            visit_id=item.lab_order.visit_id,
+            required_sdp_types=[ServicePointType.LABORATORY],
+            activity_name="Sample Collection",
+        )
+
         item.specimen_id = payload.specimen_id or item.specimen_id
         item.collected_by_staff_id = payload.collected_by_staff_id or item.collected_by_staff_id
         item.sample_collected_at = datetime.now(timezone.utc)
+        item.visit_flow_step_id = current_step.id
         item.status = OrderStatus.SAMPLE_COLLECTED
         self.repository.save_item(item)
 

@@ -53,6 +53,7 @@ from app.repositories.visit_repository import VisitRepository
 from app.schemas.visit_schemas import (
     VisitInitiateSchema,
     VisitRerouteSchema,
+    VisitSwitchFlowSchema,
     VisitUpdateSchema,
 )
 
@@ -391,6 +392,98 @@ class VisitService:
             "message": "Visit rerouted successfully.",
             "visit": detailed_visit,
             "new_flow_step": new_flow_step,
+            "new_queue_ticket": new_queue_ticket,
+        }
+
+    def switch_visit_flow(
+        self,
+        visit_id: int,
+        payload: VisitSwitchFlowSchema,
+    ):
+        """
+        Switch the entire remaining visit flow to a new template.
+
+        Business rules
+        --------------
+        - visit must exist and be active
+        - template must exist
+        - all currently PENDING or QUEUED steps are cancelled
+        - all steps from the new template are appended
+        - the visit current service point is updated to the first step of the new template
+        - a new queue ticket is optionally created for the first step
+
+        Returns
+        -------
+        dict
+            Structured switch result aligned to VisitSwitchFlowResultSchema.
+        """
+        visit = self.repository.get_detailed_visit_by_id(visit_id)
+        if not visit:
+            raise NotFoundError(
+                message="Visit not found.",
+                detail={"visit_id": visit_id},
+            )
+
+        if visit.status in {VisitStatus.COMPLETED, VisitStatus.CANCELLED}:
+            raise BadRequestError(
+                message="Completed or cancelled visits cannot have their flow switched.",
+                detail={"visit_id": visit.id},
+            )
+
+        template = self.repository.get_visit_flow_template_by_id(payload.visit_flow_template_id)
+        if not template:
+            raise NotFoundError(
+                message="Visit flow template not found.",
+                detail={"visit_flow_template_id": payload.visit_flow_template_id},
+            )
+
+        # 1. Cancel remaining steps
+        self.repository.cancel_pending_flow_steps(visit.id)
+
+        # 2. Append new steps
+        added_steps = self.repository.append_flow_steps_from_template(
+            visit_id=visit.id,
+            template=template,
+            routed_by_id=payload.routed_by_id,
+            mark_first_as_current=payload.mark_first_step_as_current,
+        )
+
+        if not added_steps:
+             raise BadRequestError(
+                message="The selected template has no steps.",
+                detail={"visit_flow_template_id": payload.visit_flow_template_id},
+            )
+
+        first_new_step = added_steps[0]
+        visit.current_service_delivery_point_id = first_new_step.service_delivery_point_id
+
+        # 3. Create queue ticket if requested
+        new_queue_ticket = None
+        if payload.create_queue_ticket:
+            service_point = self.repository.get_service_delivery_point_by_id(
+                first_new_step.service_delivery_point_id
+            )
+            previous_ticket = self.repository.get_latest_queue_ticket_for_visit(visit.id)
+            
+            new_queue_ticket = self.repository.create_rerouted_queue_ticket(
+                visit_id=visit.id,
+                visit_flow_step_id=first_new_step.id,
+                patient_id=visit.patient_id,
+                service_delivery_point=service_point,
+                status=self._resolve_queue_status(payload.queue_status),
+                transferred_from_ticket_id=previous_ticket.id if previous_ticket else None,
+            )
+
+        self.repository.update_visit(visit)
+        self.db.commit()
+
+        detailed_visit = self.repository.get_detailed_visit_by_id(visit.id)
+
+        return {
+            "success": True,
+            "message": f"Visit flow switched to template '{template.name}' successfully.",
+            "visit": detailed_visit,
+            "added_steps": added_steps,
             "new_queue_ticket": new_queue_ticket,
         }
 

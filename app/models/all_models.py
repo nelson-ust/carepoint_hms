@@ -1376,6 +1376,7 @@ class VitalSign(TenantTable):
     """Vital signs captured during a visit."""
 
     visit_id: Mapped[int] = mapped_column(ForeignKey("visit.id"), nullable=False, index=True)
+    visit_flow_step_id: Mapped[Optional[int]] = mapped_column(ForeignKey("visit_flow_step.id"), nullable=True, index=True)
     recorded_by_staff_id: Mapped[Optional[int]] = mapped_column(ForeignKey("staff_profile.id"), nullable=True)
 
     temperature_celsius: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2), nullable=True)
@@ -1393,6 +1394,7 @@ class VitalSign(TenantTable):
     recorded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
     visit: Mapped["Visit"] = relationship(back_populates="vital_signs")
+    visit_flow_step: Mapped[Optional["VisitFlowStep"]] = relationship()
     recorded_by_staff: Mapped[Optional["StaffProfile"]] = relationship()
 
 
@@ -1400,6 +1402,7 @@ class Consultation(TenantTable):
     """Clinical consultation note for a visit."""
 
     visit_id: Mapped[int] = mapped_column(ForeignKey("visit.id"), nullable=False, index=True)
+    visit_flow_step_id: Mapped[Optional[int]] = mapped_column(ForeignKey("visit_flow_step.id"), nullable=True, index=True)
     clinician_staff_id: Mapped[Optional[int]] = mapped_column(ForeignKey("staff_profile.id"), nullable=True, index=True)
 
     status: Mapped[EncounterStatus] = mapped_column(
@@ -1417,6 +1420,7 @@ class Consultation(TenantTable):
     consultation_ended_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
     visit: Mapped["Visit"] = relationship(back_populates="consultations")
+    visit_flow_step: Mapped[Optional["VisitFlowStep"]] = relationship()
     clinician_staff: Mapped[Optional["StaffProfile"]] = relationship()
 
 
@@ -1594,6 +1598,7 @@ class LabOrder(TenantTable):
     """Laboratory order header for a visit."""
 
     visit_id: Mapped[int] = mapped_column(ForeignKey("visit.id"), nullable=False, index=True)
+    visit_flow_step_id: Mapped[Optional[int]] = mapped_column(ForeignKey("visit_flow_step.id"), nullable=True, index=True)
     consultation_id: Mapped[Optional[int]] = mapped_column(ForeignKey("consultation.id"), nullable=True, index=True)
     ordered_by_staff_id: Mapped[Optional[int]] = mapped_column(ForeignKey("staff_profile.id"), nullable=True)
 
@@ -1609,6 +1614,7 @@ class LabOrder(TenantTable):
     ordered_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
     visit: Mapped["Visit"] = relationship(back_populates="lab_orders")
+    visit_flow_step: Mapped[Optional["VisitFlowStep"]] = relationship()
     consultation: Mapped[Optional["Consultation"]] = relationship()
     ordered_by_staff: Mapped[Optional["StaffProfile"]] = relationship()
 
@@ -1622,6 +1628,7 @@ class LabOrderItem(TenantTable):
     """Individual test item within a lab order."""
 
     lab_order_id: Mapped[int] = mapped_column(ForeignKey("lab_order.id"), nullable=False, index=True)
+    visit_flow_step_id: Mapped[Optional[int]] = mapped_column(ForeignKey("visit_flow_step.id"), nullable=True, index=True)
     lab_test_catalog_id: Mapped[int] = mapped_column(ForeignKey("lab_test_catalog.id"), nullable=False, index=True)
 
     status: Mapped[OrderStatus] = mapped_column(
@@ -1635,6 +1642,7 @@ class LabOrderItem(TenantTable):
     collected_by_staff_id: Mapped[Optional[int]] = mapped_column(ForeignKey("staff_profile.id"), nullable=True)
 
     lab_order: Mapped["LabOrder"] = relationship(back_populates="items")
+    visit_flow_step: Mapped[Optional["VisitFlowStep"]] = relationship()
     lab_test_catalog: Mapped["LabTestCatalog"] = relationship()
     collected_by_staff: Mapped[Optional["StaffProfile"]] = relationship()
 
@@ -1654,6 +1662,7 @@ class LabResult(TenantTable):
         unique=True,
         index=True,
     )
+    visit_flow_step_id: Mapped[Optional[int]] = mapped_column(ForeignKey("visit_flow_step.id"), nullable=True, index=True)
     entered_by_staff_id: Mapped[Optional[int]] = mapped_column(ForeignKey("staff_profile.id"), nullable=True)
     verified_by_staff_id: Mapped[Optional[int]] = mapped_column(ForeignKey("staff_profile.id"), nullable=True)
 
@@ -1675,6 +1684,7 @@ class LabResult(TenantTable):
     released_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
     lab_order_item: Mapped["LabOrderItem"] = relationship(back_populates="result")
+    visit_flow_step: Mapped[Optional["VisitFlowStep"]] = relationship()
     entered_by_staff: Mapped[Optional["StaffProfile"]] = relationship(foreign_keys=[entered_by_staff_id])
     verified_by_staff: Mapped[Optional["StaffProfile"]] = relationship(foreign_keys=[verified_by_staff_id])
 
@@ -1720,6 +1730,7 @@ class Prescription(TenantTable):
     """Prescription header for a visit."""
 
     visit_id: Mapped[int] = mapped_column(ForeignKey("visit.id"), nullable=False, index=True)
+    visit_flow_step_id: Mapped[Optional[int]] = mapped_column(ForeignKey("visit_flow_step.id"), nullable=True, index=True)
     consultation_id: Mapped[Optional[int]] = mapped_column(ForeignKey("consultation.id"), nullable=True, index=True)
     prescribed_by_staff_id: Mapped[Optional[int]] = mapped_column(ForeignKey("staff_profile.id"), nullable=True)
 
@@ -1735,6 +1746,7 @@ class Prescription(TenantTable):
     prescribed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
     visit: Mapped["Visit"] = relationship(back_populates="prescriptions")
+    visit_flow_step: Mapped[Optional["VisitFlowStep"]] = relationship()
     consultation: Mapped[Optional["Consultation"]] = relationship()
     prescribed_by_staff: Mapped[Optional["StaffProfile"]] = relationship()
 
@@ -1769,6 +1781,7 @@ class Dispense(TenantTable):
     """Pharmacy dispense transaction."""
 
     prescription_id: Mapped[int] = mapped_column(ForeignKey("prescription.id"), nullable=False, index=True)
+    visit_flow_step_id: Mapped[Optional[int]] = mapped_column(ForeignKey("visit_flow_step.id"), nullable=True, index=True)
     dispensed_by_staff_id: Mapped[Optional[int]] = mapped_column(ForeignKey("staff_profile.id"), nullable=True)
 
     dispense_no: Mapped[str] = mapped_column(String(100), unique=True, nullable=False, index=True)
@@ -1783,6 +1796,7 @@ class Dispense(TenantTable):
     note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     prescription: Mapped["Prescription"] = relationship(back_populates="dispenses")
+    visit_flow_step: Mapped[Optional["VisitFlowStep"]] = relationship()
     dispensed_by_staff: Mapped[Optional["StaffProfile"]] = relationship()
 
     items: Mapped[list["DispenseItem"]] = relationship(
@@ -2002,6 +2016,7 @@ class Payment(TenantTable):
     """Payment transaction against an invoice."""
 
     invoice_id: Mapped[int] = mapped_column(ForeignKey("invoice.id"), nullable=False, index=True)
+    visit_flow_step_id: Mapped[Optional[int]] = mapped_column(ForeignKey("visit_flow_step.id"), nullable=True, index=True)
     received_by_staff_id: Mapped[Optional[int]] = mapped_column(ForeignKey("staff_profile.id"), nullable=True)
 
     payment_reference: Mapped[str] = mapped_column(String(100), nullable=False, unique=True, index=True)
@@ -2022,6 +2037,7 @@ class Payment(TenantTable):
     note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     invoice: Mapped["Invoice"] = relationship(back_populates="payments")
+    visit_flow_step: Mapped[Optional["VisitFlowStep"]] = relationship()
     received_by_staff: Mapped[Optional["StaffProfile"]] = relationship()
     membership_card_transaction: Mapped[Optional["MembershipCardTransaction"]] = relationship(back_populates="payment")
 

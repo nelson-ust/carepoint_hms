@@ -50,3 +50,41 @@ ON CONFLICT (staff_profile_id, service_delivery_point_id) DO NOTHING;
 ALTER TABLE staff_profile DROP COLUMN IF EXISTS service_delivery_point_id;
 
 COMMIT;
+
+
+
+
+-- Migration Script: Enforce Service Point Validation
+-- Purpose: Add visit_flow_step_id to core clinical and financial activity tables.
+
+BEGIN;
+
+-- 1. Vital Signs
+ALTER TABLE vital_sign ADD COLUMN visit_flow_step_id INTEGER REFERENCES visit_flow_step(id);
+CREATE INDEX idx_vital_sign_visit_flow_step_id ON vital_sign(visit_flow_step_id);
+
+-- 2. Clinical Consultations
+ALTER TABLE consultation ADD COLUMN visit_flow_step_id INTEGER REFERENCES visit_flow_step(id);
+CREATE INDEX idx_consultation_visit_flow_step_id ON consultation(visit_flow_step_id);
+
+-- 3. Laboratory Orders (Header)
+ALTER TABLE lab_order ADD COLUMN visit_flow_step_id INTEGER REFERENCES visit_flow_step(id);
+CREATE INDEX idx_lab_order_visit_flow_step_id ON lab_order(visit_flow_step_id);
+
+-- 4. Laboratory Order Items (Tracking Specimen Collection)
+ALTER TABLE lab_order_item ADD COLUMN visit_flow_step_id INTEGER REFERENCES visit_flow_step(id);
+CREATE INDEX idx_lab_order_item_visit_flow_step_id ON lab_order_item(visit_flow_step_id);
+
+-- 5. Laboratory Results
+ALTER TABLE lab_result ADD COLUMN visit_flow_step_id INTEGER REFERENCES visit_flow_step(id);
+CREATE INDEX idx_lab_result_visit_flow_step_id ON lab_result(visit_flow_step_id);
+
+-- 6. Prescriptions
+ALTER TABLE prescription ADD COLUMN visit_flow_step_id INTEGER REFERENCES visit_flow_step(id);
+CREATE INDEX idx_prescription_visit_flow_step_id ON prescription(visit_flow_step_id);
+
+-- 7. Payment Transactions
+ALTER TABLE payment ADD COLUMN visit_flow_step_id INTEGER REFERENCES visit_flow_step(id);
+CREATE INDEX idx_payment_visit_flow_step_id ON payment(visit_flow_step_id);
+
+COMMIT;

@@ -17,7 +17,7 @@ from typing import Optional
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
-from app.core.enums import LabResultStatus, OrderStatus
+from app.core.enums import LabResultStatus, OrderStatus, ServicePointType
 from app.core.exceptions import BadRequestError, NotFoundError
 from app.models.all_models import LabResult
 from app.repositories.lab_order_repository import LabOrderRepository
@@ -29,7 +29,7 @@ from app.schemas.lab_result_schema import (
     LabResultVerifySchema,
 )
 from app.utils.security_event_util import record_security_event
-from app.utils.visit_routing import route_visit_to_next_sdp
+from app.utils.visit_routing import route_visit_to_next_sdp, validate_visit_sdp_activity
 
 
 class LabResultService:
@@ -65,6 +65,14 @@ class LabResultService:
                 detail={"status": str(existing.result_status)},
             )
 
+        # Enforce SDP validation and get current step
+        current_step = validate_visit_sdp_activity(
+            self.db,
+            visit_id=item.lab_order.visit_id,
+            required_sdp_types=[ServicePointType.LABORATORY],
+            activity_name="Lab Result entry",
+        )
+
         if existing is None:
             test = self.order_repo.get_test(item.lab_test_catalog_id)
             unit = payload.unit_of_measure or (test.unit_of_measure if test else None)
@@ -78,6 +86,7 @@ class LabResultService:
                 unit_of_measure=unit,
                 reference_range=ref_range,
                 interpretation=payload.interpretation,
+                visit_flow_step_id=current_step.id,
                 entered_at=datetime.now(timezone.utc),
             )
         else:
@@ -90,6 +99,7 @@ class LabResultService:
             result.reference_range = payload.reference_range or result.reference_range
             result.interpretation = payload.interpretation or result.interpretation
             result.entered_at = result.entered_at or datetime.now(timezone.utc)
+            result.visit_flow_step_id = current_step.id
             self.repository.save(result)
 
         # Move the order item forward.

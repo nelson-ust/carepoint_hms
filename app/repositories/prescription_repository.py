@@ -91,11 +91,13 @@ class PrescriptionRepository:
         visit_id: int,
         consultation_id: Optional[int],
         prescribed_by_staff_id: Optional[int],
+        visit_flow_step_id: Optional[int] = None,
         note: Optional[str],
         items_payload: list[dict],
     ) -> Prescription:
         p = Prescription(
             visit_id=visit_id,
+            visit_flow_step_id=visit_flow_step_id,
             consultation_id=consultation_id,
             prescribed_by_staff_id=prescribed_by_staff_id,
             note=note,

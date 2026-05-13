@@ -113,11 +113,13 @@ class LabOrderRepository:
         visit_id: int,
         consultation_id: Optional[int],
         ordered_by_staff_id: Optional[int],
+        visit_flow_step_id: Optional[int] = None,
         clinical_note: Optional[str],
         items_payload: list[dict],
     ) -> LabOrder:
         order = LabOrder(
             visit_id=visit_id,
+            visit_flow_step_id=visit_flow_step_id,
             consultation_id=consultation_id,
             ordered_by_staff_id=ordered_by_staff_id,
             order_no=self.generate_order_number(),

@@ -6,7 +6,7 @@ from typing import Optional
 
 from sqlalchemy.orm import Session
 
-from app.core.enums import EncounterStatus, VisitStatus
+from app.core.enums import EncounterStatus, ServicePointType, VisitStatus
 from app.core.exceptions import BadRequestError
 from app.models.all_models import Consultation
 from app.repositories.consultation_repository import ConsultationRepository
@@ -15,7 +15,7 @@ from app.schemas.consultation_schema import (
     ConsultationFinalizeSchema,
     ConsultationUpdateSchema,
 )
-from app.utils.visit_routing import end_visit, route_visit_to_next_sdp
+from app.utils.visit_routing import end_visit, route_visit_to_next_sdp, validate_visit_sdp_activity
 
 
 _TERMINAL_VISIT = {VisitStatus.COMPLETED, VisitStatus.CANCELLED}
@@ -62,8 +62,17 @@ class ConsultationService:
                 detail={"existing_consultation_id": existing_open.id},
             )
 
+        # Enforce SDP validation and get current step
+        current_step = validate_visit_sdp_activity(
+            self.db,
+            visit_id=visit.id,
+            required_sdp_types=[ServicePointType.CLINIC, ServicePointType.EMERGENCY, ServicePointType.WARD],
+            activity_name="Consultation",
+        )
+
         consultation = self.repository.create(
             visit_id=visit.id,
+            visit_flow_step_id=current_step.id,
             clinician_staff_id=payload.clinician_staff_id,
             subjective_note=payload.subjective_note,
             objective_note=payload.objective_note,

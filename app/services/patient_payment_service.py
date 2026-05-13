@@ -47,6 +47,7 @@ from app.core.enums import (
     PaymentMethod,
     PaymentProvider,
     PaymentStatus,
+    ServicePointType,
     SyncJournalOp,
 )
 from app.core.exceptions import BadRequestError, NotFoundError
@@ -61,6 +62,7 @@ from app.models.all_models import (
     TenantPaymentMethodConfig,
 )
 from app.services.tenant_payment_method_service import TenantPaymentMethodService
+from app.utils.visit_routing import validate_visit_sdp_activity
 
 
 logger = logging.getLogger(__name__)
@@ -163,6 +165,17 @@ class PatientPaymentService:
                 },
             )
 
+        # SDP Validation for physical payments.
+        current_step = None
+        if channel in {PaymentChannel.CASHIER, PaymentChannel.BANK_TRANSFER, PaymentChannel.MEMBERSHIP_CARD}:
+            if invoice.visit_id:
+                current_step = validate_visit_sdp_activity(
+                    self.db,
+                    visit_id=invoice.visit_id,
+                    required_sdp_types=[ServicePointType.CASHIER],
+                    activity_name="Payment settlement",
+                )
+
         config = self._resolve_config(channel=channel, provider=provider, config_id=config_id)
         self._enforce_amount_limits(config, amount_dec)
 
@@ -173,6 +186,7 @@ class PatientPaymentService:
                 amount=amount_dec,
                 config=config,
                 cashier_staff_id=cashier_staff_id,
+                visit_flow_step_id=current_step.id if current_step else None,
                 external_reference=external_reference,
                 note=note,
                 metadata=metadata,
@@ -184,6 +198,7 @@ class PatientPaymentService:
                 config=config,
                 patient_id=patient_id,
                 cashier_staff_id=cashier_staff_id,
+                visit_flow_step_id=current_step.id if current_step else None,
                 note=note,
                 metadata=metadata,
             )
@@ -203,6 +218,7 @@ class PatientPaymentService:
                 config=config,
                 external_reference=external_reference,
                 cashier_staff_id=cashier_staff_id,
+                visit_flow_step_id=current_step.id if current_step else None,
                 note=note,
                 metadata=metadata,
             )
@@ -212,6 +228,7 @@ class PatientPaymentService:
                 amount=amount_dec,
                 config=config,
                 callback_url=callback_url,
+                visit_flow_step_id=current_step.id if current_step else None,
                 metadata=metadata,
             )
 
@@ -228,6 +245,7 @@ class PatientPaymentService:
         amount: Decimal,
         config: TenantPaymentMethodConfig,
         cashier_staff_id: Optional[int],
+        visit_flow_step_id: Optional[int] = None,
         external_reference: Optional[str],
         note: Optional[str],
         metadata: Optional[dict],
@@ -240,6 +258,7 @@ class PatientPaymentService:
             status=PaymentStatus.SUCCESSFUL,
             reference=external_reference or _generate_reference("CSH"),
             cashier_staff_id=cashier_staff_id,
+            visit_flow_step_id=visit_flow_step_id,
             metadata=metadata,
             note=note or "Payment received at cashier point",
             paid_now=True,
@@ -257,6 +276,7 @@ class PatientPaymentService:
         config: TenantPaymentMethodConfig,
         external_reference: Optional[str],
         cashier_staff_id: Optional[int],
+        visit_flow_step_id: Optional[int] = None,
         note: Optional[str],
         metadata: Optional[dict],
     ) -> dict[str, Any]:
@@ -270,6 +290,7 @@ class PatientPaymentService:
             status=PaymentStatus.SUCCESSFUL,
             reference=external_reference,
             cashier_staff_id=cashier_staff_id,
+            visit_flow_step_id=visit_flow_step_id,
             metadata=metadata,
             note=note or "Bank transfer reconciliation",
             paid_now=True,
@@ -287,6 +308,7 @@ class PatientPaymentService:
         config: TenantPaymentMethodConfig,
         patient_id: Optional[int],
         cashier_staff_id: Optional[int],
+        visit_flow_step_id: Optional[int] = None,
         note: Optional[str],
         metadata: Optional[dict],
     ) -> dict[str, Any]:
@@ -324,6 +346,7 @@ class PatientPaymentService:
             status=PaymentStatus.SUCCESSFUL,
             reference=reference,
             cashier_staff_id=cashier_staff_id,
+            visit_flow_step_id=visit_flow_step_id,
             metadata={**(metadata or {}), "card_number": card.card_number},
             note=note or "Membership-card debit",
             paid_now=True,
@@ -451,6 +474,7 @@ class PatientPaymentService:
         amount: Decimal,
         config: TenantPaymentMethodConfig,
         callback_url: Optional[str],
+        visit_flow_step_id: Optional[int] = None,
         metadata: Optional[dict],
     ) -> dict[str, Any]:
         """
@@ -474,6 +498,7 @@ class PatientPaymentService:
             status=PaymentStatus.PENDING,
             reference=reference,
             cashier_staff_id=None,
+            visit_flow_step_id=visit_flow_step_id,
             metadata={
                 **(metadata or {}),
                 "provider": config.provider.value,
@@ -701,12 +726,14 @@ class PatientPaymentService:
         status: PaymentStatus,
         reference: str,
         cashier_staff_id: Optional[int],
+        visit_flow_step_id: Optional[int] = None,
         metadata: Optional[dict],
         note: Optional[str],
         paid_now: bool,
     ) -> Payment:
         payment = Payment(
             invoice_id=invoice.id,
+            visit_flow_step_id=visit_flow_step_id,
             received_by_staff_id=cashier_staff_id,
             payment_reference=reference,
             payment_method=method.value,
