@@ -1,51 +1,90 @@
 """
-Schemas for tenant database backups.
+Carepoint HMS - Database Backup Schemas
+
+This module defines the Pydantic models used for data validation and serialization 
+within the tenant database backup system. It supports listing backups, providing 
+dashboard summaries, and managing download metadata.
+
+Design Goals:
+- Strict typing for all backup metadata.
+- Support for dashboard statistics (health, storage usage).
+- Compatibility with SQLAlchemy ORM models via from_attributes=True.
 """
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Optional
+from typing import Optional, List
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class DatabaseBackupReadSchema(BaseModel):
-    id: int
-    filename: str
-    s3_url: Optional[str] = None
-    s3_key: Optional[str] = None
-    size_bytes: Optional[int] = None
-    status: str
-    error_message: Optional[str] = None
+    """
+    Schema for reading database backup details.
+    
+    Includes comprehensive metadata for retention, integrity, and PITR support.
+    """
+    id: int = Field(..., description="Unique identifier for the backup record")
+    filename: str = Field(..., description="The name of the backup file stored in S3 or local storage")
+    s3_url: Optional[str] = Field(None, description="The full URL to the backup artifact")
+    s3_key: Optional[str] = Field(None, description="The S3 bucket key for the artifact")
+    size_bytes: Optional[int] = Field(None, description="Size of the backup artifact in bytes")
+    status: str = Field(..., description="Current status: PENDING, COMPLETED, FAILED, EXPIRED")
+    error_message: Optional[str] = Field(None, description="Error details if the backup failed")
 
     # Encryption / integrity
-    is_encrypted: bool = False
-    encryption_algo: Optional[str] = None
-    checksum_sha256: Optional[str] = None
+    is_encrypted: bool = Field(False, description="Whether the artifact is encrypted at rest")
+    encryption_algo: Optional[str] = Field(None, description="Algorithm used for encryption (e.g., FERNET_AES128)")
+    checksum_sha256: Optional[str] = Field(None, description="SHA-256 checksum of the unencrypted file")
 
     # Backup taxonomy / PITR
-    backup_type: str = "FULL"
-    pg_dump_format: str = "custom"
-    backup_started_at: Optional[datetime] = None
-    backup_finished_at: Optional[datetime] = None
-    pitr_lsn: Optional[str] = None
-    pitr_timestamp: Optional[datetime] = None
+    backup_type: str = Field("FULL", description="Type of backup: FULL, INCREMENTAL, WAL")
+    pg_dump_format: str = Field("custom", description="Format used by pg_dump (custom is recommended)")
+    backup_started_at: Optional[datetime] = Field(None, description="Timestamp when the backup process started")
+    backup_finished_at: Optional[datetime] = Field(None, description="Timestamp when the backup process finished")
+    pitr_lsn: Optional[str] = Field(None, description="PostgreSQL LSN for point-in-time recovery")
+    pitr_timestamp: Optional[datetime] = Field(None, description="PostgreSQL timestamp for point-in-time recovery")
 
     # Retention
-    retention_until: Optional[datetime] = None
-    triggered_by: str = "MANUAL"
+    retention_until: Optional[datetime] = Field(None, description="Date when this backup is eligible for automatic deletion")
+    triggered_by: str = Field("MANUAL", description="How the backup was triggered: MANUAL, SCHEDULED")
 
-    date_created: datetime
+    date_created: datetime = Field(..., description="Record creation timestamp")
 
     model_config = ConfigDict(from_attributes=True)
 
 
+class BackupSummarySchema(BaseModel):
+    """
+    High-level summary statistics for the database backup dashboard.
+    
+    Used to drive the 'Health', 'Storage Usage', and 'Retention Policy' cards in the UI.
+    """
+    health_status: str = Field(..., description="Overall health: Healthy, Degraded, or Unhealthy")
+    health_description: str = Field(..., description="Contextual message explaining the health status")
+    last_backup_at: Optional[datetime] = Field(None, description="Timestamp of the most recent successful backup")
+    next_backup_scheduled_at: Optional[datetime] = Field(None, description="Timestamp of the next automated backup")
+    retention_policy: str = Field(..., description="Human-readable retention policy description")
+    storage_usage_gb: float = Field(..., description="Total storage consumed by successful backups in Gigabytes")
+    recovery_points_count: int = Field(..., description="Total number of valid recovery points available")
+
+
+class BackupListResponseSchema(BaseModel):
+    """
+    Unified response model for the backups dashboard.
+    
+    Combines the global summary metrics with the historical list of recovery points.
+    """
+    summary: BackupSummarySchema = Field(..., description="Aggregated backup metrics")
+    backups: List[DatabaseBackupReadSchema] = Field(..., description="History of recent backup attempts")
+
+
 class BackupDownloadMetadataSchema(BaseModel):
     """
-    Metadata returned alongside the streamed backup file via response
-    headers.  This schema documents the shape; the actual endpoint
-    returns a binary ``FileResponse``.
+    Metadata for a backup artifact being prepared for download.
+    
+    Usually returned in headers or as part of a pre-signed URL response.
     """
-    filename: str
-    size_bytes: int
-    checksum_sha256: Optional[str] = None
+    filename: str = Field(..., description="The filename of the decrypted artifact")
+    size_bytes: int = Field(..., description="The size of the decrypted file")
+    checksum_sha256: Optional[str] = Field(None, description="Integrity checksum for client-side verification")
