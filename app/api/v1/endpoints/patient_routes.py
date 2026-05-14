@@ -33,7 +33,7 @@ from fastapi import APIRouter, Depends, File, Form, Query, UploadFile, status
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.core.dependencies import AdminUser
+from app.core.dependencies import AdminUser, AnyAuthenticatedUser
 from app.schemas.patient_schemas import (
     PatientActionResponseSchema,
     PatientAttachInsuranceLaterSchema,
@@ -273,14 +273,12 @@ def _serialize_loyalty_membership(membership) -> dict[str, Any]:
 def _serialize_patient(patient) -> dict[str, Any]:
     registrations = [
         _serialize_registration_event(item)
-        for item in (getattr(patient, "registrations", []) or [])
-        if not getattr(item, "is_deleted", False)
+        for item in (patient.registrations or [])
     ]
 
     identifiers = [
         _serialize_identifier(item)
-        for item in (getattr(patient, "identifiers", []) or [])
-        if not getattr(item, "is_deleted", False)
+        for item in (patient.identifiers or [])
     ]
 
     photo_payload = None
@@ -338,33 +336,27 @@ def _serialize_patient_extended(patient) -> dict[str, Any]:
 
     payload["insurance_records"] = [
         _serialize_insurance_record(item)
-        for item in (getattr(patient, "insurance_records", []) or [])
-        if not getattr(item, "is_deleted", False)
+        for item in (patient.insurance_records or [])
     ]
     payload["loyalty_memberships"] = [
         _serialize_loyalty_membership(item)
-        for item in (getattr(patient, "loyalty_memberships", []) or [])
-        if not getattr(item, "is_deleted", False)
+        for item in (patient.loyalty_memberships or [])
     ]
     payload["document_attachments"] = [
         _serialize_attachment(item)
-        for item in (getattr(patient, "attachments", []) or [])
-        if not getattr(item, "is_deleted", False)
+        for item in (patient.attachments or [])
     ]
     payload["consent_records"] = [
         _serialize_consent(item)
-        for item in (getattr(patient, "consent_records", []) or [])
-        if not getattr(item, "is_deleted", False)
+        for item in (patient.consent_records or [])
     ]
     payload["scanned_forms"] = [
         _serialize_scanned_form(item)
-        for item in (getattr(patient, "scanned_forms", []) or [])
-        if not getattr(item, "is_deleted", False)
+        for item in (patient.scanned_forms or [])
     ]
     payload["demographic_audits"] = [
         _serialize_demographic_audit(item)
-        for item in (getattr(patient, "demographic_audits", []) or [])
-        if not getattr(item, "is_deleted", False)
+        for item in (patient.demographic_audits or [])
     ]
 
     return payload
@@ -595,7 +587,7 @@ def attach_patient_insurance_later(
     summary="List patients",
 )
 def list_patients(
-    _: AdminUser,
+    _: AnyAuthenticatedUser,
     service: Annotated[PatientService, Depends(get_patient_service)],
     skip: int = Query(0, ge=0, description="Pagination offset."),
     limit: int = Query(20, ge=1, le=100, description="Pagination size."),
@@ -620,7 +612,7 @@ def list_patients(
     summary="Search patients in the MPI",
 )
 def search_patients(
-    _: AdminUser,
+    _: AnyAuthenticatedUser,
     service: Annotated[PatientService, Depends(get_patient_service)],
     hospital_number: Optional[str] = Query(None),
     full_name: Optional[str] = Query(None),
@@ -670,7 +662,7 @@ def search_patients(
 )
 def get_patient_by_hospital_number(
     hospital_number: str,
-    _: AdminUser,
+    _: AnyAuthenticatedUser,
     service: Annotated[PatientService, Depends(get_patient_service)],
 ):
     """
@@ -688,7 +680,7 @@ def get_patient_by_hospital_number(
 )
 def get_patient(
     patient_id: int,
-    _: AdminUser,
+    _: AnyAuthenticatedUser,
     service: Annotated[PatientService, Depends(get_patient_service)],
 ):
     """
@@ -706,7 +698,7 @@ def get_patient(
 )
 def get_detailed_patient(
     patient_id: int,
-    _: AdminUser,
+    _: AnyAuthenticatedUser,
     service: Annotated[PatientService, Depends(get_patient_service)],
 ):
     """

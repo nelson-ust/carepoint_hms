@@ -121,14 +121,52 @@ class PatientRepository:
         return (
             self.db.query(Patient)
             .options(
-                selectinload(Patient.registrations).joinedload(PatientRegistration.registered_by),
-                selectinload(Patient.identifiers),
-                selectinload(Patient.attachments),
-                selectinload(Patient.consent_records),
-                selectinload(Patient.scanned_forms),
-                selectinload(Patient.demographic_audits),
-                selectinload(Patient.insurance_records),
-                selectinload(Patient.loyalty_memberships),
+                selectinload(
+                    Patient.registrations
+                ).filter(
+                    PatientRegistration.is_deleted.is_(False)
+                ).joinedload(
+                    PatientRegistration.registered_by
+                ),
+                selectinload(
+                    Patient.identifiers
+                ).filter(
+                    PatientIdentifier.is_deleted.is_(False)
+                ),
+                selectinload(
+                    Patient.attachments
+                ).filter(
+                    PatientAttachment.is_deleted.is_(False)
+                ),
+                selectinload(
+                    Patient.consent_records
+                ).filter(
+                    PatientConsent.is_deleted.is_(False)
+                ),
+                selectinload(
+                    Patient.scanned_forms
+                ).filter(
+                    PatientScannedForm.is_deleted.is_(False)
+                ),
+                selectinload(
+                    Patient.demographic_audits
+                ).filter(
+                    PatientDemographicAudit.is_deleted.is_(False)
+                ),
+                selectinload(
+                    Patient.insurance_records
+                ).filter(
+                    PatientInsurance.is_deleted.is_(False)
+                ).joinedload(
+                    PatientInsurance.insurance_provider
+                ),
+                selectinload(
+                    Patient.loyalty_memberships
+                ).filter(
+                    PatientLoyalty.is_deleted.is_(False)
+                ).joinedload(
+                    PatientLoyalty.loyalty_program
+                ),
                 joinedload(Patient.preferred_payer),
                 selectinload(Patient.appointments),
                 selectinload(Patient.visits),
@@ -263,23 +301,27 @@ class PatientRepository:
         skip: int = 0,
         limit: int = 20,
     ) -> tuple[list[PatientRegistration], int]:
+        base_filters = [
+            PatientRegistration.patient_id == patient_id,
+            PatientRegistration.is_deleted.is_(False),
+        ]
+        
+        # 1. Count
         total = (
             self.db.query(func.count(PatientRegistration.id))
-            .filter(
-                PatientRegistration.patient_id == patient_id,
-                PatientRegistration.is_deleted.is_(False),
-            )
+            .filter(*base_filters)
             .scalar()
             or 0
         )
 
+        if total == 0:
+            return [], 0
+
+        # 2. Data
         items = (
             self.db.query(PatientRegistration)
             .options(joinedload(PatientRegistration.registered_by))
-            .filter(
-                PatientRegistration.patient_id == patient_id,
-                PatientRegistration.is_deleted.is_(False),
-            )
+            .filter(*base_filters)
             .order_by(PatientRegistration.registration_date.desc())
             .offset(skip)
             .limit(limit)
@@ -467,6 +509,7 @@ class PatientRepository:
     # ============================================================
 
     def list_patients(self, *, skip: int = 0, limit: int = 20) -> tuple[list[Patient], int]:
+        # 1. Count
         total = (
             self.db.query(func.count(Patient.id))
             .filter(Patient.is_deleted.is_(False))
@@ -474,12 +517,20 @@ class PatientRepository:
             or 0
         )
 
+        if total == 0:
+            return [], 0
+
+        # 2. Data
         items = (
             self.db.query(Patient)
             .options(
                 joinedload(Patient.preferred_payer),
-                selectinload(Patient.insurance_records),
-                selectinload(Patient.loyalty_memberships),
+                selectinload(
+                    Patient.insurance_records
+                ).filter(PatientInsurance.is_deleted.is_(False)),
+                selectinload(
+                    Patient.loyalty_memberships
+                ).filter(PatientLoyalty.is_deleted.is_(False)),
             )
             .filter(Patient.is_deleted.is_(False))
             .order_by(Patient.last_name.asc(), Patient.first_name.asc(), Patient.hospital_number.asc())
@@ -505,22 +556,15 @@ class PatientRepository:
         skip: int = 0,
         limit: int = 20,
     ) -> tuple[list[Patient], int]:
-        query = (
-            self.db.query(Patient)
-            .options(
-                joinedload(Patient.preferred_payer),
-                selectinload(Patient.insurance_records),
-                selectinload(Patient.loyalty_memberships),
-            )
-            .filter(Patient.is_deleted.is_(False))
-        )
+        # Define base filters to reuse
+        base_filters = [Patient.is_deleted.is_(False)]
 
         if hospital_number:
-            query = query.filter(Patient.hospital_number == hospital_number)
+            base_filters.append(Patient.hospital_number == hospital_number)
 
         if full_name:
             like_term = f"%{full_name.strip()}%"
-            query = query.filter(
+            base_filters.append(
                 or_(
                     func.concat(Patient.first_name, " ", Patient.last_name).ilike(like_term),
                     func.concat(Patient.first_name, " ", Patient.middle_name, " ", Patient.last_name).ilike(like_term),
@@ -531,7 +575,7 @@ class PatientRepository:
             )
 
         if phone_number:
-            query = query.filter(
+            base_filters.append(
                 or_(
                     Patient.phone_number == phone_number,
                     Patient.alternate_phone_number == phone_number,
@@ -541,30 +585,45 @@ class PatientRepository:
             )
 
         if date_of_birth is not None:
-            query = query.filter(Patient.date_of_birth == date_of_birth)
-
+            base_filters.append(Patient.date_of_birth == date_of_birth)
         if email:
-            query = query.filter(Patient.email == email)
-
+            base_filters.append(Patient.email == email)
         if city:
-            query = query.filter(Patient.city.ilike(f"%{city.strip()}%"))
-
+            base_filters.append(Patient.city.ilike(f"%{city.strip()}%"))
         if state:
-            query = query.filter(Patient.state.ilike(f"%{state.strip()}%"))
-
+            base_filters.append(Patient.state.ilike(f"%{state.strip()}%"))
         if patient_type is not None:
-            query = query.filter(Patient.patient_type == patient_type)
-
+            base_filters.append(Patient.patient_type == patient_type)
         if payer_type:
-            query = query.filter(Patient.payer_type == payer_type)
-
+            base_filters.append(Patient.payer_type == payer_type)
         if national_identifier:
-            query = query.filter(Patient.national_identifier == national_identifier)
+            base_filters.append(Patient.national_identifier == national_identifier)
 
-        total = query.with_entities(func.count(Patient.id)).scalar() or 0
+        # 1. Count
+        total = (
+            self.db.query(func.count(Patient.id))
+            .filter(*base_filters)
+            .scalar()
+            or 0
+        )
 
+        if total == 0:
+            return [], 0
+
+        # 2. Data
         items = (
-            query.order_by(Patient.last_name.asc(), Patient.first_name.asc(), Patient.hospital_number.asc())
+            self.db.query(Patient)
+            .filter(*base_filters)
+            .options(
+                joinedload(Patient.preferred_payer),
+                selectinload(
+                    Patient.insurance_records
+                ).filter(PatientInsurance.is_deleted.is_(False)),
+                selectinload(
+                    Patient.loyalty_memberships
+                ).filter(PatientLoyalty.is_deleted.is_(False)),
+            )
+            .order_by(Patient.last_name.asc(), Patient.first_name.asc(), Patient.hospital_number.asc())
             .offset(skip)
             .limit(limit)
             .all()
