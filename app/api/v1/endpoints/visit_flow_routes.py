@@ -124,8 +124,7 @@ def _serialize_template(template) -> dict[str, Any]:
         "description": template.description,
         "steps": [
             _serialize_template_step(step)
-            for step in (getattr(template, "steps", []) or [])
-            if not getattr(step, "is_deleted", False)
+            for step in (template.steps or [])
         ],
         "created_at": template.created_at,
         "updated_at": template.updated_at,
@@ -183,8 +182,7 @@ def _serialize_template_list_item(template) -> dict[str, Any]:
         "description": template.description,
         "associated_visit_flow_templates_steps": [
             _serialize_template_list_step(step)
-            for step in (getattr(template, "steps", []) or [])
-            if not getattr(step, "is_deleted", False)
+            for step in (template.steps or [])
         ],
     }
 

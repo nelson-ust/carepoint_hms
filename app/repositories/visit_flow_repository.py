@@ -93,7 +93,11 @@ class VisitFlowRepository:
         return (
             self.db.query(VisitFlowTemplate)
             .options(
-                selectinload(VisitFlowTemplate.steps).joinedload(
+                selectinload(
+                    VisitFlowTemplate.steps
+                ).filter(
+                    VisitFlowTemplateStep.is_deleted.is_(False)
+                ).joinedload(
                     VisitFlowTemplateStep.service_delivery_point
                 )
             )
@@ -111,7 +115,11 @@ class VisitFlowRepository:
         return (
             self.db.query(VisitFlowTemplate)
             .options(
-                selectinload(VisitFlowTemplate.steps).joinedload(
+                selectinload(
+                    VisitFlowTemplate.steps
+                ).filter(
+                    VisitFlowTemplateStep.is_deleted.is_(False)
+                ).joinedload(
                     VisitFlowTemplateStep.service_delivery_point
                 )
             )
@@ -133,26 +141,37 @@ class VisitFlowRepository:
         """
         Return paginated reusable visit flow templates.
         """
-        query = (
+        # Define base filters to reuse in both count and data queries
+        base_filters = [VisitFlowTemplate.is_deleted.is_(False)]
+        if code:
+            base_filters.append(VisitFlowTemplate.code == code)
+        if name:
+            base_filters.append(VisitFlowTemplate.name.ilike(f"%{name.strip()}%"))
+
+        # 1. Count query - Keep it lightweight by avoiding eager loads
+        total = (
+            self.db.query(func.count(VisitFlowTemplate.id))
+            .filter(*base_filters)
+            .scalar()
+        ) or 0
+
+        if total == 0:
+            return [], 0
+
+        # 2. Data query - Load only required relationships and filter nested steps
+        items = (
             self.db.query(VisitFlowTemplate)
+            .filter(*base_filters)
             .options(
-                selectinload(VisitFlowTemplate.steps).joinedload(
+                selectinload(
+                    VisitFlowTemplate.steps
+                ).filter(
+                    VisitFlowTemplateStep.is_deleted.is_(False)
+                ).joinedload(
                     VisitFlowTemplateStep.service_delivery_point
                 )
             )
-            .filter(VisitFlowTemplate.is_deleted.is_(False))
-        )
-
-        if code:
-            query = query.filter(VisitFlowTemplate.code == code)
-
-        if name:
-            query = query.filter(VisitFlowTemplate.name.ilike(f"%{name.strip()}%"))
-
-        total = query.with_entities(func.count(VisitFlowTemplate.id)).scalar() or 0
-
-        items = (
-            query.order_by(VisitFlowTemplate.name.asc(), VisitFlowTemplate.id.asc())
+            .order_by(VisitFlowTemplate.name.asc(), VisitFlowTemplate.id.asc())
             .offset(skip)
             .limit(limit)
             .all()
@@ -332,19 +351,26 @@ class VisitFlowRepository:
         """
         Return paginated runtime visit flow steps.
         """
-        query = (
-            self.db.query(VisitFlowStep)
-            .options(joinedload(VisitFlowStep.service_delivery_point))
-            .filter(VisitFlowStep.is_deleted.is_(False))
-        )
-
+        base_filters = [VisitFlowStep.is_deleted.is_(False)]
         if visit_id is not None:
-            query = query.filter(VisitFlowStep.visit_id == visit_id)
+            base_filters.append(VisitFlowStep.visit_id == visit_id)
 
-        total = query.with_entities(func.count(VisitFlowStep.id)).scalar() or 0
+        # 1. Count query
+        total = (
+            self.db.query(func.count(VisitFlowStep.id))
+            .filter(*base_filters)
+            .scalar()
+        ) or 0
 
+        if total == 0:
+            return [], 0
+
+        # 2. Data query
         items = (
-            query.order_by(VisitFlowStep.visit_id.asc(), VisitFlowStep.step_order.asc())
+            self.db.query(VisitFlowStep)
+            .filter(*base_filters)
+            .options(joinedload(VisitFlowStep.service_delivery_point))
+            .order_by(VisitFlowStep.visit_id.asc(), VisitFlowStep.step_order.asc())
             .offset(skip)
             .limit(limit)
             .all()

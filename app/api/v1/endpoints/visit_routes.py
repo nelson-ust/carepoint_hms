@@ -223,8 +223,7 @@ def _serialize_template(template) -> Optional[dict[str, Any]]:
         "description": template.description,
         "steps": [
             _serialize_template_step(step)
-            for step in (getattr(template, "steps", []) or [])
-            if not getattr(step, "is_deleted", False)
+            for step in (template.steps or [])
         ],
         "created_at": getattr(template, "date_created", None),
         "updated_at": getattr(template, "date_updated", None),
@@ -271,13 +270,11 @@ def _serialize_detailed_visit(visit) -> dict[str, Any]:
             ),
             "flow_steps": [
                 _serialize_flow_step(step)
-                for step in (getattr(visit, "flow_steps", []) or [])
-                if not getattr(step, "is_deleted", False)
+                for step in (visit.flow_steps or [])
             ],
             "queue_tickets": [
                 _serialize_queue_ticket(ticket)
-                for ticket in (getattr(visit, "queue_tickets", []) or [])
-                if not getattr(ticket, "is_deleted", False)
+                for ticket in (visit.queue_tickets or [])
             ],
         }
     )

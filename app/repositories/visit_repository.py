@@ -181,8 +181,20 @@ class VisitRepository:
                 joinedload(Visit.appointment),
                 joinedload(Visit.first_service_delivery_point),
                 joinedload(Visit.current_service_delivery_point),
-                selectinload(Visit.flow_steps).joinedload(VisitFlowStep.service_delivery_point),
-                selectinload(Visit.queue_tickets).joinedload(QueueTicket.service_delivery_point),
+                selectinload(
+                    Visit.flow_steps
+                ).filter(
+                    VisitFlowStep.is_deleted.is_(False)
+                ).joinedload(
+                    VisitFlowStep.service_delivery_point
+                ),
+                selectinload(
+                    Visit.queue_tickets
+                ).filter(
+                    QueueTicket.is_deleted.is_(False)
+                ).joinedload(
+                    QueueTicket.service_delivery_point
+                ),
             )
             .filter(
                 Visit.id == visit_id,
@@ -205,7 +217,11 @@ class VisitRepository:
         return (
             self.db.query(VisitFlowTemplate)
             .options(
-                selectinload(VisitFlowTemplate.steps).joinedload(
+                selectinload(
+                    VisitFlowTemplate.steps
+                ).filter(
+                    VisitFlowTemplateStep.is_deleted.is_(False)
+                ).joinedload(
                     VisitFlowTemplateStep.service_delivery_point
                 )
             )
@@ -226,7 +242,11 @@ class VisitRepository:
         return (
             self.db.query(VisitFlowTemplate)
             .options(
-                selectinload(VisitFlowTemplate.steps).joinedload(
+                selectinload(
+                    VisitFlowTemplate.steps
+                ).filter(
+                    VisitFlowTemplateStep.is_deleted.is_(False)
+                ).joinedload(
                     VisitFlowTemplateStep.service_delivery_point
                 )
             )
@@ -255,39 +275,44 @@ class VisitRepository:
         """
         Return paginated visits with optional filters.
         """
-        query = (
+        # Define base filters to reuse in both count and data queries
+        base_filters = [Visit.is_deleted.is_(False)]
+        
+        if patient_id is not None:
+            base_filters.append(Visit.patient_id == patient_id)
+        if appointment_id is not None:
+            base_filters.append(Visit.appointment_id == appointment_id)
+        if status is not None:
+            base_filters.append(Visit.status == status)
+        if priority is not None:
+            base_filters.append(Visit.priority == priority)
+        if service_delivery_point_id is not None:
+            base_filters.append(
+                (Visit.current_service_delivery_point_id == service_delivery_point_id)
+                | (Visit.first_service_delivery_point_id == service_delivery_point_id)
+            )
+
+        # 1. Count query - Lightweight
+        total = (
+            self.db.query(func.count(Visit.id))
+            .filter(*base_filters)
+            .scalar()
+        ) or 0
+
+        if total == 0:
+            return [], 0
+
+        # 2. Data query - Eager load primary contexts
+        items = (
             self.db.query(Visit)
+            .filter(*base_filters)
             .options(
                 joinedload(Visit.patient),
                 joinedload(Visit.appointment),
                 joinedload(Visit.first_service_delivery_point),
                 joinedload(Visit.current_service_delivery_point),
             )
-            .filter(Visit.is_deleted.is_(False))
-        )
-
-        if patient_id is not None:
-            query = query.filter(Visit.patient_id == patient_id)
-
-        if appointment_id is not None:
-            query = query.filter(Visit.appointment_id == appointment_id)
-
-        if status is not None:
-            query = query.filter(Visit.status == status)
-
-        if priority is not None:
-            query = query.filter(Visit.priority == priority)
-
-        if service_delivery_point_id is not None:
-            query = query.filter(
-                (Visit.current_service_delivery_point_id == service_delivery_point_id)
-                | (Visit.first_service_delivery_point_id == service_delivery_point_id)
-            )
-
-        total = query.with_entities(func.count(Visit.id)).scalar() or 0
-
-        items = (
-            query.order_by(Visit.visit_date.desc(), Visit.id.desc())
+            .order_by(Visit.visit_date.desc(), Visit.id.desc())
             .offset(skip)
             .limit(limit)
             .all()
