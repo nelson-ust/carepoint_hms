@@ -19,7 +19,7 @@ from app.schemas.membership_card_schemas import (
 )
 from app.services.membership_card_service import MembershipCardService
 
-router = APIRouter(strict_slashes=False)
+router = APIRouter()
 
 
 @router.post(
