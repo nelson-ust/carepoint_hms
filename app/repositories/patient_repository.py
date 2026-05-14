@@ -122,48 +122,48 @@ class PatientRepository:
             self.db.query(Patient)
             .options(
                 selectinload(
-                    Patient.registrations
-                ).filter(
-                    PatientRegistration.is_deleted.is_(False)
+                    Patient.registrations.and_(
+                        PatientRegistration.is_deleted.is_(False)
+                    )
                 ).joinedload(
                     PatientRegistration.registered_by
                 ),
                 selectinload(
-                    Patient.identifiers
-                ).filter(
-                    PatientIdentifier.is_deleted.is_(False)
+                    Patient.identifiers.and_(
+                        PatientIdentifier.is_deleted.is_(False)
+                    )
                 ),
                 selectinload(
-                    Patient.attachments
-                ).filter(
-                    PatientAttachment.is_deleted.is_(False)
+                    Patient.attachments.and_(
+                        PatientAttachment.is_deleted.is_(False)
+                    )
                 ),
                 selectinload(
-                    Patient.consent_records
-                ).filter(
-                    PatientConsent.is_deleted.is_(False)
+                    Patient.consent_records.and_(
+                        PatientConsent.is_deleted.is_(False)
+                    )
                 ),
                 selectinload(
-                    Patient.scanned_forms
-                ).filter(
-                    PatientScannedForm.is_deleted.is_(False)
+                    Patient.scanned_forms.and_(
+                        PatientScannedForm.is_deleted.is_(False)
+                    )
                 ),
                 selectinload(
-                    Patient.demographic_audits
-                ).filter(
-                    PatientDemographicAudit.is_deleted.is_(False)
+                    Patient.demographic_audits.and_(
+                        PatientDemographicAudit.is_deleted.is_(False)
+                    )
                 ),
                 selectinload(
-                    Patient.insurance_records
-                ).filter(
-                    PatientInsurance.is_deleted.is_(False)
+                    Patient.insurance_records.and_(
+                        PatientInsurance.is_deleted.is_(False)
+                    )
                 ).joinedload(
                     PatientInsurance.insurance_provider
                 ),
                 selectinload(
-                    Patient.loyalty_memberships
-                ).filter(
-                    PatientLoyalty.is_deleted.is_(False)
+                    Patient.loyalty_memberships.and_(
+                        PatientLoyalty.is_deleted.is_(False)
+                    )
                 ).joinedload(
                     PatientLoyalty.loyalty_program
                 ),
@@ -526,11 +526,11 @@ class PatientRepository:
             .options(
                 joinedload(Patient.preferred_payer),
                 selectinload(
-                    Patient.insurance_records
-                ).filter(PatientInsurance.is_deleted.is_(False)),
+                    Patient.insurance_records.and_(PatientInsurance.is_deleted.is_(False))
+                ),
                 selectinload(
-                    Patient.loyalty_memberships
-                ).filter(PatientLoyalty.is_deleted.is_(False)),
+                    Patient.loyalty_memberships.and_(PatientLoyalty.is_deleted.is_(False))
+                ),
             )
             .filter(Patient.is_deleted.is_(False))
             .order_by(Patient.last_name.asc(), Patient.first_name.asc(), Patient.hospital_number.asc())
@@ -617,11 +617,11 @@ class PatientRepository:
             .options(
                 joinedload(Patient.preferred_payer),
                 selectinload(
-                    Patient.insurance_records
-                ).filter(PatientInsurance.is_deleted.is_(False)),
+                    Patient.insurance_records.and_(PatientInsurance.is_deleted.is_(False))
+                ),
                 selectinload(
-                    Patient.loyalty_memberships
-                ).filter(PatientLoyalty.is_deleted.is_(False)),
+                    Patient.loyalty_memberships.and_(PatientLoyalty.is_deleted.is_(False))
+                ),
             )
             .order_by(Patient.last_name.asc(), Patient.first_name.asc(), Patient.hospital_number.asc())
             .offset(skip)

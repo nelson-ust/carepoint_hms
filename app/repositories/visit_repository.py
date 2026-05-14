@@ -182,16 +182,16 @@ class VisitRepository:
                 joinedload(Visit.first_service_delivery_point),
                 joinedload(Visit.current_service_delivery_point),
                 selectinload(
-                    Visit.flow_steps
-                ).filter(
-                    VisitFlowStep.is_deleted.is_(False)
+                    Visit.flow_steps.and_(
+                        VisitFlowStep.is_deleted.is_(False)
+                    )
                 ).joinedload(
                     VisitFlowStep.service_delivery_point
                 ),
                 selectinload(
-                    Visit.queue_tickets
-                ).filter(
-                    QueueTicket.is_deleted.is_(False)
+                    Visit.queue_tickets.and_(
+                        QueueTicket.is_deleted.is_(False)
+                    )
                 ).joinedload(
                     QueueTicket.service_delivery_point
                 ),
@@ -243,9 +243,9 @@ class VisitRepository:
             self.db.query(VisitFlowTemplate)
             .options(
                 selectinload(
-                    VisitFlowTemplate.steps
-                ).filter(
-                    VisitFlowTemplateStep.is_deleted.is_(False)
+                    VisitFlowTemplate.steps.and_(
+                        VisitFlowTemplateStep.is_deleted.is_(False)
+                    )
                 ).joinedload(
                     VisitFlowTemplateStep.service_delivery_point
                 )

@@ -94,9 +94,9 @@ class VisitFlowRepository:
             self.db.query(VisitFlowTemplate)
             .options(
                 selectinload(
-                    VisitFlowTemplate.steps
-                ).filter(
-                    VisitFlowTemplateStep.is_deleted.is_(False)
+                    VisitFlowTemplate.steps.and_(
+                        VisitFlowTemplateStep.is_deleted.is_(False)
+                    )
                 ).joinedload(
                     VisitFlowTemplateStep.service_delivery_point
                 )
@@ -116,9 +116,9 @@ class VisitFlowRepository:
             self.db.query(VisitFlowTemplate)
             .options(
                 selectinload(
-                    VisitFlowTemplate.steps
-                ).filter(
-                    VisitFlowTemplateStep.is_deleted.is_(False)
+                    VisitFlowTemplate.steps.and_(
+                        VisitFlowTemplateStep.is_deleted.is_(False)
+                    )
                 ).joinedload(
                     VisitFlowTemplateStep.service_delivery_point
                 )
@@ -164,9 +164,9 @@ class VisitFlowRepository:
             .filter(*base_filters)
             .options(
                 selectinload(
-                    VisitFlowTemplate.steps
-                ).filter(
-                    VisitFlowTemplateStep.is_deleted.is_(False)
+                    VisitFlowTemplate.steps.and_(
+                        VisitFlowTemplateStep.is_deleted.is_(False)
+                    )
                 ).joinedload(
                     VisitFlowTemplateStep.service_delivery_point
                 )
