@@ -86,53 +86,6 @@ def get_message_service(db: Annotated[Session, Depends(get_db)]) -> MessageServi
     return MessageService(db)
 
 
-# --- ORM -> dict helpers ---------------------------------------------------
-
-def _template_dict(t) -> dict:
-    return {
-        "id": t.id,
-        "name": t.name,
-        "code": t.code,
-        "channel": str(t.channel),
-        "subject_template": t.subject_template,
-        "body_template": t.body_template,
-        "created_at": getattr(t, "created_at", None),
-        "updated_at": getattr(t, "updated_at", None),
-    }
-
-
-def _notification_dict(n) -> dict:
-    return {
-        "id": n.id,
-        "user_id": n.user_id,
-        "patient_id": n.patient_id,
-        "template_id": n.template_id,
-        "channel": str(n.channel),
-        "status": str(n.status),
-        "recipient_address": n.recipient_address,
-        "subject": n.subject,
-        "body": n.body,
-        "payload_metadata": n.payload_metadata,
-        "scheduled_at": n.scheduled_at,
-        "created_at": getattr(n, "created_at", None),
-        "updated_at": getattr(n, "updated_at", None),
-    }
-
-
-def _message_dict(m) -> dict:
-    return {
-        "id": m.id,
-        "sender_user_id": m.sender_user_id,
-        "recipient_user_id": m.recipient_user_id,
-        "subject": m.subject,
-        "body": m.body,
-        "status": str(m.status),
-        "sent_at": m.sent_at,
-        "read_at": m.read_at,
-        "created_at": getattr(m, "created_at", None),
-    }
-
-
 # ============================================================
 # TEMPLATES
 # ============================================================
@@ -153,7 +106,7 @@ def list_templates(
 ):
     items, total = service.list_templates(skip=skip, limit=limit, channel=channel, search=search)
     return paginate_response(
-        items=[_template_dict(t) for t in items],
+        items=items,
         total=total, skip=skip, limit=limit,
         message="Notification templates fetched successfully.",
     )
@@ -171,7 +124,7 @@ def create_template(
     service: Annotated[NotificationTemplateService, Depends(get_template_service)],
 ):
     t = service.create(payload)
-    return {"success": True, "message": "Template created.", "template": _template_dict(t)}
+    return {"success": True, "message": "Template created.", "template": t}
 
 
 @router.get(
@@ -184,7 +137,7 @@ def get_template(
     _: Annotated[User, Depends(require_permission("NOTIFICATION_READ"))],
     service: Annotated[NotificationTemplateService, Depends(get_template_service)],
 ):
-    return _template_dict(service.get(template_id))
+    return service.get(template_id)
 
 
 @router.put(
@@ -199,7 +152,7 @@ def update_template(
     service: Annotated[NotificationTemplateService, Depends(get_template_service)],
 ):
     t = service.update(template_id, payload)
-    return {"success": True, "message": "Template updated.", "template": _template_dict(t)}
+    return {"success": True, "message": "Template updated.", "template": t}
 
 
 @router.delete(
@@ -241,7 +194,7 @@ def list_notifications(
         channel=channel, status=status_filter,
     )
     return paginate_response(
-        items=[_notification_dict(n) for n in items],
+        items=items,
         total=total, skip=skip, limit=limit,
         message="Notifications fetched successfully.",
     )
@@ -257,7 +210,7 @@ def get_notification(
     _: Annotated[User, Depends(require_permission("NOTIFICATION_READ"))],
     service: Annotated[NotificationService, Depends(get_notification_service)],
 ):
-    return _notification_dict(service.get(notification_id))
+    return service.get(notification_id)
 
 
 @router.post(
@@ -276,7 +229,7 @@ def dispatch_from_template(
     return {
         "success": True,
         "message": f"Notification dispatched ({n.status}).",
-        "notification": _notification_dict(n),
+        "notification": n,
     }
 
 
@@ -296,7 +249,7 @@ def dispatch_ad_hoc(
     return {
         "success": True,
         "message": f"Notification dispatched ({n.status}).",
-        "notification": _notification_dict(n),
+        "notification": n,
     }
 
 
@@ -334,7 +287,7 @@ def mark_read(
     return {
         "success": True,
         "message": "Notification marked READ.",
-        "notification": _notification_dict(n),
+        "notification": n,
     }
 
 
@@ -356,7 +309,7 @@ def message_inbox(
 ):
     items, total = service.list_inbox(actor.id, skip=skip, limit=limit)
     return paginate_response(
-        items=[_message_dict(m) for m in items],
+        items=items,
         total=total, skip=skip, limit=limit,
         message="Inbox fetched successfully.",
     )
@@ -375,7 +328,7 @@ def message_sent(
 ):
     items, total = service.list_sent(actor.id, skip=skip, limit=limit)
     return paginate_response(
-        items=[_message_dict(m) for m in items],
+        items=items,
         total=total, skip=skip, limit=limit,
         message="Sent messages fetched successfully.",
     )
@@ -394,7 +347,7 @@ def send_message(
     service: Annotated[MessageService, Depends(get_message_service)],
 ):
     m = service.send(actor.id, payload)
-    return {"success": True, "message": "Message sent.", "direct_message": _message_dict(m)}
+    return {"success": True, "message": "Message sent.", "direct_message": m}
 
 
 @router.post(
@@ -408,7 +361,7 @@ def mark_message_read(
     service: Annotated[MessageService, Depends(get_message_service)],
 ):
     m = service.mark_read(message_id)
-    return {"success": True, "message": "Message marked read.", "direct_message": _message_dict(m)}
+    return {"success": True, "message": "Message marked read.", "direct_message": m}
 
 
 @router.get(
@@ -421,4 +374,4 @@ def get_message(
     actor: CurrentActiveUser,
     service: Annotated[MessageService, Depends(get_message_service)],
 ):
-    return _message_dict(service.get(message_id))
+    return service.get(message_id)

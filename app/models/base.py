@@ -179,6 +179,7 @@ class BaseTable:
         DateTime(timezone=True),
         nullable=False,
         default=utc_now,
+        index=True,
         doc="UTC timestamp when the record was created.",
     )
 

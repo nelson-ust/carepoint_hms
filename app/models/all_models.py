@@ -2768,7 +2768,7 @@ class Notification(TenantTable):
 
     user_id: Mapped[Optional[int]] = mapped_column(ForeignKey("user.id"), nullable=True, index=True)
     patient_id: Mapped[Optional[int]] = mapped_column(ForeignKey("patient.id"), nullable=True, index=True)
-    template_id: Mapped[Optional[int]] = mapped_column(ForeignKey("notification_template.id"), nullable=True)
+    template_id: Mapped[Optional[int]] = mapped_column(ForeignKey("notification_template.id"), nullable=True, index=True)
 
     # Canonical event code (matches NotificationEvent enum). Optional for
     # backward compatibility — older rows may not have one.
@@ -2792,7 +2792,7 @@ class Notification(TenantTable):
 
     payload_metadata: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
 
-    scheduled_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    scheduled_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
     sent_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     delivered_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     read_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
