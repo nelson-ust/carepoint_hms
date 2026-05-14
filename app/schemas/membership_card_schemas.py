@@ -3,9 +3,9 @@ from __future__ import annotations
 
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Optional
+from typing import Optional, Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.core.enums import MembershipCardStatus, MembershipCardTransactionType
 
@@ -72,8 +72,44 @@ class MembershipCardRead(MembershipCardBase):
     issuing_facility_id: int
     issued_by_id: int
     date_issued: date
+    patient_name: Optional[str] = None
+    patient_phone: Optional[str] = None
 
     model_config = ConfigDict(from_attributes=True)
+
+    @model_validator(mode="before")
+    @classmethod
+    def populate_patient_details(cls, data: Any) -> Any:
+        # Handle ORM object
+        if hasattr(data, "patient") and data.patient:
+            patient = data.patient
+            if not getattr(data, "patient_name", None):
+                first_name = getattr(patient, "first_name", "")
+                last_name = getattr(patient, "last_name", "")
+                middle_name = getattr(patient, "middle_name", "")
+                name_parts = [p for p in [first_name, middle_name, last_name] if p]
+                setattr(data, "patient_name", " ".join(name_parts))
+            if not getattr(data, "patient_phone", None):
+                setattr(data, "patient_phone", getattr(patient, "phone_number", None))
+        # Handle dictionary (e.g. from JSON)
+        elif isinstance(data, dict) and "patient" in data and data["patient"]:
+            patient = data["patient"]
+            if not data.get("patient_name"):
+                if isinstance(patient, dict):
+                    first_name = patient.get("first_name", "")
+                    last_name = patient.get("last_name", "")
+                    middle_name = patient.get("middle_name", "")
+                    name_parts = [p for p in [first_name, middle_name, last_name] if p]
+                    data["patient_name"] = " ".join(name_parts)
+                    data["patient_phone"] = patient.get("phone_number")
+                else:
+                    first_name = getattr(patient, "first_name", "")
+                    last_name = getattr(patient, "last_name", "")
+                    middle_name = getattr(patient, "middle_name", "")
+                    name_parts = [p for p in [first_name, middle_name, last_name] if p]
+                    data["patient_name"] = " ".join(name_parts)
+                    data["patient_phone"] = getattr(patient, "phone_number", None)
+        return data
 
 
 class MembershipCardWithTransactions(MembershipCardRead):

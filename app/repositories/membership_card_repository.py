@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from typing import Optional, List
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import select
 
 from app.models.all_models import MembershipCard, MembershipCardTransaction
@@ -14,13 +14,38 @@ class MembershipCardRepository:
         self.db = db
 
     def get_by_id(self, card_id: int) -> Optional[MembershipCard]:
-        return self.db.query(MembershipCard).filter(MembershipCard.id == card_id).first()
+        return (
+            self.db.query(MembershipCard)
+            .options(joinedload(MembershipCard.patient))
+            .filter(MembershipCard.id == card_id)
+            .first()
+        )
 
     def get_by_card_number(self, card_number: str) -> Optional[MembershipCard]:
-        return self.db.query(MembershipCard).filter(MembershipCard.card_number == card_number).first()
+        return (
+            self.db.query(MembershipCard)
+            .options(joinedload(MembershipCard.patient))
+            .filter(MembershipCard.card_number == card_number)
+            .first()
+        )
 
     def get_by_patient_id(self, patient_id: int) -> List[MembershipCard]:
-        return self.db.query(MembershipCard).filter(MembershipCard.patient_id == patient_id).all()
+        return (
+            self.db.query(MembershipCard)
+            .options(joinedload(MembershipCard.patient))
+            .filter(MembershipCard.patient_id == patient_id)
+            .all()
+        )
+
+    def list_cards(self, skip: int = 0, limit: int = 100) -> List[MembershipCard]:
+        return (
+            self.db.query(MembershipCard)
+            .options(joinedload(MembershipCard.patient))
+            .order_by(MembershipCard.date_issued.desc())
+            .offset(skip)
+            .limit(limit)
+            .all()
+        )
 
     def create_card(self, card: MembershipCard) -> MembershipCard:
         self.db.add(card)

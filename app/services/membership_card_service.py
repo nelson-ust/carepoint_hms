@@ -83,6 +83,9 @@ class MembershipCardService:
     def list_patient_cards(self, patient_id: int) -> List[MembershipCard]:
         return self.repository.get_by_patient_id(patient_id)
 
+    def list_cards(self, skip: int = 0, limit: int = 100) -> List[MembershipCard]:
+        return self.repository.list_cards(skip=skip, limit=limit)
+
     def update_card(self, card_id: int, payload: MembershipCardUpdate) -> MembershipCard:
         card = self.get_card(card_id)
         

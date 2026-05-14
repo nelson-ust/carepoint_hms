@@ -19,11 +19,11 @@ from app.schemas.membership_card_schemas import (
 )
 from app.services.membership_card_service import MembershipCardService
 
-router = APIRouter()
+router = APIRouter(strict_slashes=False)
 
 
 @router.post(
-    "/",
+    "",
     response_model=MembershipCardRead,
     status_code=status.HTTP_201_CREATED,
     dependencies=[Depends(require_permission("PATIENT_CARD_CREATE"))],
@@ -36,6 +36,21 @@ def create_membership_card(
     """Issue a new membership card to a patient."""
     service = MembershipCardService(db)
     return service.create_card(payload, issued_by_id=current_user.id)
+
+
+@router.get(
+    "",
+    response_model=List[MembershipCardRead],
+    dependencies=[Depends(require_permission("PATIENT_CARD_VIEW"))],
+)
+def list_membership_cards(
+    db=Depends(get_db),
+    skip: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=500),
+):
+    """List all membership cards issued in the system."""
+    service = MembershipCardService(db)
+    return service.list_cards(skip=skip, limit=limit)
 
 
 @router.get(
