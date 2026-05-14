@@ -52,7 +52,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Any, Optional
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
 
 from app.core.enums import (
     BloodGroup,
@@ -951,7 +951,7 @@ class PatientReadSchema(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
-    global_patient_id: str
+    global_patient_id: Optional[str] = ""
     hospital_number: str
 
     first_name: str
@@ -996,6 +996,17 @@ class PatientReadSchema(BaseModel):
 
     photo: Optional[PatientPhotoSchema] = None
 
+    @model_validator(mode="before")
+    @classmethod
+    def resolve_photo_and_defaults(cls, data: Any) -> Any:
+        if hasattr(data, "photo_file_name") and (data.photo_file_name or data.photo_file_url):
+            data.photo = {
+                "file_name": data.photo_file_name,
+                "file_key": data.photo_file_key,
+                "file_url": data.photo_file_url,
+            }
+        return data
+
     registrations: list[PatientRegistrationReadSchema] = Field(default_factory=list)
     identifiers: list[PatientIdentifierReadSchema] = Field(default_factory=list)
 
@@ -1016,11 +1027,20 @@ class PatientExtendedReadSchema(PatientReadSchema):
     scanned_forms: list[PatientScannedFormReadSchema] = Field(default_factory=list)
     demographic_audits: list[PatientDemographicAuditReadSchema] = Field(default_factory=list)
 
+    @model_validator(mode="before")
+    @classmethod
+    def map_extended_relationships(cls, data: Any) -> Any:
+        # Map ORM relationship names to schema field names if they differ
+        if hasattr(data, "attachments") and not hasattr(data, "document_attachments"):
+            data.document_attachments = data.attachments
+        return data
+
 
 class PatientListItemSchema(BaseModel):
     """
     Patient list item schema for MPI list/search results.
     """
+    model_config = ConfigDict(from_attributes=True)
 
     id: int
     hospital_number: str

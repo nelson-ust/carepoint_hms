@@ -31,46 +31,6 @@ def get_invoice_service(db: Annotated[Session, Depends(get_db)]) -> InvoiceServi
     return InvoiceService(db)
 
 
-def _serialize_item(i) -> dict:
-    return {
-        "id": i.id,
-        "invoice_id": i.invoice_id,
-        "billable_service_id": i.billable_service_id,
-        "service_name": i.service_name,
-        "service_code": i.service_code,
-        "quantity": i.quantity,
-        "unit_price": i.unit_price,
-        "discount_amount": i.discount_amount,
-        "line_total": i.line_total,
-        "source_reference": i.source_reference,
-        "created_at": getattr(i, "created_at", None),
-    }
-
-
-def _serialize_invoice(inv) -> dict:
-    return {
-        "id": inv.id,
-        "patient_id": inv.patient_id,
-        "visit_id": inv.visit_id,
-        "billing_id": inv.billing_id,
-        "payer_id": inv.payer_id,
-        "invoice_no": inv.invoice_no,
-        "status": str(inv.status),
-        "invoice_date": inv.invoice_date,
-        "due_date": inv.due_date,
-        "subtotal_amount": inv.subtotal_amount,
-        "discount_amount": inv.discount_amount,
-        "tax_amount": inv.tax_amount,
-        "total_amount": inv.total_amount,
-        "amount_paid": inv.amount_paid,
-        "balance_due": inv.balance_due,
-        "note": inv.note,
-        "items": [_serialize_item(i) for i in (inv.items or []) if not getattr(i, "is_deleted", False)],
-        "created_at": getattr(inv, "created_at", None),
-        "updated_at": getattr(inv, "updated_at", None),
-    }
-
-
 @router.get(
     "/",
     response_model=InvoiceListResponseSchema,
@@ -89,8 +49,10 @@ def list_invoices(
         skip=skip, limit=limit, patient_id=patient_id, visit_id=visit_id, status=status_filter,
     )
     return paginate_response(
-        items=[_serialize_invoice(inv) for inv in items],
-        total=total, skip=skip, limit=limit,
+        items=items,
+        total=total,
+        skip=skip,
+        limit=limit,
         message="Invoices fetched successfully.",
     )
 
@@ -107,8 +69,10 @@ def list_for_visit(
 ):
     items = service.list_for_visit(visit_id)
     return paginate_response(
-        items=[_serialize_invoice(inv) for inv in items],
-        total=len(items), skip=0, limit=len(items) or 1,
+        items=items,
+        total=len(items),
+        skip=0,
+        limit=len(items) or 1,
         message="Invoices fetched successfully.",
     )
 
@@ -126,7 +90,7 @@ def issue_from_billing(
     service: Annotated[InvoiceService, Depends(get_invoice_service)],
 ):
     invoice = service.issue_from_billing(payload, actor_user_id=actor.id)
-    return {"success": True, "message": "Invoice issued.", "invoice": _serialize_invoice(invoice)}
+    return {"success": True, "message": "Invoice issued.", "invoice": invoice}
 
 
 @router.get(
@@ -139,7 +103,7 @@ def get_invoice(
     _: Annotated[User, Depends(require_permission("BILLING_READ"))],
     service: Annotated[InvoiceService, Depends(get_invoice_service)],
 ):
-    return _serialize_invoice(service.get(invoice_id))
+    return service.get(invoice_id)
 
 
 @router.post(
@@ -155,4 +119,4 @@ def void_invoice(
     service: Annotated[InvoiceService, Depends(get_invoice_service)],
 ):
     invoice = service.void_invoice(invoice_id, reason=payload.reason, actor_user_id=actor.id)
-    return {"success": True, "message": "Invoice voided.", "invoice": _serialize_invoice(invoice)}
+    return {"success": True, "message": "Invoice voided.", "invoice": invoice}

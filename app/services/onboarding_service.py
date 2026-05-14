@@ -168,8 +168,13 @@ class OnboardingService:
         s3_key = f"onboarding/{invitation.id}/{timestamp}_{file.filename}"
         
         # Upload to S3
-        # Assuming the tenant bucket is available or use a global one
-        bucket_name = getattr(settings, "AWS_S3_BUCKET_NAME", "carepoint-onboarding")
+        # Prioritize tenant-specific bucket from context
+        from app.utils.s3_utils import get_bucket_name
+        try:
+            bucket_name = get_bucket_name()
+        except Exception:
+            bucket_name = getattr(settings, "AWS_S3_BUCKET_NAME", "carepoint-onboarding")
+            
         file_url = self.s3_service.upload_file(bucket_name, file, s3_key)
         
         if not file_url:

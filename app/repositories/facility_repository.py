@@ -1,5 +1,5 @@
 from typing import List, Optional, Type
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload, selectinload
 from sqlalchemy import select
 
 from app.models.all_models import Facility, FacilityNetwork, FacilityServiceArea
@@ -22,13 +22,28 @@ class FacilityRepository:
         """
         Retrieve all facilities for the current tenant.
         """
-        return self.db.query(Facility).all()
+        return (
+            self.db.query(Facility)
+            .options(
+                joinedload(Facility.network),
+                selectinload(Facility.service_areas)
+            )
+            .all()
+        )
 
     def get_facility(self, facility_id: int) -> Optional[Facility]:
         """
         Retrieve a specific facility by its ID.
         """
-        return self.db.query(Facility).filter(Facility.id == facility_id).first()
+        return (
+            self.db.query(Facility)
+            .options(
+                joinedload(Facility.network),
+                selectinload(Facility.service_areas)
+            )
+            .filter(Facility.id == facility_id)
+            .first()
+        )
 
     def get_facility_by_code(self, code: str) -> Optional[Facility]:
         """

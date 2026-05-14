@@ -1,6 +1,31 @@
 # app/services/consultation_service.py
 from __future__ import annotations
 
+"""
+app.services.consultation_service
+
+Service layer for clinical consultations and encounter management.
+
+Purpose
+-------
+This module orchestrates the clinical encounter workflow, ensuring that 
+consultations are correctly initiated, updated, and finalized. It handles 
+integration with visit routing and enforces business rules for medical 
+documentation.
+
+Workflow State Machine
+----------------------
+OPEN -> AMENDED (if updated after finalization)
+     -> CLOSED (on finalization)
+     -> CANCELLED (on voiding)
+
+Business Rules
+--------------
+- Only one OPEN consultation can exist for a visit at a time.
+- Consultations must be initiated from a clinical Service Delivery Point (CLINIC, EMERGENCY, WARD).
+- Finalization can trigger automatic visit termination or routing to ancillary services (Lab, Pharmacy, etc.).
+"""
+
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -23,38 +48,60 @@ _TERMINAL_VISIT = {VisitStatus.COMPLETED, VisitStatus.CANCELLED}
 
 class ConsultationService:
     """
-    Service layer for clinical consultations.
-
-    Lifecycle
-    ---------
-    OPEN -> AMENDED (on edit-after-finalize) | CLOSED (on finalize)
+    Business logic coordinator for clinical consultations.
     """
 
     def __init__(self, db: Session) -> None:
         self.db = db
         self.repository = ConsultationRepository(db)
 
-    # ---- READ ----
+    # ============================================================
+    # READ OPERATIONS
+    # ============================================================
+
     def list_for_visit(self, visit_id: int, *, skip: int = 0, limit: int = 20):
+        """
+        Fetch all clinical notes recorded during a specific visit.
+        """
         return self.repository.list_for_visit(visit_id, skip=skip, limit=limit)
 
+
     def get(self, consultation_id: int) -> Consultation:
+        """
+        Retrieve a single consultation record with full clinical context.
+        """
         return self.repository.get_required_by_id(consultation_id)
 
-    # ---- WRITE ----
+
+    # ============================================================
+    # WRITE OPERATIONS
+    # ============================================================
+
     def create(
         self,
         payload: ConsultationCreateSchema,
         *,
         actor_user_id: Optional[int] = None,
     ) -> Consultation:
+        """
+        Initiate a new clinical consultation encounter.
+        
+        Orchestration:
+        - Validates visit state.
+        - Checks for existing open encounters to prevent data fragmentation.
+        - Enforces clinical service point context.
+        - Creates the initial record and flushes to capture the primary key.
+        """
         visit = self.repository.get_required_visit(payload.visit_id)
+        
+        # 1. Integrity check: Visit must be active
         if visit.status in _TERMINAL_VISIT:
             raise BadRequestError(
                 message="Cannot start a consultation on a closed visit.",
                 detail={"visit_status": str(visit.status)},
             )
 
+        # 2. Integrity check: Prevent multiple open encounters
         existing_open = self.repository.get_open_for_visit(visit.id)
         if existing_open is not None:
             raise BadRequestError(
@@ -62,7 +109,7 @@ class ConsultationService:
                 detail={"existing_consultation_id": existing_open.id},
             )
 
-        # Enforce SDP validation and get current step
+        # 3. Context validation: User must be in a Clinical SDP
         current_step = validate_visit_sdp_activity(
             self.db,
             visit_id=visit.id,
@@ -70,6 +117,7 @@ class ConsultationService:
             activity_name="Consultation",
         )
 
+        # 4. Persistence
         consultation = self.repository.create(
             visit_id=visit.id,
             visit_flow_step_id=current_step.id,
@@ -82,6 +130,7 @@ class ConsultationService:
         self.db.commit()
         return self.repository.get_required_by_id(consultation.id)
 
+
     def update(
         self,
         consultation_id: int,
@@ -89,19 +138,28 @@ class ConsultationService:
         *,
         actor_user_id: Optional[int] = None,
     ) -> Consultation:
+        """
+        Update clinical notes on a consultation.
+        
+        Note: If the consultation is already CLOSED, this action marks it 
+        as AMENDED to preserve audit integrity.
+        """
         consultation = self.repository.get_required_by_id(consultation_id)
 
         was_closed = consultation.status == EncounterStatus.CLOSED
 
+        # Apply updates
         for field, value in payload.model_dump(exclude_unset=True).items():
             setattr(consultation, field, value)
 
+        # Maintain state integrity
         if was_closed:
             consultation.status = EncounterStatus.AMENDED
 
         self.repository.save(consultation)
         self.db.commit()
         return self.repository.get_required_by_id(consultation.id)
+
 
     def finalize(
         self,
@@ -111,20 +169,29 @@ class ConsultationService:
         actor_user_id: Optional[int] = None,
     ) -> Consultation:
         """
-        Finalize a consultation. Either route the patient to a next service
-        delivery point (lab/pharmacy/cashier/etc.) or end the visit.
+        Finalize a consultation encounter and decide the patient's next destination.
+        
+        Workflow Outcomes:
+        - Route to Ancillary: Sends patient to Lab, Pharmacy, or Cashier.
+        - End Visit: Completes the entire visit lifecycle.
         """
         consultation = self.repository.get_required_by_id(consultation_id)
+        
         if consultation.status == EncounterStatus.CANCELLED:
             raise BadRequestError(message="Cancelled consultations cannot be finalized.")
 
+        # 1. State transition
         consultation.status = EncounterStatus.CLOSED
         consultation.consultation_ended_at = datetime.now(timezone.utc)
+        
+        # Append closing note to plan if provided
         if payload.closing_note:
             existing = consultation.plan_note or ""
             consultation.plan_note = (existing + ("\n\n" if existing else "") + payload.closing_note).strip()
+        
         self.repository.save(consultation)
 
+        # 2. Visit Lifecycle Routing
         if payload.end_visit:
             end_visit(self.db, visit_id=consultation.visit_id, actor_user_id=actor_user_id)
         elif payload.next_service_delivery_point_id is not None:
@@ -139,6 +206,7 @@ class ConsultationService:
         self.db.commit()
         return self.repository.get_required_by_id(consultation.id)
 
+
     def cancel(
         self,
         consultation_id: int,
@@ -146,17 +214,27 @@ class ConsultationService:
         reason: Optional[str] = None,
         actor_user_id: Optional[int] = None,
     ) -> Consultation:
+        """
+        Void a consultation record. 
+        
+        Only OPEN or AMENDED consultations can be cancelled.
+        """
         consultation = self.repository.get_required_by_id(consultation_id)
+        
         if consultation.status in {EncounterStatus.CLOSED, EncounterStatus.CANCELLED}:
             raise BadRequestError(
-                message="Consultation is no longer open.",
+                message="Consultation is no longer open and cannot be cancelled.",
                 detail={"status": str(consultation.status)},
             )
+            
         consultation.status = EncounterStatus.CANCELLED
         consultation.consultation_ended_at = datetime.now(timezone.utc)
+        
+        # Append cancellation audit note
         if reason:
             note = consultation.plan_note or ""
             consultation.plan_note = (note + ("\n\n" if note else "") + f"[CANCELLED] {reason}").strip()
+            
         self.repository.save(consultation)
         self.db.commit()
         return self.repository.get_required_by_id(consultation.id)

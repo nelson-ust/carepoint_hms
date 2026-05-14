@@ -30,6 +30,7 @@ class DatabaseBackupReadSchema(BaseModel):
     s3_key: Optional[str] = Field(None, description="The S3 bucket key for the artifact")
     size_bytes: Optional[int] = Field(None, description="Size of the backup artifact in bytes")
     status: str = Field(..., description="Current status: PENDING, COMPLETED, FAILED, EXPIRED")
+    storage_location: str = Field("LOCAL", description="Where the backup is stored: LOCAL, S3")
     error_message: Optional[str] = Field(None, description="Error details if the backup failed")
 
     # Encryption / integrity

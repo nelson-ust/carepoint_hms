@@ -31,26 +31,6 @@ def get_lab_result_service(db: Annotated[Session, Depends(get_db)]) -> LabResult
     return LabResultService(db)
 
 
-def _serialize(r) -> dict:
-    return {
-        "id": r.id,
-        "lab_order_item_id": r.lab_order_item_id,
-        "entered_by_staff_id": r.entered_by_staff_id,
-        "verified_by_staff_id": r.verified_by_staff_id,
-        "result_status": str(r.result_status),
-        "result_value": r.result_value,
-        "result_text": r.result_text,
-        "unit_of_measure": r.unit_of_measure,
-        "reference_range": r.reference_range,
-        "interpretation": r.interpretation,
-        "entered_at": r.entered_at,
-        "verified_at": r.verified_at,
-        "released_at": r.released_at,
-        "created_at": getattr(r, "created_at", None),
-        "updated_at": getattr(r, "updated_at", None),
-    }
-
-
 @router.post(
     "/",
     response_model=LabResultActionResponseSchema,
@@ -64,7 +44,7 @@ def enter_result(
     _: Annotated[User, Depends(require_permission("LAB_RESULT_ENTER"))],
 ):
     result = service.enter_result(payload, actor_user_id=actor.id)
-    return {"success": True, "message": "Lab result recorded.", "result": _serialize(result)}
+    return {"success": True, "message": "Lab result recorded.", "result": result}
 
 
 @router.put(
@@ -80,7 +60,7 @@ def update_result(
     _: Annotated[User, Depends(require_permission("LAB_RESULT_ENTER"))],
 ):
     result = service.update_result(result_id, payload, actor_user_id=actor.id)
-    return {"success": True, "message": "Lab result updated.", "result": _serialize(result)}
+    return {"success": True, "message": "Lab result updated.", "result": result}
 
 
 @router.post(
@@ -96,7 +76,7 @@ def verify_result(
     _: Annotated[User, Depends(require_permission("LAB_RESULT_VERIFY"))],
 ):
     result = service.verify_result(result_id, payload, actor_user_id=actor.id)
-    return {"success": True, "message": "Lab result verified.", "result": _serialize(result)}
+    return {"success": True, "message": "Lab result verified.", "result": result}
 
 
 @router.post(
@@ -112,7 +92,7 @@ def release_result(
     _: Annotated[User, Depends(require_permission("LAB_RESULT_RELEASE"))],
 ):
     result = service.release_result(result_id, payload, actor_user_id=actor.id)
-    return {"success": True, "message": "Lab result released.", "result": _serialize(result)}
+    return {"success": True, "message": "Lab result released.", "result": result}
 
 
 @router.post(
@@ -128,7 +108,7 @@ def cancel_result(
     reason: Optional[str] = Query(None, max_length=500),
 ):
     result = service.cancel_result(result_id, reason=reason, actor_user_id=actor.id)
-    return {"success": True, "message": "Lab result cancelled.", "result": _serialize(result)}
+    return {"success": True, "message": "Lab result cancelled.", "result": result}
 
 
 @router.get(
@@ -141,7 +121,7 @@ def get_result(
     _: Annotated[User, Depends(require_permission("LAB_RESULT_ENTER", "LAB_RESULT_VERIFY", "LAB_RESULT_RELEASE"))],
     service: Annotated[LabResultService, Depends(get_lab_result_service)],
 ):
-    return _serialize(service.get(result_id))
+    return service.get(result_id)
 
 
 @router.get(
@@ -171,4 +151,4 @@ def get_by_item(
             "verified_at": None,
             "released_at": None,
         }
-    return _serialize(result)
+    return result

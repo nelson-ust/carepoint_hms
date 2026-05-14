@@ -33,7 +33,7 @@ from app.services.admission_service import _OPEN_STATES
 from app.utils.charge_capture import capture_bed_day_charges_for_admission
 # from app.services.staff_leave_service import StaffLeaveService
 from app.models.all_models import PatientPortalOtp, UserSession
-from app.services.database_backup_service import DatabaseBackupService
+# Legacy backup service removed
 
 try:
     from app.services.tenant_job_runner import run_tenant_jobs
@@ -164,15 +164,18 @@ def _run_otp_cleanup():
             logger.error(f"Error during cleanup for tenant {tenant_code}: {e}")
 
 
+from app.services.tenant_backup_service import TenantBackupService
+
+
 def _run_daily_backups():
     """Execute automated database backups for all active tenants."""
     logger.info("Starting automated daily backups across all tenants.")
     for tenant_code, engine in _get_active_tenant_engines():
         try:
             with Session(engine) as tenant_db:
-                service = DatabaseBackupService(tenant_db, tenant_code)
-                logger.info(f"Triggering backup for tenant: {tenant_code}")
-                service.trigger_backup()
+                service = TenantBackupService(tenant_db, tenant_code)
+                logger.info(f"Triggering automated backup for tenant: {tenant_code}")
+                service.create_backup(triggered_by="SCHEDULED")
         except Exception as e:
             logger.error(f"Failed to run automated backup for tenant {tenant_code}: {e}")
 
@@ -191,8 +194,8 @@ def start_scheduler() -> None:
     _scheduler.add_job(
         _run_daily_bed_day_rollover,
         trigger="cron",
-        hour=0,
-        minute=5,
+        hour=15,
+        minute=12,
         id="daily_bed_day_rollover",
         replace_existing=True,
     )
@@ -220,8 +223,8 @@ def start_scheduler() -> None:
     _scheduler.add_job(
         _run_daily_backups,
         trigger="cron",
-        hour=1,
-        minute=0,
+        hour=15,
+        minute=20,
         id="daily_database_backups",
         replace_existing=True,
     )

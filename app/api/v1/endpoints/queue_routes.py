@@ -55,25 +55,9 @@ def get_queue_service(db: Annotated[Session, Depends(get_db)]) -> QueueService:
     return QueueService(db)
 
 
-def _serialize_ticket(t) -> dict:
-    return {
-        "id": t.id,
-        "visit_id": t.visit_id,
-        "visit_flow_step_id": t.visit_flow_step_id,
-        "patient_id": t.patient_id,
-        "service_delivery_point_id": t.service_delivery_point_id,
-        "queue_number": t.queue_number,
-        "queue_position": t.queue_position,
-        "status": str(t.status),
-        "called_at": t.called_at,
-        "service_started_at": t.service_started_at,
-        "service_ended_at": t.service_ended_at,
-        "transferred_from_ticket_id": t.transferred_from_ticket_id,
-        "created_at": getattr(t, "created_at", None),
-        "updated_at": getattr(t, "updated_at", None),
-        "previous_steps": getattr(t, "previous_steps", []),
-    }
-
+# ============================================================
+# READ ROUTES
+# ============================================================
 
 @router.get(
     "/my-worklist",
@@ -87,20 +71,9 @@ def get_my_worklist(
 ):
     """
     Returns the worklist for the staff member's assigned service delivery
-    point. Errors with 400 if the caller has no assigned SDP on their
-    StaffProfile or if the requested SDP is not assigned to them.
+    point.
     """
-    data = service.get_my_worklist(actor, sdp_id=service_delivery_point_id)
-    return {
-        "success": True,
-        "message": "Worklist fetched successfully.",
-        "service_delivery_point_id": data["service_delivery_point_id"],
-        "service_delivery_point_name": data["service_delivery_point_name"],
-        "waiting": [_serialize_ticket(t) for t in data["waiting"]],
-        "serving": [_serialize_ticket(t) for t in data["serving"]],
-        "served_today": data["served_today"],
-        "cancelled_today": data["cancelled_today"],
-    }
+    return service.get_my_worklist(actor, sdp_id=service_delivery_point_id)
 
 
 @router.get(
@@ -113,17 +86,7 @@ def get_worklist(
     _: Annotated[User, Depends(require_assigned_to_sdp(sdp_param_name="service_delivery_point_id"))],
     service: Annotated[QueueService, Depends(get_queue_service)],
 ):
-    data = service.get_worklist(service_delivery_point_id)
-    return {
-        "success": True,
-        "message": "Worklist fetched successfully.",
-        "service_delivery_point_id": data["service_delivery_point_id"],
-        "service_delivery_point_name": data["service_delivery_point_name"],
-        "waiting": [_serialize_ticket(t) for t in data["waiting"]],
-        "serving": [_serialize_ticket(t) for t in data["serving"]],
-        "served_today": data["served_today"],
-        "cancelled_today": data["cancelled_today"],
-    }
+    return service.get_worklist(service_delivery_point_id)
 
 
 @router.get(
@@ -145,7 +108,7 @@ def list_service_point_tickets(
         service_delivery_point_id, statuses=statuses, skip=skip, limit=limit
     )
     return paginate_response(
-        items=[_serialize_ticket(t) for t in items],
+        items=items,
         total=total,
         skip=skip,
         limit=limit,
@@ -165,7 +128,7 @@ def list_visit_tickets(
 ):
     items = service.list_for_visit(visit_id)
     return paginate_response(
-        items=[_serialize_ticket(t) for t in items],
+        items=items,
         total=len(items),
         skip=0,
         limit=len(items) or 1,
@@ -183,8 +146,12 @@ def get_ticket(
     _: Annotated[User, Depends(require_any_permission("VISIT_READ", "PATIENTS:VIEW"))],
     service: Annotated[QueueService, Depends(get_queue_service)],
 ):
-    return _serialize_ticket(service.get_ticket(ticket_id))
+    return service.get_ticket(ticket_id)
 
+
+# ============================================================
+# MUTATION ROUTES
+# ============================================================
 
 @router.post(
     "/tickets/{ticket_id}/call",
@@ -201,7 +168,7 @@ def call_ticket(
     __: Annotated[User, Depends(require_assigned_to_ticket_sdp())],
 ):
     ticket = service.call_ticket(ticket_id, actor_user_id=actor.id)
-    return {"success": True, "message": "Ticket called.", "ticket": _serialize_ticket(ticket)}
+    return {"success": True, "message": "Ticket called.", "ticket": ticket}
 
 
 @router.post(
@@ -218,7 +185,7 @@ def start_serving_ticket(
     __: Annotated[User, Depends(require_assigned_to_ticket_sdp())],
 ):
     ticket = service.start_serving(ticket_id, actor_user_id=actor.id)
-    return {"success": True, "message": "Ticket serving started.", "ticket": _serialize_ticket(ticket)}
+    return {"success": True, "message": "Ticket serving started.", "ticket": ticket}
 
 
 @router.post(
@@ -235,7 +202,7 @@ def complete_ticket(
     __: Annotated[User, Depends(require_assigned_to_ticket_sdp())],
 ):
     ticket = service.complete_ticket(ticket_id, actor_user_id=actor.id)
-    return {"success": True, "message": "Ticket completed.", "ticket": _serialize_ticket(ticket)}
+    return {"success": True, "message": "Ticket completed.", "ticket": ticket}
 
 
 @router.post(
@@ -254,9 +221,6 @@ def complete_and_route_ticket(
     """
     Mark the current ticket SERVED, close the linked visit-flow step, then
     create a brand-new VisitFlowStep + QueueTicket at the requested SDP.
-
-    This is the canonical "I'm done with this patient at this workstation;
-    send them on to the next one" verb.
     """
     new_ticket = service.complete_and_route_to(
         ticket_id,
@@ -267,7 +231,7 @@ def complete_and_route_ticket(
     return {
         "success": True,
         "message": "Patient handed off to the next service delivery point.",
-        "ticket": _serialize_ticket(new_ticket),
+        "ticket": new_ticket,
     }
 
 
@@ -314,7 +278,7 @@ def miss_ticket(
     __: Annotated[User, Depends(require_assigned_to_ticket_sdp())],
 ):
     ticket = service.mark_missed(ticket_id, actor_user_id=actor.id)
-    return {"success": True, "message": "Ticket marked missed.", "ticket": _serialize_ticket(ticket)}
+    return {"success": True, "message": "Ticket marked missed.", "ticket": ticket}
 
 
 @router.post(
@@ -331,7 +295,7 @@ def cancel_ticket(
     __: Annotated[User, Depends(require_assigned_to_ticket_sdp())],
 ):
     ticket = service.cancel_ticket(ticket_id, reason=payload.reason, actor_user_id=actor.id)
-    return {"success": True, "message": "Ticket cancelled.", "ticket": _serialize_ticket(ticket)}
+    return {"success": True, "message": "Ticket cancelled.", "ticket": ticket}
 
 
 @router.post(
@@ -349,8 +313,6 @@ def transfer_ticket(
 ):
     """
     Use this for routing **errors** (patient was placed in the wrong queue).
-    For the normal "completed here, send to next SDP" handoff, use
-    `/tickets/{id}/complete-and-route` instead.
     """
     new_ticket = service.transfer_ticket(
         ticket_id,
@@ -361,5 +323,5 @@ def transfer_ticket(
     return {
         "success": True,
         "message": "Ticket transferred. New ticket created at the target service point.",
-        "ticket": _serialize_ticket(new_ticket),
+        "ticket": new_ticket,
     }

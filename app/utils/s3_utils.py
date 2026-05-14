@@ -114,9 +114,22 @@ def get_s3_client():
 
 def get_bucket_name() -> str:
     """
-    Return the configured S3 bucket name.
+    Return the S3 bucket name. 
+    Prioritizes the tenant-specific bucket from the request context, 
+    falling back to the global AWS_S3_BUCKET_NAME setting.
     """
     _require_s3_config()
+    
+    # 1. Check request context for active tenant bucket
+    try:
+        from app.core.multitenancy import get_current_tenant
+        tenant = get_current_tenant()
+        if tenant and tenant.aws_s3_bucket_name:
+            return tenant.aws_s3_bucket_name
+    except Exception:
+        pass
+        
+    # 2. Fallback to global setting
     return settings.AWS_S3_BUCKET_NAME
 
 

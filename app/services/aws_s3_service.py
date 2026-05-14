@@ -49,16 +49,20 @@ class S3Service:
             logger.error(f"Failed to create S3 bucket {bucket_name}: {e}")
             return None
 
-    def upload_file(self, bucket_name: str, file_obj: UploadFile, s3_key: str) -> Optional[str]:
+    def upload_file(self, bucket_name: str, file_obj: UploadFile, s3_key: str) -> str:
         """
         Upload a file to the tenant's bucket and return the URL.
         """
-        if not self.is_enabled or not bucket_name:
-            return None
+        if not self.is_enabled:
+            raise RuntimeError("S3 storage is disabled but required for file uploads.")
+            
+        if not bucket_name:
+            raise RuntimeError("S3 bucket name is missing. File storage requires a provisioned bucket.")
             
         try:
-            # We use ACL='public-read' assuming settings logos should be publicly readable.
-            # Alternatively, you can use presigned URLs if they are private.
+            # Reset file pointer to start just in case
+            file_obj.file.seek(0)
+            
             self.s3_client.upload_fileobj(
                 file_obj.file, 
                 bucket_name, 
@@ -68,10 +72,11 @@ class S3Service:
             
             # Construct the public URL
             url = f"https://{bucket_name}.s3.{self.region}.amazonaws.com/{s3_key}"
+            logger.info(f"Successfully uploaded file to S3: {url}")
             return url
         except ClientError as e:
             logger.error(f"Failed to upload file to S3: {e}")
-            return None
+            raise RuntimeError(f"S3 upload failure: {e}")
 
     def generate_presigned_url(self, bucket_name: str, s3_key: str, expires_in: int = 3600) -> Optional[str]:
         """

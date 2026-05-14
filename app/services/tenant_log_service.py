@@ -19,6 +19,17 @@ class TenantLogService:
         self.tenant_code = tenant_code
         self.s3_service = S3Service()
 
+    def _get_tenant_bucket(self) -> str:
+        """Fetch the bucket name for the current tenant from the Master DB."""
+        from app.core.database import get_master_db_context
+        from app.models.all_models import Tenant
+        
+        with get_master_db_context() as master_db:
+            tenant = master_db.query(Tenant).filter(Tenant.code == self.tenant_code).first()
+            if not tenant or not tenant.aws_s3_bucket_name:
+                raise RuntimeError(f"S3 bucket not provisioned for tenant {self.tenant_code}")
+            return tenant.aws_s3_bucket_name
+
     def generate_daily_log(self, log_date: date) -> Optional[TenantLog]:
         """
         Aggregates all AuditLog entries for a specific date, saves to a file,
@@ -27,11 +38,6 @@ class TenantLogService:
         logger.info(f"Generating daily log for tenant {self.tenant_code} on {log_date}")
         
         # 1. Fetch audit logs for the specified date
-        # Assuming AuditLog has a created_at or similar (it inherits from TenantTable usually)
-        # Based on previous views, AuditLog uses AuditUtil which might not show the timestamp, 
-        # but TenantTable usually has created_at.
-        
-        # Start and end of the day
         start_dt = datetime.combine(log_date, datetime.min.time()).replace(tzinfo=timezone.utc)
         end_dt = datetime.combine(log_date, datetime.max.time()).replace(tzinfo=timezone.utc)
 
@@ -73,20 +79,12 @@ class TenantLogService:
 
         try:
             # 4. Upload to S3
-            # We need the tenant's bucket name. 
-            # In HMS, the bucket name is often stored in the Tenant model or derived.
-            # Looking at S3Service, it has create_tenant_bucket.
-            # We'll derive it like S3Service does for now, or fetch from Master if available.
-            # For simplicity, we use the derivation pattern.
-            env = "dev" # Should ideally come from config
-            bucket_name = f"carepoint-hms-{self.tenant_code.lower()}-dev" 
-            
+            bucket_name = self._get_tenant_bucket()
             s3_key = f"backups/logs/{log_date.year}/{log_date.month:02d}/{filename}"
             
-            # Note: upload_file in aws_s3_service.py takes (bucket_name, file_obj, s3_key)
-            # but that expects an UploadFile. I should probably add a raw upload method or use boto3 directly.
-            # Actually, I'll use boto3 client directly since I have access to it in S3Service.
-            
+            if not self.s3_service.is_enabled:
+                raise RuntimeError("S3 is disabled but required for log archiving.")
+                
             with open(tmp_path, "rb") as f:
                 self.s3_service.s3_client.upload_fileobj(f, bucket_name, s3_key)
             
@@ -110,7 +108,7 @@ class TenantLogService:
         except Exception as e:
             logger.error(f"Failed to archive logs for tenant {self.tenant_code}: {e}")
             self.db.rollback()
-            return None
+            raise # Re-raise to signal failure
         finally:
             if os.path.exists(tmp_path):
                 os.remove(tmp_path)
@@ -125,5 +123,5 @@ class TenantLogService:
         if not tenant_log:
             return None
             
-        bucket_name = f"carepoint-hms-{self.tenant_code.lower()}-dev"
+        bucket_name = self._get_tenant_bucket()
         return self.s3_service.generate_presigned_url(bucket_name, tenant_log.s3_key)

@@ -40,54 +40,6 @@ def get_billing_service(db: Annotated[Session, Depends(get_db)]) -> BillingServi
     return BillingService(db)
 
 
-def _serialize_service(s) -> dict:
-    return {
-        "id": s.id,
-        "code": s.code,
-        "name": s.name,
-        "category": s.category,
-        "default_price": s.default_price,
-        "description": s.description,
-        "created_at": getattr(s, "date_created", None),
-        "updated_at": getattr(s, "date_updated", None),
-    }
-
-
-def _serialize_billing_item(i) -> dict:
-    return {
-        "id": i.id,
-        "billing_id": i.billing_id,
-        "billable_service_id": i.billable_service_id,
-        "service_name": i.service_name,
-        "service_code": i.service_code,
-        "quantity": i.quantity,
-        "unit_price": i.unit_price,
-        "discount_amount": i.discount_amount,
-        "line_total": i.line_total,
-        "source_reference": i.source_reference,
-        "created_at": getattr(i, "date_created", None),
-    }
-
-
-def _serialize_billing(b) -> dict:
-    return {
-        "id": b.id,
-        "patient_id": b.patient_id,
-        "visit_id": b.visit_id,
-        "patient_insurance_id": b.patient_insurance_id,
-        "billing_no": b.billing_no,
-        "billing_date": b.billing_date,
-        "status": b.status,
-        "gross_amount": b.gross_amount,
-        "discount_amount": b.discount_amount,
-        "net_amount": b.net_amount,
-        "notes": b.notes,
-        "items": [_serialize_billing_item(i) for i in (b.items or []) if not getattr(i, "is_deleted", False)],
-        "created_at": getattr(b, "date_created", None),
-        "updated_at": getattr(b, "date_updated", None),
-    }
-
-
 # --- BILLABLE SERVICES ---
 
 @router.get(
@@ -105,8 +57,10 @@ def list_services(
 ):
     items, total = service.list(skip=skip, limit=limit, search=search, category=category)
     return paginate_response(
-        items=[_serialize_service(s) for s in items],
-        total=total, skip=skip, limit=limit,
+        items=items,
+        total=total,
+        skip=skip,
+        limit=limit,
         message="Billable services fetched successfully.",
     )
 
@@ -123,7 +77,7 @@ def create_billable_service(
     service: Annotated[BillableServiceService, Depends(get_billable_service_service)],
 ):
     s = service.create(payload)
-    return {"success": True, "message": "Billable service created.", "service": _serialize_service(s)}
+    return {"success": True, "message": "Billable service created.", "service": s}
 
 
 @router.put(
@@ -138,7 +92,7 @@ def update_billable_service(
     service: Annotated[BillableServiceService, Depends(get_billable_service_service)],
 ):
     s = service.update(sid, payload)
-    return {"success": True, "message": "Billable service updated.", "service": _serialize_service(s)}
+    return {"success": True, "message": "Billable service updated.", "service": s}
 
 
 @router.delete(
@@ -174,8 +128,10 @@ def list_billings(
         skip=skip, limit=limit, patient_id=patient_id, visit_id=visit_id, status=status_filter,
     )
     return paginate_response(
-        items=[_serialize_billing(b) for b in items],
-        total=total, skip=skip, limit=limit,
+        items=items,
+        total=total,
+        skip=skip,
+        limit=limit,
         message="Billings fetched successfully.",
     )
 
@@ -192,8 +148,10 @@ def list_for_visit(
 ):
     items = service.list_for_visit(visit_id)
     return paginate_response(
-        items=[_serialize_billing(b) for b in items],
-        total=len(items), skip=0, limit=len(items) or 1,
+        items=items,
+        total=len(items),
+        skip=0,
+        limit=len(items) or 1,
         message="Billings fetched successfully.",
     )
 
@@ -210,7 +168,7 @@ def create_billing(
     service: Annotated[BillingService, Depends(get_billing_service)],
 ):
     b = service.create_billing(payload)
-    return {"success": True, "message": "Billing created.", "billing": _serialize_billing(b)}
+    return {"success": True, "message": "Billing created.", "billing": b}
 
 
 @router.get(
@@ -223,7 +181,7 @@ def get_billing(
     _: Annotated[User, Depends(require_permission("BILLING_READ"))],
     service: Annotated[BillingService, Depends(get_billing_service)],
 ):
-    return _serialize_billing(service.get(billing_id))
+    return service.get(billing_id)
 
 
 @router.post(
@@ -238,7 +196,7 @@ def add_item(
     service: Annotated[BillingService, Depends(get_billing_service)],
 ):
     b = service.add_item(billing_id, payload)
-    return {"success": True, "message": "Item added to billing.", "billing": _serialize_billing(b)}
+    return {"success": True, "message": "Item added to billing.", "billing": b}
 
 
 @router.post(
@@ -253,4 +211,4 @@ def cancel_billing(
     reason: Optional[str] = Query(None, max_length=500),
 ):
     b = service.cancel_billing(billing_id, reason=reason)
-    return {"success": True, "message": "Billing cancelled.", "billing": _serialize_billing(b)}
+    return {"success": True, "message": "Billing cancelled.", "billing": b}

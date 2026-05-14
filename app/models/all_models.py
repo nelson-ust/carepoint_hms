@@ -5882,17 +5882,14 @@ class TenantPaymentMethodConfig(TenantTable):
 class DatabaseBackup(TenantTable):
     """
     Database backup record for the tenant.
-
-    Each backup carries enough metadata to support retention policy
-    enforcement, integrity verification, and selective restore (including
-    point-in-time-recovery when WAL archiving is configured).
+    Resides in the Tenant Database for complete isolation.
     """
-
-    filename: Mapped[str] = mapped_column(Text, nullable=False)
+    file_name: Mapped[str] = mapped_column(Text, nullable=False)
     s3_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     s3_key: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     size_bytes: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
-    status: Mapped[str] = mapped_column(String(50), default="PENDING")  # PENDING, COMPLETED, FAILED, EXPIRED
+    status: Mapped[str] = mapped_column(String(50), default="PENDING")  # PENDING, SUCCESS, FAILED
+    storage_location: Mapped[str] = mapped_column(String(50), default="LOCAL")
     error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     # Encryption / integrity
@@ -5900,17 +5897,50 @@ class DatabaseBackup(TenantTable):
     encryption_algo: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
     checksum_sha256: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
 
-    # Backup taxonomy / PITR support
-    backup_type: Mapped[str] = mapped_column(String(20), default="FULL")  # FULL, INCREMENTAL, WAL
-    pg_dump_format: Mapped[str] = mapped_column(String(20), default="custom")  # custom, plain, tar
-    backup_started_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
-    backup_finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
-    pitr_lsn: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
-    pitr_timestamp: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Options used for the dump
+    format: Mapped[str] = mapped_column(String(16), default="custom") # custom, plain, tar
+    schema_only: Mapped[bool] = mapped_column(Boolean, default=False)
+    retention_days: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    note: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
 
-    # Retention
+    # Job execution info
+    started_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    duration_ms: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+
+    # Multi-tenant taxonomy
+    backup_type: Mapped[str] = mapped_column(String(20), default="FULL")
+    triggered_by: Mapped[str] = mapped_column(String(20), default="MANUAL")
     retention_until: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
-    triggered_by: Mapped[str] = mapped_column(String(20), default="MANUAL")  # MANUAL, SCHEDULED, ON_RESTORE
+
+
+class MasterDatabaseBackup(MasterTable):
+    """
+    Database backup record for the Master Database.
+    Resides in the Master Database.
+    """
+    file_name: Mapped[str] = mapped_column(Text, nullable=False)
+    s3_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    s3_key: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    size_bytes: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    status: Mapped[str] = mapped_column(String(50), default="PENDING")
+    storage_location: Mapped[str] = mapped_column(String(50), default="LOCAL")
+    error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    is_encrypted: Mapped[bool] = mapped_column(Boolean, default=False)
+    encryption_algo: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    checksum_sha256: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+
+    format: Mapped[str] = mapped_column(String(16), default="custom")
+    schema_only: Mapped[bool] = mapped_column(Boolean, default=False)
+    note: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+
+    started_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    duration_ms: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+
+    triggered_by: Mapped[str] = mapped_column(String(20), default="MANUAL")
+    retention_until: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
 
 class TenantLog(TenantTable):
     """

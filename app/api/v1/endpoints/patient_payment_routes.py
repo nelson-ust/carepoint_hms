@@ -106,34 +106,6 @@ def _service(db: Annotated[Session, Depends(get_db)]) -> PatientPaymentService:
     return PatientPaymentService(db)
 
 
-def _build_response(result: dict) -> dict:
-    invoice = result["invoice"]
-    payment = result["payment"]
-    return {
-        "status": result.get("status", "ok"),
-        "payment": payment,
-        "invoice": {
-            "id": invoice.id,
-            "invoice_no": invoice.invoice_no,
-            "total_amount": invoice.total_amount,
-            "amount_paid": invoice.amount_paid,
-            "balance_due": invoice.balance_due,
-            "status": str(getattr(invoice.status, "value", invoice.status)),
-        },
-        "authorization_url": result.get("authorization_url"),
-        "provider_reference": result.get("provider_reference"),
-        "provider": result.get("provider"),
-        "card_balance_after": result.get("card_balance_after"),
-        "points_redeemed": result.get("points_redeemed"),
-        "points_balance_after": result.get("points_balance_after"),
-    }
-
-
-# ---------------------------------------------------------------------------
-# Routes
-# ---------------------------------------------------------------------------
-
-
 @router.get(
     "/methods",
     response_model=list[AvailableMethodSchema],
@@ -157,7 +129,7 @@ def pay_invoice(
     _: CurrentActiveUser,
     service: Annotated[PatientPaymentService, Depends(_service)],
 ):
-    result = service.pay_invoice(
+    return service.pay_invoice(
         invoice_id=payload.invoice_id,
         amount=Decimal(str(payload.amount)),
         channel=payload.channel,
@@ -170,7 +142,6 @@ def pay_invoice(
         note=payload.note,
         metadata=payload.metadata,
     )
-    return _build_response(result)
 
 
 @router.post(
@@ -185,9 +156,7 @@ def confirm_gateway(
 ):
     """
     Most providers will call back into our webhook endpoint, but this
-    route is a useful manual / polling alternative — for example after
-    redirecting the patient back to the tenant front-end with a
-    ``reference`` query parameter.
+    route is a useful manual / polling alternative.
     """
     return service.confirm_gateway_payment(
         payment_reference=payload.payment_reference,

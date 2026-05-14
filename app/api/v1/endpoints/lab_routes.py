@@ -31,22 +31,6 @@ def get_lab_service(db: Annotated[Session, Depends(get_db)]) -> LabCatalogServic
     return LabCatalogService(db)
 
 
-def _serialize(t) -> dict:
-    return {
-        "id": t.id,
-        "code": t.code,
-        "name": t.name,
-        "sample_type": t.sample_type,
-        "unit_of_measure": t.unit_of_measure,
-        "reference_range": t.reference_range,
-        "default_price": t.default_price,
-        "description": t.description,
-        "is_active": not bool(getattr(t, "is_deleted", False)),
-        "created_at": getattr(t, "created_at", None),
-        "updated_at": getattr(t, "updated_at", None),
-    }
-
-
 @router.get(
     "/",
     response_model=LabTestCatalogListResponseSchema,
@@ -61,7 +45,7 @@ def list_tests(
 ):
     items, total = service.list_tests(skip=skip, limit=limit, search=search)
     return paginate_response(
-        items=[_serialize(t) for t in items],
+        items=items,
         total=total,
         skip=skip,
         limit=limit,
@@ -81,7 +65,7 @@ def create_test(
     service: Annotated[LabCatalogService, Depends(get_lab_service)],
 ):
     test = service.create(payload)
-    return {"success": True, "message": "Lab test added.", "lab_test": _serialize(test)}
+    return {"success": True, "message": "Lab test added.", "lab_test": test}
 
 
 @router.get(
@@ -94,7 +78,7 @@ def get_test(
     _: Annotated[User, Depends(require_permission("LAB_ORDER_CREATE", "LAB_RESULT_ENTER"))],
     service: Annotated[LabCatalogService, Depends(get_lab_service)],
 ):
-    return _serialize(service.get(test_id))
+    return service.get(test_id)
 
 
 @router.put(
@@ -109,7 +93,7 @@ def update_test(
     service: Annotated[LabCatalogService, Depends(get_lab_service)],
 ):
     test = service.update(test_id, payload)
-    return {"success": True, "message": "Lab test updated.", "lab_test": _serialize(test)}
+    return {"success": True, "message": "Lab test updated.", "lab_test": test}
 
 
 @router.delete(

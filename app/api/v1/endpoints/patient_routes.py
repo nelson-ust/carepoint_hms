@@ -78,310 +78,6 @@ def get_patient_service(
 
 
 # ============================================================
-# SERIALIZATION HELPERS
-# ============================================================
-
-def _safe_enum(value) -> Optional[str]:
-    if value is None:
-        return None
-    return str(value)
-
-
-def _serialize_registered_by(user) -> Optional[dict[str, Any]]:
-    if not user:
-        return None
-
-    return {
-        "id": user.id,
-        "username": user.username,
-        "email": user.email,
-        "first_name": user.first_name,
-        "last_name": user.last_name,
-    }
-
-
-def _serialize_payer(payer) -> Optional[dict[str, Any]]:
-    if not payer:
-        return None
-
-    return {
-        "id": payer.id,
-        "name": payer.name,
-        "code": payer.code,
-        "payer_type": _safe_enum(getattr(payer, "payer_type", None)),
-        "phone_number": getattr(payer, "phone_number", None),
-        "email": getattr(payer, "email", None),
-    }
-
-
-def _serialize_insurance_provider(provider) -> Optional[dict[str, Any]]:
-    if not provider:
-        return None
-
-    return {
-        "id": provider.id,
-        "name": provider.name,
-        "code": provider.code,
-        "phone_number": getattr(provider, "phone_number", None),
-        "email": getattr(provider, "email", None),
-    }
-
-
-def _serialize_loyalty_program(program) -> Optional[dict[str, Any]]:
-    if not program:
-        return None
-
-    return {
-        "id": program.id,
-        "name": program.name,
-        "code": program.code,
-        "description": getattr(program, "description", None),
-    }
-
-
-def _serialize_registration_event(registration) -> dict[str, Any]:
-    return {
-        "id": registration.id,
-        "patient_id": registration.patient_id,
-        "registered_by_id": registration.registered_by_id,
-        "registration_date": registration.registration_date,
-        "notes": registration.notes,
-        "registered_by": _serialize_registered_by(getattr(registration, "registered_by", None)),
-        "created_at": getattr(registration, "date_created", None),
-        "updated_at": getattr(registration, "date_updated", None),
-    }
-
-
-def _serialize_identifier(identifier) -> dict[str, Any]:
-    return {
-        "id": identifier.id,
-        "patient_id": identifier.patient_id,
-        "identifier_type": identifier.identifier_type,
-        "identifier_value": identifier.identifier_value,
-        "issuing_authority": identifier.issuing_authority,
-        "is_primary": identifier.is_primary,
-        "is_active": identifier.is_active,
-        "note": identifier.note,
-        "created_at": getattr(identifier, "date_created", None),
-        "updated_at": getattr(identifier, "date_updated", None),
-    }
-
-
-def _serialize_attachment(attachment) -> dict[str, Any]:
-    return {
-        "id": attachment.id,
-        "patient_id": attachment.patient_id,
-        "uploaded_by_id": attachment.uploaded_by_id,
-        "attachment_type": attachment.attachment_type,
-        "title": attachment.title,
-        "file_name": attachment.file_name,
-        "file_key": attachment.file_key,
-        "file_url": attachment.file_url,
-        "content_type": attachment.content_type,
-        "checksum": attachment.checksum,
-        "is_primary": attachment.is_primary,
-        "note": attachment.note,
-        "created_at": getattr(attachment, "date_created", None),
-        "updated_at": getattr(attachment, "date_updated", None),
-    }
-
-
-def _serialize_consent(consent) -> dict[str, Any]:
-    return {
-        "id": consent.id,
-        "patient_id": consent.patient_id,
-        "recorded_by_id": consent.recorded_by_id,
-        "consent_type": consent.consent_type,
-        "consent_status": consent.consent_status,
-        "consent_date": consent.consent_date,
-        "expiry_date": consent.expiry_date,
-        "document_file_name": consent.document_file_name,
-        "document_file_key": consent.document_file_key,
-        "document_file_url": consent.document_file_url,
-        "note": consent.note,
-        "created_at": getattr(consent, "date_created", None),
-        "updated_at": getattr(consent, "date_updated", None),
-    }
-
-
-def _serialize_scanned_form(form) -> dict[str, Any]:
-    return {
-        "id": form.id,
-        "patient_id": form.patient_id,
-        "uploaded_by_id": form.uploaded_by_id,
-        "form_type": form.form_type,
-        "file_name": form.file_name,
-        "file_key": form.file_key,
-        "file_url": form.file_url,
-        "content_type": form.content_type,
-        "checksum": form.checksum,
-        "note": form.note,
-        "created_at": getattr(form, "date_created", None),
-        "updated_at": getattr(form, "date_updated", None),
-    }
-
-
-def _serialize_demographic_audit(audit) -> dict[str, Any]:
-    return {
-        "id": audit.id,
-        "patient_id": audit.patient_id,
-        "changed_by_id": audit.changed_by_id,
-        "change_source": audit.change_source,
-        "changed_at": audit.changed_at,
-        "before_snapshot": audit.before_snapshot,
-        "after_snapshot": audit.after_snapshot,
-        "changed_fields": audit.changed_fields,
-        "note": audit.note,
-        "created_at": getattr(audit, "date_created", None),
-        "updated_at": getattr(audit, "date_updated", None),
-    }
-
-
-def _serialize_insurance_record(record) -> dict[str, Any]:
-    return {
-        "id": record.id,
-        "patient_id": record.patient_id,
-        "insurance_provider_id": getattr(record, "insurance_provider_id", None),
-        "policy_number": getattr(record, "policy_number", None),
-        "member_id": getattr(record, "member_id", None),
-        "plan_name": getattr(record, "plan_name", None),
-        "coverage_details": getattr(record, "coverage_details", None),
-        "status": _safe_enum(getattr(record, "status", None)),
-        "valid_from": getattr(record, "valid_from", None),
-        "valid_to": getattr(record, "valid_to", None),
-        "note": getattr(record, "note", None),
-        "insurance_provider": _serialize_insurance_provider(getattr(record, "insurance_provider", None)),
-        "created_at": getattr(record, "date_created", None),
-        "updated_at": getattr(record, "date_updated", None),
-    }
-
-
-def _serialize_loyalty_membership(membership) -> dict[str, Any]:
-    return {
-        "id": membership.id,
-        "patient_id": membership.patient_id,
-        "loyalty_program_id": membership.loyalty_program_id,
-        "membership_no": membership.membership_no,
-        "points_balance": membership.points_balance,
-        "joined_date": membership.joined_date,
-        "loyalty_program": _serialize_loyalty_program(getattr(membership, "loyalty_program", None)),
-        "created_at": getattr(membership, "date_created", None),
-        "updated_at": getattr(membership, "date_updated", None),
-    }
-
-
-def _serialize_patient(patient) -> dict[str, Any]:
-    registrations = [
-        _serialize_registration_event(item)
-        for item in (patient.registrations or [])
-    ]
-
-    identifiers = [
-        _serialize_identifier(item)
-        for item in (patient.identifiers or [])
-    ]
-
-    photo_payload = None
-    if getattr(patient, "photo_file_name", None) or getattr(patient, "photo_file_url", None):
-        photo_payload = {
-            "file_name": getattr(patient, "photo_file_name", None),
-            "file_key": getattr(patient, "photo_file_key", None),
-            "file_url": getattr(patient, "photo_file_url", None),
-        }
-
-    return {
-        "id": patient.id,
-        "global_patient_id": getattr(patient, "global_patient_id", ""),
-        "hospital_number": patient.hospital_number,
-        "first_name": patient.first_name,
-        "last_name": patient.last_name,
-        "middle_name": patient.middle_name,
-        "date_of_birth": patient.date_of_birth,
-        "gender": _safe_enum(patient.gender),
-        "marital_status": _safe_enum(patient.marital_status),
-        "phone_number": patient.phone_number,
-        "alternate_phone_number": patient.alternate_phone_number,
-        "email": patient.email,
-        "address": patient.address,
-        "city": patient.city,
-        "state": patient.state,
-        "country": patient.country,
-        "blood_group": _safe_enum(patient.blood_group),
-        "genotype": _safe_enum(patient.genotype),
-        "allergies": patient.allergies,
-        "emergency_contact_name": patient.emergency_contact_name,
-        "emergency_contact_phone": patient.emergency_contact_phone,
-        "emergency_contact_relationship": patient.emergency_contact_relationship,
-        "next_of_kin_name": getattr(patient, "next_of_kin_name", None),
-        "next_of_kin_phone": getattr(patient, "next_of_kin_phone", None),
-        "next_of_kin_relationship": getattr(patient, "next_of_kin_relationship", None),
-        "next_of_kin_address": getattr(patient, "next_of_kin_address", None),
-        "patient_type": _safe_enum(patient.patient_type),
-        "preferred_payer_id": getattr(patient, "preferred_payer_id", None),
-        "payer_type": getattr(patient, "payer_type", None),
-        "preferred_payer": _serialize_payer(getattr(patient, "preferred_payer", None)),
-        "national_identifier": getattr(patient, "national_identifier", None),
-        "national_identifier_type": getattr(patient, "national_identifier_type", None),
-        "identification_details": getattr(patient, "identification_details", None),
-        "photo": photo_payload,
-        "registrations": registrations,
-        "identifiers": identifiers,
-        "created_at": getattr(patient, "date_created", None),
-        "updated_at": getattr(patient, "date_updated", None),
-    }
-
-
-def _serialize_patient_extended(patient) -> dict[str, Any]:
-    payload = _serialize_patient(patient)
-
-    payload["insurance_records"] = [
-        _serialize_insurance_record(item)
-        for item in (patient.insurance_records or [])
-    ]
-    payload["loyalty_memberships"] = [
-        _serialize_loyalty_membership(item)
-        for item in (patient.loyalty_memberships or [])
-    ]
-    payload["document_attachments"] = [
-        _serialize_attachment(item)
-        for item in (patient.attachments or [])
-    ]
-    payload["consent_records"] = [
-        _serialize_consent(item)
-        for item in (patient.consent_records or [])
-    ]
-    payload["scanned_forms"] = [
-        _serialize_scanned_form(item)
-        for item in (patient.scanned_forms or [])
-    ]
-    payload["demographic_audits"] = [
-        _serialize_demographic_audit(item)
-        for item in (patient.demographic_audits or [])
-    ]
-
-    return payload
-
-
-def _serialize_patient_list_item(patient) -> dict[str, Any]:
-    return {
-        "id": patient.id,
-        "hospital_number": patient.hospital_number,
-        "first_name": patient.first_name,
-        "last_name": patient.last_name,
-        "middle_name": patient.middle_name,
-        "date_of_birth": patient.date_of_birth,
-        "gender": _safe_enum(patient.gender),
-        "phone_number": patient.phone_number,
-        "email": patient.email,
-        "city": patient.city,
-        "state": patient.state,
-        "patient_type": _safe_enum(patient.patient_type),
-        "payer_type": getattr(patient, "payer_type", None),
-        "national_identifier": getattr(patient, "national_identifier", None),
-    }
-
-
-# ============================================================
 # ROUTES
 # ============================================================
 
@@ -562,7 +258,7 @@ def get_link_existing_result(
 
 
 @router.post(
-    "/{patient_id}/attach-insurance-later",
+    "/attach-insurance-later",
     response_model=PatientInsuranceReadSchema,
     status_code=status.HTTP_201_CREATED,
     summary="Attach patient insurance later",
@@ -576,8 +272,7 @@ def attach_patient_insurance_later(
     """
     Attach insurance after the patient has already been saved.
     """
-    insurance = service.attach_patient_insurance_later(patient_id, payload)
-    return _serialize_insurance_record(insurance)
+    return service.attach_patient_insurance_later(patient_id, payload)
 
 
 @router.get(
@@ -597,7 +292,7 @@ def list_patients(
     """
     items, total = service.list_patients(skip=skip, limit=limit)
     return paginate_response(
-        items=[_serialize_patient_list_item(item) for item in items],
+        items=items,
         total=total,
         skip=skip,
         limit=limit,
@@ -646,7 +341,7 @@ def search_patients(
     )
 
     return paginate_response(
-        items=[_serialize_patient_list_item(item) for item in items],
+        items=items,
         total=total,
         skip=skip,
         limit=limit,
@@ -668,8 +363,7 @@ def get_patient_by_hospital_number(
     """
     Return patient by hospital number.
     """
-    patient = service.get_patient_by_hospital_number(hospital_number)
-    return _serialize_patient(patient)
+    return service.get_patient_by_hospital_number(hospital_number)
 
 
 @router.get(
@@ -686,8 +380,7 @@ def get_patient(
     """
     Return the basic details of a patient.
     """
-    patient = service.get_patient(patient_id)
-    return _serialize_patient(patient)
+    return service.get_patient(patient_id)
 
 
 @router.get(
@@ -705,8 +398,7 @@ def get_detailed_patient(
     Return detailed patient record including insurance, loyalty, attachments,
     scanned forms, consent records, and audit history.
     """
-    patient = service.get_detailed_patient(patient_id)
-    return _serialize_patient_extended(patient)
+    return service.get_detailed_patient(patient_id)
 
 
 @router.put(
@@ -724,13 +416,12 @@ def update_patient(
     """
     Update patient demographics and administrative details.
     """
-    patient = service.update_patient(
+    return service.update_patient(
         patient_id,
         payload,
         changed_by_id=current_user.id,
         change_source="MPI_UPDATE",
     )
-    return _serialize_patient_extended(patient)
 
 
 @router.post(
@@ -748,8 +439,7 @@ def add_patient_identifier(
     """
     Add a patient identifier such as previous record ID or external MRN.
     """
-    identifier = service.add_patient_identifier(patient_id, payload)
-    return _serialize_identifier(identifier)
+    return service.add_patient_identifier(patient_id, payload)
 
 
 @router.post(

@@ -97,7 +97,8 @@ from app.api.v1.endpoints.portal_routes import router as portal_self_service_rou
 from app.api.v1.endpoints.hr_payroll_routes import router as hr_payroll_router
 from app.api.v1.endpoints.loyalty_routes import router as loyalty_router
 
-from app.api.v1.endpoints.database_backup_routes import router as database_backup_router
+from app.api.v1.endpoints.tenant_backup_routes import router as tenant_backup_router
+from app.api.v1.endpoints.master_backup_routes import router as master_backup_router
 from app.api.v1.endpoints.saas_notification_routes import router as saas_notification_router
 from app.api.v1.endpoints.saas_dashboard_routes import router as saas_dashboard_router
 from app.api.v1.endpoints.saas_subscription_plan_routes import router as saas_subscription_plan_router
@@ -269,7 +270,8 @@ api_router.include_router(permission_router)
 
 # Tenant Settings & Backups
 api_router.include_router(tenant_settings_router)
-api_router.include_router(database_backup_router)
+api_router.include_router(tenant_backup_router, prefix="/backups")
+api_router.include_router(master_backup_router, prefix="/backups/master")
 api_router.include_router(integration_router)
 api_router.include_router(template_router)
 api_router.include_router(report_router)

@@ -51,21 +51,6 @@ def get_discharge_service(db: Annotated[Session, Depends(get_db)]) -> DischargeS
     return DischargeService(db)
 
 
-def _serialize(d) -> dict:
-    """ORM -> response dict translation kept in one place."""
-    return {
-        "id": d.id,
-        "admission_id": d.admission_id,
-        "discharged_by_staff_id": d.discharged_by_staff_id,
-        "discharge_date": d.discharge_date,
-        "discharge_condition": d.discharge_condition,
-        "discharge_summary": d.discharge_summary,
-        "follow_up_instruction": d.follow_up_instruction,
-        "created_at": getattr(d, "created_at", None),
-        "updated_at": getattr(d, "updated_at", None),
-    }
-
-
 @router.post(
     "/",
     response_model=DischargeActionResponseSchema,
@@ -80,16 +65,12 @@ def discharge(
 ):
     """
     Close out an inpatient admission.
-
-    Captures any outstanding bed-day charges first so finance has the full
-    inpatient bill on the cashier workstation, then frees the bed and (when
-    appropriate) marks the visit COMPLETED.
     """
     result = service.discharge(payload, actor_user_id=actor.id)
     return {
         "success": True,
         "message": "Patient discharged.",
-        "discharge": _serialize(result["discharge"]),
+        "discharge": result["discharge"],
         "admission_id": result["admission_id"],
         "bed_day_charges_captured": result["bed_day_charges_captured"],
         "visit_completed": result["visit_completed"],
@@ -105,11 +86,6 @@ def check_discharge_readiness(
     _: Annotated[User, Depends(require_permission("ADMISSION_DISCHARGE", "BILLING_READ", "VISIT_READ"))],
     service: Annotated[DischargeService, Depends(get_discharge_service)],
 ):
-    """
-    Inspect the open clinical orders / pharmacy items / theatre cases on
-    the admission's visit and report whether the admission is safe to
-    discharge. Returns ``{is_ready: bool, blockers: {...}}``.
-    """
     return service.readiness_for_admission(admission_id)
 
 
@@ -124,7 +100,7 @@ def get_discharge(
     service: Annotated[DischargeService, Depends(get_discharge_service)],
 ):
     """Read a single discharge record."""
-    return _serialize(service.get(discharge_id))
+    return service.get(discharge_id)
 
 
 @router.get(
@@ -138,13 +114,10 @@ def get_discharge_for_admission(
     service: Annotated[DischargeService, Depends(get_discharge_service)],
 ):
     """
-    Locate the discharge record for a given admission, returning 404 when
-    the admission has not been discharged yet.
+    Locate the discharge record for a given admission.
     """
     discharge = service.get_for_admission(admission_id)
     if discharge is None:
-        # We raise an HTTPException directly here because the missing-record
-        # case is normal control flow on this read path, not a server-side bug.
         raise HTTPException(
             status_code=404,
             detail={
@@ -153,4 +126,4 @@ def get_discharge_for_admission(
                 "admission_id": admission_id,
             },
         )
-    return _serialize(discharge)
+    return discharge

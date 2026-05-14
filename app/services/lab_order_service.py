@@ -2,14 +2,29 @@
 from __future__ import annotations
 
 """
-Service layer for LabOrder lifecycle.
+app.services.lab_order_service
+
+Service layer for the Laboratory Order lifecycle and operational workflow.
+
+Purpose
+-------
+This module orchestrates the business logic for laboratory diagnostics:
+- Initiating lab orders from clinical contexts (Clinics, Emergency, Wards).
+- Handling specimen collection and laboratory processing states.
+- Automating charge capture and financial integration.
+- Coordinating visit routing between clinical and ancillary service points.
+- Managing order-level status roll-ups based on individual item progression.
 
 Lifecycle (per item)
 --------------------
 ORDERED -> SAMPLE_COLLECTED -> IN_PROGRESS -> RESULT_READY -> COMPLETED
                                                     \\-> CANCELLED
 
-The order itself rolls up to the most-advanced common state of its items.
+State Orchestration
+-------------------
+The LabOrder header status is a calculated aggregate of its LabOrderItems. 
+As items advance through the lab workflow, the service triggers recomputations
+to keep the clinician informed of the overall order progress.
 """
 
 from datetime import datetime, timezone
@@ -37,18 +52,28 @@ from app.utils.visit_routing import route_visit_to_next_sdp, validate_visit_sdp_
 
 
 class LabOrderService:
+    """
+    Service layer for managing Laboratory Orders and specimen processing.
+    """
+
     def __init__(self, db: Session) -> None:
         self.db = db
         self.repository = LabOrderRepository(db)
 
     # ============================================================
-    # READ
+    # READ OPERATIONS
     # ============================================================
 
     def list_for_visit(self, visit_id: int, *, skip: int = 0, limit: int = 50):
+        """
+        Fetch all lab orders initiated during a specific patient visit.
+        """
         return self.repository.list_for_visit(visit_id, skip=skip, limit=limit)
 
     def get(self, order_id: int) -> LabOrder:
+        """
+        Retrieve a specific lab order header with all line items.
+        """
         return self.repository.get_required_by_id(order_id)
 
     def list_lab_worklist(
@@ -58,13 +83,20 @@ class LabOrderService:
         limit: int = 50,
         statuses: Optional[list[str]] = None,
     ):
+        """
+        Provide a filtered view of lab orders for technician processing.
+        
+        Args:
+            statuses: Optional list of string statuses to filter by.
+        """
         normalized = None
         if statuses:
+            # Map string inputs to OrderStatus enum
             normalized = [OrderStatus(s.strip().upper()) for s in statuses]
         return self.repository.list_lab_worklist(skip=skip, limit=limit, statuses=normalized)
 
     # ============================================================
-    # CREATE
+    # ORDER CREATION
     # ============================================================
 
     def create_order(
@@ -73,16 +105,29 @@ class LabOrderService:
         *,
         actor_user_id: Optional[int] = None,
     ) -> LabOrder:
+        """
+        Initiate a new laboratory order from a clinical context.
+        
+        Business Rules:
+        ---------------
+        1. Visit must be active (not COMPLETED or CANCELLED).
+        2. Order must be initiated from a valid clinical service point (CLINIC, EMERGENCY, WARD).
+        3. All tests must exist in the active Lab Test Catalog.
+        4. Optional: Automatic charge capture for ordered tests.
+        5. Optional: Visit rerouting based on facility payment policy (Cashier vs Lab).
+        """
+        # 1. Basic Visit Validation
         visit = self.repository.get_visit(payload.visit_id)
         if not visit:
             raise NotFoundError(message="Visit not found.", detail={"visit_id": payload.visit_id})
+        
         if visit.status in {VisitStatus.COMPLETED, VisitStatus.CANCELLED}:
             raise BadRequestError(
                 message="Cannot order labs for a closed visit.",
                 detail={"visit_status": str(visit.status)},
             )
             
-
+        # 2. Context Validation (ensure user is at a clinical station)
         current_step = validate_visit_sdp_activity(
             self.db,
             visit_id=visit.id,
@@ -90,7 +135,7 @@ class LabOrderService:
             activity_name="Lab Order creation",
         )
 
-        # Validate every requested test exists.
+        # 3. Catalog Validation
         items_payload: list[dict] = []
         tests_by_id: dict[int, LabTestCatalog] = {}
         for entry in payload.items:
@@ -103,6 +148,7 @@ class LabOrderService:
             items_payload.append({"lab_test_catalog_id": test.id})
             tests_by_id[test.id] = test
 
+        # 4. Persistence
         order = self.repository.create_order(
             visit_id=visit.id,
             visit_flow_step_id=current_step.id,
@@ -112,7 +158,7 @@ class LabOrderService:
             items_payload=items_payload,
         )
 
-        # Charge capture (one billing line per ordered test).
+        # 5. Financial Integration (Charge Capture)
         if payload.auto_capture_charge:
             billing = get_or_create_open_billing(self.db, visit=visit)
             order_items = self.repository.items_for_order(order.id)
@@ -120,6 +166,7 @@ class LabOrderService:
                 test = tests_by_id.get(item.lab_test_catalog_id)
                 if test is None:
                     continue
+                # Map catalog test to billable service via code convention
                 billable = find_billable_service(self.db, code=f"LAB-{test.code}")
                 add_charge(
                     self.db,
@@ -132,7 +179,8 @@ class LabOrderService:
                     source_reference=f"LAB_ORDER_ITEM:{item.id}",
                 )
 
-        # Routing decision: cashier first when pre-payment is required.
+        # 6. Workflow Routing
+        # Determine if patient needs to pay before proceeding to the lab
         next_sdp_id: Optional[int] = None
         if requires_pre_payment(source="LAB"):
             next_sdp_id = (
@@ -154,6 +202,7 @@ class LabOrderService:
                 notes="Routed by lab order.",
             )
 
+        # 7. Audit Logging
         record_security_event(
             self.db,
             user_id=actor_user_id,
@@ -171,7 +220,7 @@ class LabOrderService:
         return self.repository.get_required_by_id(order.id)
 
     # ============================================================
-    # SPECIMEN / EXECUTION
+    # LAB OPERATIONAL WORKFLOW
     # ============================================================
 
     def collect_specimen(
@@ -181,6 +230,11 @@ class LabOrderService:
         *,
         actor_user_id: Optional[int] = None,
     ) -> LabOrderItem:
+        """
+        Record the collection of a biological specimen for a lab test.
+        
+        Transitions state from ORDERED to SAMPLE_COLLECTED.
+        """
         item = self.repository.get_required_item_by_id(item_id)
         if item.status not in {OrderStatus.ORDERED, OrderStatus.SAMPLE_COLLECTED}:
             raise BadRequestError(
@@ -188,6 +242,7 @@ class LabOrderService:
                 detail={"status": str(item.status)},
             )
 
+        # Ensure patient is checked into the Laboratory service point
         current_step = validate_visit_sdp_activity(
             self.db,
             visit_id=item.lab_order.visit_id,
@@ -200,8 +255,10 @@ class LabOrderService:
         item.sample_collected_at = datetime.now(timezone.utc)
         item.visit_flow_step_id = current_step.id
         item.status = OrderStatus.SAMPLE_COLLECTED
+        
         self.repository.save_item(item)
 
+        # Aggregate roll-up
         order = self.repository.get_required_by_id(item.lab_order_id)
         self.repository.recompute_order_status(order)
 
@@ -214,19 +271,31 @@ class LabOrderService:
         *,
         actor_user_id: Optional[int] = None,
     ) -> LabOrderItem:
+        """
+        Mark a specimen as having entered the analytical phase.
+        
+        Transitions state from SAMPLE_COLLECTED to IN_PROGRESS.
+        """
         item = self.repository.get_required_item_by_id(item_id)
         if item.status not in {OrderStatus.SAMPLE_COLLECTED, OrderStatus.IN_PROGRESS}:
             raise BadRequestError(
                 message="Cannot start processing without a collected specimen.",
                 detail={"status": str(item.status)},
             )
+        
         item.status = OrderStatus.IN_PROGRESS
         self.repository.save_item(item)
 
+        # Aggregate roll-up
         order = self.repository.get_required_by_id(item.lab_order_id)
         self.repository.recompute_order_status(order)
+        
         self.db.commit()
         return self.repository.get_required_item_by_id(item.id)
+
+    # ============================================================
+    # CANCELLATION LOGIC
+    # ============================================================
 
     def cancel_item(
         self,
@@ -235,15 +304,20 @@ class LabOrderService:
         reason: Optional[str] = None,
         actor_user_id: Optional[int] = None,
     ) -> LabOrderItem:
+        """
+        Cancel a single lab test within an order.
+        """
         item = self.repository.get_required_item_by_id(item_id)
         if item.status in {OrderStatus.COMPLETED, OrderStatus.CANCELLED}:
             raise BadRequestError(
                 message="Item is already in a terminal state.",
                 detail={"status": str(item.status)},
             )
+        
         item.status = OrderStatus.CANCELLED
         self.repository.save_item(item)
 
+        # Update order header to reflect the loss of an item
         order = self.repository.get_required_by_id(item.lab_order_id)
         self.repository.recompute_order_status(order)
 
@@ -265,6 +339,9 @@ class LabOrderService:
         reason: Optional[str] = None,
         actor_user_id: Optional[int] = None,
     ) -> LabOrder:
+        """
+        Bulk cancel an entire laboratory order and all its non-terminal items.
+        """
         order = self.repository.get_required_by_id(order_id)
         if order.status in {OrderStatus.COMPLETED, OrderStatus.CANCELLED}:
             raise BadRequestError(
@@ -272,6 +349,7 @@ class LabOrderService:
                 detail={"status": str(order.status)},
             )
 
+        # Cancel all line items that aren't already done
         for item in self.repository.items_for_order(order.id):
             if item.status not in {OrderStatus.COMPLETED, OrderStatus.CANCELLED}:
                 item.status = OrderStatus.CANCELLED

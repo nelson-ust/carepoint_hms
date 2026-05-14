@@ -70,6 +70,7 @@ IGNORE_PREFIXES: tuple[str, ...] = (
     "/api/v1/edge-nodes",
     "/api/v1/sync",
     "/api/v1/connectivity",
+    "/api/v1/backups/master",   # Master backups (SaaS level)
     "/docs",
     "/redoc",
     "/openapi.json",

@@ -2,9 +2,9 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Optional
+from typing import Any, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class LabOrderItemCreateSchema(BaseModel):
@@ -47,6 +47,20 @@ class LabOrderItemReadSchema(BaseModel):
     specimen_id: Optional[str] = None
     sample_collected_at: Optional[datetime] = None
     collected_by_staff_id: Optional[int] = None
+    
+    # Contextual fields
+    test_name: Optional[str] = Field(None, description="Derived from lab_test_catalog.name")
+    test_code: Optional[str] = Field(None, description="Derived from lab_test_catalog.code")
+
+    @model_validator(mode="before")
+    @classmethod
+    def resolve_test_metadata(cls, data: Any) -> Any:
+        if hasattr(data, "lab_test_catalog") and data.lab_test_catalog:
+            # Inject metadata for the schema to pick up
+            data.test_name = data.lab_test_catalog.name
+            data.test_code = data.lab_test_catalog.code
+        return data
+
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 
@@ -62,6 +76,20 @@ class LabOrderReadSchema(BaseModel):
     status: str
     clinical_note: Optional[str] = None
     ordered_at: datetime
+    
+    # Contextual fields
+    patient_name: Optional[str] = None
+    hospital_number: Optional[str] = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def resolve_patient_metadata(cls, data: Any) -> Any:
+        if hasattr(data, "visit") and data.visit and data.visit.patient:
+            p = data.visit.patient
+            data.patient_name = f"{p.first_name} {p.last_name}"
+            data.hospital_number = p.hospital_number
+        return data
+
     items: list[LabOrderItemReadSchema] = Field(default_factory=list)
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None

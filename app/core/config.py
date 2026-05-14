@@ -99,8 +99,8 @@ class Settings(BaseSettings):
     )
 
     SQLALCHEMY_ECHO: bool = False
-    DB_POOL_SIZE: int = 5
-    DB_MAX_OVERFLOW: int = 10
+    DB_POOL_SIZE: int = 20
+    DB_MAX_OVERFLOW: int = 40
     DB_POOL_TIMEOUT: int = 30
     DB_POOL_RECYCLE: int = 1800
     DB_POOL_PRE_PING: bool = True
@@ -229,6 +229,8 @@ class Settings(BaseSettings):
     AWS_SECRET_ACCESS_KEY: Optional[SecretStr] = None
     AWS_DEFAULT_REGION: Optional[str] = None
     AWS_S3_BUCKET_NAME: Optional[str] = None
+    BACKUP_ALLOW_DOCKER: bool = False
+    PG_DUMP_PATH: Optional[str] = None
 
     # =========================================================
     # OPTIONAL REDIS / CACHE

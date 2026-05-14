@@ -30,32 +30,6 @@ def get_dispense_service(db: Annotated[Session, Depends(get_db)]) -> DispenseSer
     return DispenseService(db)
 
 
-def _serialize_item(i) -> dict:
-    return {
-        "id": i.id,
-        "dispense_id": i.dispense_id,
-        "prescription_item_id": i.prescription_item_id,
-        "quantity_dispensed": i.quantity_dispensed,
-        "note": i.note,
-        "created_at": getattr(i, "created_at", None),
-    }
-
-
-def _serialize(d) -> dict:
-    return {
-        "id": d.id,
-        "prescription_id": d.prescription_id,
-        "dispensed_by_staff_id": d.dispensed_by_staff_id,
-        "dispense_no": d.dispense_no,
-        "status": str(d.status),
-        "dispensed_at": d.dispensed_at,
-        "note": d.note,
-        "items": [_serialize_item(i) for i in (d.items or []) if not getattr(i, "is_deleted", False)],
-        "created_at": getattr(d, "created_at", None),
-        "updated_at": getattr(d, "updated_at", None),
-    }
-
-
 @router.post(
     "/",
     response_model=DispenseActionResponseSchema,
@@ -69,7 +43,7 @@ def create_dispense(
     _: Annotated[User, Depends(require_permission("PRESCRIPTION_DISPENSE"))],
 ):
     d = service.create_dispense(payload, actor_user_id=actor.id)
-    return {"success": True, "message": "Dispense recorded.", "dispense": _serialize(d)}
+    return {"success": True, "message": "Dispense recorded.", "dispense": d}
 
 
 @router.get(
@@ -86,8 +60,10 @@ def list_for_visit(
 ):
     items, total = service.list_for_visit(visit_id, skip=skip, limit=limit)
     return paginate_response(
-        items=[_serialize(d) for d in items],
-        total=total, skip=skip, limit=limit,
+        items=items,
+        total=total,
+        skip=skip,
+        limit=limit,
         message="Dispenses fetched successfully.",
     )
 
@@ -104,7 +80,7 @@ def list_for_prescription(
 ):
     items = service.list_for_prescription(prescription_id)
     return paginate_response(
-        items=[_serialize(d) for d in items],
+        items=items,
         total=len(items),
         skip=0,
         limit=len(items) or 1,
@@ -122,4 +98,4 @@ def get_dispense(
     _: Annotated[User, Depends(require_permission("PRESCRIPTION_DISPENSE", "PRESCRIPTION_WRITE"))],
     service: Annotated[DispenseService, Depends(get_dispense_service)],
 ):
-    return _serialize(service.get(dispense_id))
+    return service.get(dispense_id)

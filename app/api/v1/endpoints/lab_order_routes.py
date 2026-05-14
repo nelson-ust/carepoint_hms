@@ -1,6 +1,26 @@
 # app/api/v1/endpoints/lab_order_routes.py
 from __future__ import annotations
 
+"""
+app.api.v1.endpoints.lab_order_routes
+
+FastAPI route handlers for Laboratory Order management.
+
+Purpose
+-------
+This module exposes endpoints for:
+- Creating and managing laboratory orders within patient visits.
+- Retrieving lab worklists for processing.
+- Recording specimen collection and analytical phase transitions.
+- Cancelling orders or specific line items.
+
+Security
+--------
+- Requires the "laboratory" plan feature to be enabled for the tenant.
+- Enforces fine-grained permissions (LAB_ORDER_CREATE, LAB_RESULT_ENTER, VISIT_READ).
+- Automatically records security events for mutative actions (creation, cancellation).
+"""
+
 from typing import Annotated, Optional
 
 from fastapi import APIRouter, Depends, Query, status
@@ -29,38 +49,15 @@ router = APIRouter(
 
 
 def get_lab_order_service(db: Annotated[Session, Depends(get_db)]) -> LabOrderService:
+    """
+    Dependency provider for LabOrderService.
+    """
     return LabOrderService(db)
 
 
-def _serialize_item(item) -> dict:
-    return {
-        "id": item.id,
-        "lab_order_id": item.lab_order_id,
-        "lab_test_catalog_id": item.lab_test_catalog_id,
-        "status": str(item.status),
-        "specimen_id": item.specimen_id,
-        "sample_collected_at": item.sample_collected_at,
-        "collected_by_staff_id": item.collected_by_staff_id,
-        "created_at": getattr(item, "created_at", None),
-        "updated_at": getattr(item, "updated_at", None),
-    }
-
-
-def _serialize(order) -> dict:
-    return {
-        "id": order.id,
-        "visit_id": order.visit_id,
-        "consultation_id": order.consultation_id,
-        "ordered_by_staff_id": order.ordered_by_staff_id,
-        "order_no": order.order_no,
-        "status": str(order.status),
-        "clinical_note": order.clinical_note,
-        "ordered_at": order.ordered_at,
-        "items": [_serialize_item(i) for i in (order.items or []) if not getattr(i, "is_deleted", False)],
-        "created_at": getattr(order, "created_at", None),
-        "updated_at": getattr(order, "updated_at", None),
-    }
-
+# ============================================================
+# READ ROUTES
+# ============================================================
 
 @router.get(
     "/visits/{visit_id}",
@@ -74,9 +71,12 @@ def list_for_visit(
     skip: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=200),
 ):
+    """
+    Retrieve all laboratory orders associated with a specific visit ID.
+    """
     items, total = service.list_for_visit(visit_id, skip=skip, limit=limit)
     return paginate_response(
-        items=[_serialize(o) for o in items],
+        items=items,
         total=total,
         skip=skip,
         limit=limit,
@@ -95,18 +95,43 @@ def list_worklist(
     skip: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=200),
     statuses: Optional[list[str]] = Query(
-        None, description="ORDERED, SAMPLE_COLLECTED, IN_PROGRESS, RESULT_READY, COMPLETED, CANCELLED."
+        None, description="Filter by: ORDERED, SAMPLE_COLLECTED, IN_PROGRESS, RESULT_READY, COMPLETED, CANCELLED."
     ),
 ):
+    """
+    Retrieve a worklist of active laboratory orders for processing.
+    
+    Defaults to orders that are not yet COMPLETED or CANCELLED.
+    """
     items, total = service.list_lab_worklist(skip=skip, limit=limit, statuses=statuses)
     return paginate_response(
-        items=[_serialize(o) for o in items],
+        items=items,
         total=total,
         skip=skip,
         limit=limit,
         message="Lab worklist fetched successfully.",
     )
 
+
+@router.get(
+    "/{order_id}",
+    response_model=LabOrderReadSchema,
+    summary="Get a lab order",
+)
+def get_order(
+    order_id: int,
+    _: Annotated[User, Depends(require_permission("LAB_ORDER_CREATE", "LAB_RESULT_ENTER", "VISIT_READ"))],
+    service: Annotated[LabOrderService, Depends(get_lab_order_service)],
+):
+    """
+    Retrieve full details for a single laboratory order by its ID.
+    """
+    return service.get(order_id)
+
+
+# ============================================================
+# MUTATION ROUTES
+# ============================================================
 
 @router.post(
     "/",
@@ -120,21 +145,11 @@ def create_order(
     service: Annotated[LabOrderService, Depends(get_lab_order_service)],
     _: Annotated[User, Depends(require_permission("LAB_ORDER_CREATE"))],
 ):
+    """
+    Initiate a new laboratory order for a visit.
+    """
     order = service.create_order(payload, actor_user_id=actor.id)
-    return {"success": True, "message": "Lab order created.", "lab_order": _serialize(order)}
-
-
-@router.get(
-    "/{order_id}",
-    response_model=LabOrderReadSchema,
-    summary="Get a lab order",
-)
-def get_order(
-    order_id: int,
-    _: Annotated[User, Depends(require_permission("LAB_ORDER_CREATE", "LAB_RESULT_ENTER", "VISIT_READ"))],
-    service: Annotated[LabOrderService, Depends(get_lab_order_service)],
-):
-    return _serialize(service.get(order_id))
+    return {"success": True, "message": "Lab order created.", "lab_order": order}
 
 
 @router.post(
@@ -149,11 +164,14 @@ def collect_specimen(
     service: Annotated[LabOrderService, Depends(get_lab_order_service)],
     _: Annotated[User, Depends(require_permission("LAB_RESULT_ENTER"))],
 ):
+    """
+    Record biological specimen collection for a specific test item.
+    """
     item = service.collect_specimen(item_id, payload, actor_user_id=actor.id)
     return {
         "success": True,
         "message": "Specimen collected.",
-        "lab_order": _serialize(service.get(item.lab_order_id)),
+        "lab_order": service.get(item.lab_order_id),
     }
 
 
@@ -168,11 +186,14 @@ def start_processing(
     service: Annotated[LabOrderService, Depends(get_lab_order_service)],
     _: Annotated[User, Depends(require_permission("LAB_RESULT_ENTER"))],
 ):
+    """
+    Mark a lab order item as having entered the analytical processing phase.
+    """
     item = service.start_processing(item_id, actor_user_id=actor.id)
     return {
         "success": True,
         "message": "Processing started.",
-        "lab_order": _serialize(service.get(item.lab_order_id)),
+        "lab_order": service.get(item.lab_order_id),
     }
 
 
@@ -188,11 +209,14 @@ def cancel_item(
     service: Annotated[LabOrderService, Depends(get_lab_order_service)],
     _: Annotated[User, Depends(require_permission("LAB_ORDER_CREATE"))],
 ):
+    """
+    Cancel a single laboratory test within an order.
+    """
     item = service.cancel_item(item_id, reason=payload.reason, actor_user_id=actor.id)
     return {
         "success": True,
         "message": "Lab order item cancelled.",
-        "lab_order": _serialize(service.get(item.lab_order_id)),
+        "lab_order": service.get(item.lab_order_id),
     }
 
 
@@ -208,5 +232,8 @@ def cancel_order(
     service: Annotated[LabOrderService, Depends(get_lab_order_service)],
     _: Annotated[User, Depends(require_permission("LAB_ORDER_CREATE"))],
 ):
+    """
+    Cancel an entire laboratory order and all its non-terminal items.
+    """
     order = service.cancel_order(order_id, reason=payload.reason, actor_user_id=actor.id)
-    return {"success": True, "message": "Lab order cancelled.", "lab_order": _serialize(order)}
+    return {"success": True, "message": "Lab order cancelled.", "lab_order": order}
