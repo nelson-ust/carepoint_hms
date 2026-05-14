@@ -186,3 +186,6 @@ def validate_visit_sdp_activity(
         )
 
     return current_step
+
+
+

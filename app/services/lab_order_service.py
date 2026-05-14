@@ -81,6 +81,7 @@ class LabOrderService:
                 message="Cannot order labs for a closed visit.",
                 detail={"visit_status": str(visit.status)},
             )
+            
 
         current_step = validate_visit_sdp_activity(
             self.db,
