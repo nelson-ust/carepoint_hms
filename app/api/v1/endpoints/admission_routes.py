@@ -58,31 +58,6 @@ def get_admission_service(db: Annotated[Session, Depends(get_db)]) -> AdmissionS
     return AdmissionService(db)
 
 
-def _serialize(a) -> dict:
-    """
-    Convert an Admission ORM row to the dict the response schemas expect.
-
-    Kept here (not in the schema module) because we want a single, explicit
-    place where ORM ↔ JSON shape decisions are made.
-    """
-    return {
-        "id": a.id,
-        "admission_no": a.admission_no,
-        "patient_id": a.patient_id,
-        "visit_id": a.visit_id,
-        "ward_id": a.ward_id,
-        "bed_id": a.bed_id,
-        "admitted_by_staff_id": a.admitted_by_staff_id,
-        "admission_status": str(a.admission_status),
-        "admission_reason": a.admission_reason,
-        "admitted_at": a.admitted_at,
-        "expected_discharge_at": a.expected_discharge_at,
-        "actual_discharge_at": a.actual_discharge_at,
-        "created_at": getattr(a, "created_at", None),
-        "updated_at": getattr(a, "updated_at", None),
-    }
-
-
 # ============================================================
 # READ
 # ============================================================
@@ -114,7 +89,7 @@ def list_admissions(
         status=status_filter, facility_id=facility_id,
     )
     return paginate_response(
-        items=[_serialize(a) for a in items],
+        items=items,
         total=total,
         skip=skip,
         limit=limit,
@@ -138,7 +113,7 @@ def list_active_for_ward(
     # we don't paginate. The paginate_response wrapper still gives the
     # caller a count + meta block for consistency.
     return paginate_response(
-        items=[_serialize(a) for a in items],
+        items=items,
         total=len(items),
         skip=0,
         limit=len(items) or 1,
@@ -157,7 +132,7 @@ def get_admission(
     service: Annotated[AdmissionService, Depends(get_admission_service)],
 ):
     """Return a single admission by id."""
-    return _serialize(service.get(admission_id))
+    return service.get(admission_id)
 
 
 # ============================================================
@@ -185,7 +160,7 @@ def admit_patient(
     return {
         "success": True,
         "message": "Patient admitted.",
-        "admission": _serialize(admission),
+        "admission": admission,
     }
 
 
@@ -211,7 +186,7 @@ def convert_visit_to_admission(
     return {
         "success": True,
         "message": "Visit converted to inpatient admission.",
-        "admission": _serialize(admission),
+        "admission": admission,
     }
 
 
@@ -232,7 +207,7 @@ def transfer_bed(
     return {
         "success": True,
         "message": "Patient transferred to new bed.",
-        "admission": _serialize(admission),
+        "admission": admission,
     }
 
 
@@ -253,7 +228,35 @@ def update_status(
     return {
         "success": True,
         "message": f"Admission status updated to {payload.new_status}.",
-        "admission": _serialize(admission),
+        "admission": admission,
+    }
+
+
+@router.post(
+    "/{admission_id}/bed-days",
+    response_model=AdmissionBedDayCaptureResponseSchema,
+    summary="Capture bed-day charges up to a date",
+)
+def capture_bed_day_charges(
+    admission_id: int,
+    payload: AdmissionBedDayCaptureSchema,
+    actor: CurrentActiveUser,
+    service: Annotated[AdmissionService, Depends(get_admission_service)],
+    _: Annotated[User, Depends(require_permission("BILLING_CREATE", "ADMISSION_CREATE"))],
+):
+    """
+    Capture all bed-day charges for an admission up to ``through_date``.
+
+    Idempotent. Used by the nightly rollover and by cashier "settle now" flows.
+    """
+    summary = service.capture_bed_day_charges(admission_id, payload, actor_user_id=actor.id)
+    return {
+        "success": True,
+        "message": "Bed-day charges captured successfully.",
+        "admission_id": summary["admission_id"],
+        "charges_captured": summary["charges_captured"],
+        "total_amount_captured": summary["total_amount_captured"],
+        "captured_through": summary["captured_through"],
     }
 
 

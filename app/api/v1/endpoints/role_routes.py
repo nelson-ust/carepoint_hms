@@ -57,34 +57,9 @@ def get_role_service(
     return RoleService(db)
 
 
-def _serialize_role(role) -> dict:
-    """
-    Convert a Role ORM object into a response-friendly dictionary.
-
-    This keeps route handlers simple and avoids repeating transformation logic.
-    """
-    permissions = []
-    for link in role.role_permissions or []:
-        if link.permission and not link.permission.is_deleted:
-            permissions.append(
-                {
-                    "id": link.permission.id,
-                    "name": link.permission.name,
-                    "code": link.permission.code,
-                    "module": link.permission.module,
-                    "description": link.permission.description,
-                }
-            )
-
-    return {
-        "id": role.id,
-        "name": role.name,
-        "code": role.code,
-        "description": role.description,
-        "created_at": role.created_at,
-        "updated_at": role.updated_at,
-        "permissions": permissions,
-    }
+# ============================================================
+# ROUTES
+# ============================================================
 
 
 @router.get(
@@ -130,8 +105,7 @@ def get_role(
     """
     Return the full details of a single role, including its permissions.
     """
-    role = service.get_role(role_id)
-    return _serialize_role(role)
+    return service.get_role(role_id)
 
 
 @router.post(
@@ -150,8 +124,7 @@ def create_role(
 
     Optionally accepts permission IDs to attach immediately.
     """
-    role = service.create_role(payload)
-    return _serialize_role(role)
+    return service.create_role(payload)
 
 
 @router.put(
@@ -169,8 +142,7 @@ def update_role(
     """
     Update an existing role.
     """
-    role = service.update_role(role_id, payload)
-    return _serialize_role(role)
+    return service.update_role(role_id, payload)
 
 
 @router.delete(
@@ -217,7 +189,7 @@ def assign_permissions_to_role(
     return {
         "success": True,
         "message": "Permissions assigned successfully.",
-        "role": _serialize_role(role),
+        "role": role,
     }
 
 
@@ -240,5 +212,5 @@ def remove_permissions_from_role(
     return {
         "success": True,
         "message": "Permissions removed successfully.",
-        "role": _serialize_role(role),
+        "role": role,
     }

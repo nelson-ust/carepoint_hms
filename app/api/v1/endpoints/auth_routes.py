@@ -126,62 +126,6 @@ def _resolve_client_ip(request: Request) -> str:
 # SERIALIZATION HELPERS
 # ============================================================
 
-def _serialize_auth_user(user: dict[str, Any] | Any) -> dict[str, Any]:
-    """
-    Serialize lightweight authenticated user payload.
-
-    Accepts either a dict returned by the service or an ORM-like object.
-    """
-    if isinstance(user, dict):
-        return user
-
-    return {
-        "id": user.id,
-        "username": user.username,
-        "email": getattr(user, "email", None),
-        "phone_number": getattr(user, "phone_number", None),
-        "first_name": user.first_name,
-        "last_name": user.last_name,
-        "middle_name": getattr(user, "middle_name", None),
-        "status": str(getattr(user, "status", None)) if getattr(user, "status", None) is not None else None,
-        "is_superuser": getattr(user, "is_superuser", False),
-        "is_email_verified": getattr(user, "is_email_verified", False),
-        "is_phone_verified": getattr(user, "is_phone_verified", False),
-        "is_two_factor_enabled": getattr(user, "is_two_factor_enabled", False),
-    }
-
-
-def _serialize_auth_profile(payload: dict[str, Any] | Any) -> dict[str, Any]:
-    """
-    Serialize authenticated user profile payload.
-    """
-    if isinstance(payload, dict):
-        return payload
-
-    return {
-        "id": payload.id,
-        "username": payload.username,
-        "email": getattr(payload, "email", None),
-        "phone_number": getattr(payload, "phone_number", None),
-        "first_name": payload.first_name,
-        "last_name": payload.last_name,
-        "middle_name": getattr(payload, "middle_name", None),
-        "status": str(getattr(payload, "status", None)) if getattr(payload, "status", None) is not None else None,
-        "is_superuser": getattr(payload, "is_superuser", False),
-        "is_email_verified": getattr(payload, "is_email_verified", False),
-        "is_phone_verified": getattr(payload, "is_phone_verified", False),
-        "is_two_factor_enabled": getattr(payload, "is_two_factor_enabled", False),
-        "two_factor_method": str(getattr(payload, "two_factor_method", None)) if getattr(payload, "two_factor_method", None) is not None else None,
-        "two_factor_email_enabled": getattr(payload, "two_factor_email_enabled", False),
-        "two_factor_sms_enabled": getattr(payload, "two_factor_sms_enabled", False),
-        "two_factor_whatsapp_enabled": getattr(payload, "two_factor_whatsapp_enabled", False),
-        "two_factor_authenticator_enabled": getattr(payload, "two_factor_authenticator_enabled", False),
-        "roles": [],
-        "created_at": getattr(payload, "created_at", None),
-        "updated_at": getattr(payload, "updated_at", None),
-    }
-
-
 # ============================================================
 # ROUTES
 # ============================================================
@@ -230,7 +174,7 @@ def login(
     return {
         "success": True,
         "message": result["message"],
-        "user": _serialize_auth_user(result["user"]),
+        "user": result["user"],
         "tokens": result["tokens"],
     }
 
@@ -330,20 +274,13 @@ def get_authenticated_profile(
     """
     if get_current_tenant() is None:
         # SaaS Admin Profile
-        return {
-            "id": current_user.id,
-            "email": current_user.email,
-            "first_name": current_user.first_name,
-            "last_name": current_user.last_name,
-            "is_superuser": current_user.is_superuser,
-            "is_active": current_user.is_active,
-        }
+        return current_user
 
     result = service.get_authenticated_profile(current_user.id)
     return {
         "success": True,
         "message": result["message"],
-        "user": _serialize_auth_profile(result["user"]),
+        "user": result["user"],
         "session": result.get("session"),
     }
 
@@ -455,7 +392,7 @@ def verify_otp(
                 "success": True,
                 "message": result["message"],
                 "verified": result.get("verified", True),
-                "user": None,
+                "user": result.get("user"),
                 "tokens": result.get("tokens"),
             }
 
@@ -465,7 +402,7 @@ def verify_otp(
         "success": True,
         "message": result["message"],
         "verified": result.get("verified", True),
-        "user": _serialize_auth_user(result["user"]) if result.get("user") else None,
+        "user": result["user"] if result.get("user") else None,
         "tokens": result.get("tokens"),
     }
 
@@ -533,7 +470,7 @@ def verify_two_factor(
         "success": True,
         "message": result["message"],
         "verified": result.get("verified", True),
-        "user": _serialize_auth_user(result["user"]) if result.get("user") else None,
+        "user": result["user"] if result.get("user") else None,
         "tokens": result.get("tokens"),
     }
 

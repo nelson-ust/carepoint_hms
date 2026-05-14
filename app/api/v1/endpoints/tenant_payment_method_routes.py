@@ -121,44 +121,6 @@ class PaymentMethodReadSchema(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
-def _serialize(rec) -> PaymentMethodReadSchema:
-    return PaymentMethodReadSchema(
-        id=rec.id,
-        channel=rec.channel,
-        provider=rec.provider,
-        display_name=rec.display_name,
-        description=rec.description,
-        currency=rec.currency,
-        is_active=rec.is_active,
-        is_default=rec.is_default,
-        accepts_patient_payments=rec.accepts_patient_payments,
-        accepts_subscription_payments=rec.accepts_subscription_payments,
-        minimum_amount=float(rec.minimum_amount) if rec.minimum_amount is not None else None,
-        maximum_amount=float(rec.maximum_amount) if rec.maximum_amount is not None else None,
-        fee_percent=float(rec.fee_percent or 0),
-        fee_flat=float(rec.fee_flat or 0),
-        fee_borne_by_patient=rec.fee_borne_by_patient,
-        api_base_url=rec.api_base_url,
-        callback_url=rec.callback_url,
-        webhook_url=rec.webhook_url,
-        metadata_json=rec.metadata_json,
-        sandbox_mode=rec.sandbox_mode,
-        last_used_at=rec.last_used_at,
-        last_test_at=rec.last_test_at,
-        last_test_status=rec.last_test_status,
-        last_test_error=rec.last_test_error,
-        has_secret_key=bool(rec.secret_key_encrypted),
-        has_public_key=bool(rec.public_key_encrypted),
-        has_webhook_secret=bool(rec.webhook_secret_encrypted),
-        has_api_token=bool(rec.api_token_encrypted),
-        has_merchant_id=bool(rec.merchant_id_encrypted),
-    )
-
-
-def _service(db: Annotated[Session, Depends(get_db)]) -> TenantPaymentMethodService:
-    return TenantPaymentMethodService(db)
-
-
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
@@ -174,7 +136,7 @@ def list_payment_methods(
     service: Annotated[TenantPaymentMethodService, Depends(_service)],
     only_active: bool = False,
 ):
-    return [_serialize(c) for c in service.list_configs(only_active=only_active)]
+    return service.list_configs(only_active=only_active)
 
 
 @router.post(
@@ -189,7 +151,7 @@ def create_payment_method(
     service: Annotated[TenantPaymentMethodService, Depends(_service)],
 ):
     creds = payload.credentials.model_dump(exclude_none=True) if payload.credentials else None
-    rec = service.create(
+    return service.create(
         channel=payload.channel,
         provider=payload.provider,
         display_name=payload.display_name,
@@ -211,7 +173,6 @@ def create_payment_method(
         sandbox_mode=payload.sandbox_mode,
         credentials=creds,
     )
-    return _serialize(rec)
 
 
 @router.put(
@@ -226,7 +187,7 @@ def update_payment_method(
     service: Annotated[TenantPaymentMethodService, Depends(_service)],
 ):
     creds = payload.credentials.model_dump(exclude_none=True) if payload.credentials else None
-    rec = service.update(
+    return service.update(
         config_id,
         display_name=payload.display_name,
         description=payload.description,
@@ -247,7 +208,6 @@ def update_payment_method(
         sandbox_mode=payload.sandbox_mode,
         credentials=creds,
     )
-    return _serialize(rec)
 
 
 @router.delete(

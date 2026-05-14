@@ -82,41 +82,6 @@ class MyProfileUpdateSchema(BaseModel):
     job_title: Optional[str] = None
 
 
-def _serialize(user: User) -> dict:
-    roles = []
-    for assoc in user.user_roles or []:
-        if getattr(assoc, "is_deleted", False):
-            continue
-        role = getattr(assoc, "role", None)
-        if role is None:
-            continue
-        roles.append({"id": role.id, "name": role.name, "code": role.code})
-
-    return {
-        "id": user.id,
-        "username": user.username,
-        "email": user.email,
-        "phone_number": user.phone_number,
-        "first_name": user.first_name,
-        "last_name": user.last_name,
-        "middle_name": user.middle_name,
-        "profile_photo_url": user.profile_photo_url,
-        "job_title": user.job_title,
-        "department_id": user.department_id,
-        "facility_id": user.facility_id,
-        "employment_status": user.employment_status,
-        "bio": user.bio,
-        "date_of_birth": user.date_of_birth,
-        "gender": user.gender,
-        "is_email_verified": user.is_email_verified,
-        "is_phone_verified": user.is_phone_verified,
-        "is_two_factor_enabled": user.is_two_factor_enabled,
-        "profile_completion": user.profile_completion,
-        "last_login_at": user.last_login_at,
-        "roles": roles,
-    }
-
-
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
@@ -130,7 +95,7 @@ def _serialize(user: User) -> dict:
 def read_me(
     current_user: Annotated[User, Depends(get_current_active_user)],
 ):
-    return _serialize(current_user)
+    return current_user
 
 
 @router.put(
@@ -148,7 +113,7 @@ def update_me(
         setattr(current_user, key, value)
     db.commit()
     db.refresh(current_user)
-    return _serialize(current_user)
+    return current_user
 
 
 @router.post(
@@ -196,7 +161,7 @@ def upload_photo(
     current_user.profile_photo_url = photo_url
     db.commit()
     db.refresh(current_user)
-    return _serialize(current_user)
+    return current_user
 
 
 @router.delete(
@@ -211,4 +176,4 @@ def remove_photo(
     current_user.profile_photo_url = None
     db.commit()
     db.refresh(current_user)
-    return _serialize(current_user)
+    return current_user

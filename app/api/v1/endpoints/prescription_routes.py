@@ -31,37 +31,9 @@ def get_prescription_service(db: Annotated[Session, Depends(get_db)]) -> Prescri
     return PrescriptionService(db)
 
 
-def _serialize_item(i) -> dict:
-    return {
-        "id": i.id,
-        "prescription_id": i.prescription_id,
-        "drug_id": i.drug_id,
-        "dosage": i.dosage,
-        "frequency": i.frequency,
-        "duration": i.duration,
-        "route": i.route,
-        "quantity_prescribed": i.quantity_prescribed,
-        "quantity_dispensed": i.quantity_dispensed,
-        "instructions": i.instructions,
-        "created_at": getattr(i, "created_at", None),
-        "updated_at": getattr(i, "updated_at", None),
-    }
-
-
-def _serialize(p) -> dict:
-    return {
-        "id": p.id,
-        "visit_id": p.visit_id,
-        "consultation_id": p.consultation_id,
-        "prescribed_by_staff_id": p.prescribed_by_staff_id,
-        "prescription_no": p.prescription_no,
-        "status": str(p.status),
-        "note": p.note,
-        "prescribed_at": p.prescribed_at,
-        "items": [_serialize_item(i) for i in (p.items or []) if not getattr(i, "is_deleted", False)],
-        "created_at": getattr(p, "created_at", None),
-        "updated_at": getattr(p, "updated_at", None),
-    }
+# ============================================================
+# READ
+# ============================================================
 
 
 @router.get(
@@ -78,7 +50,7 @@ def list_for_visit(
 ):
     items, total = service.list_for_visit(visit_id, skip=skip, limit=limit)
     return paginate_response(
-        items=[_serialize(p) for p in items],
+        items=items,
         total=total, skip=skip, limit=limit,
         message="Prescriptions fetched successfully.",
     )
@@ -97,7 +69,7 @@ def create_prescription(
     _: Annotated[User, Depends(require_permission("PRESCRIPTION_WRITE"))],
 ):
     p = service.create_prescription(payload, actor_user_id=actor.id)
-    return {"success": True, "message": "Prescription created.", "prescription": _serialize(p)}
+    return {"success": True, "message": "Prescription created.", "prescription": p}
 
 
 @router.get(
@@ -110,7 +82,7 @@ def get_prescription(
     _: Annotated[User, Depends(require_permission("PRESCRIPTION_WRITE", "PRESCRIPTION_DISPENSE"))],
     service: Annotated[PrescriptionService, Depends(get_prescription_service)],
 ):
-    return _serialize(service.get(prescription_id))
+    return service.get(prescription_id)
 
 
 @router.post(
@@ -126,4 +98,4 @@ def cancel_prescription(
     _: Annotated[User, Depends(require_permission("PRESCRIPTION_WRITE"))],
 ):
     p = service.cancel_prescription(prescription_id, reason=payload.reason, actor_user_id=actor.id)
-    return {"success": True, "message": "Prescription cancelled.", "prescription": _serialize(p)}
+    return {"success": True, "message": "Prescription cancelled.", "prescription": p}

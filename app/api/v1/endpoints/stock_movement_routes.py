@@ -27,20 +27,9 @@ def get_stock_movement_service(db: Annotated[Session, Depends(get_db)]) -> Stock
     return StockMovementService(db)
 
 
-def _serialize(m) -> dict:
-    return {
-        "id": m.id,
-        "store_id": m.store_id,
-        "stock_item_id": m.stock_item_id,
-        "performed_by_staff_id": m.performed_by_staff_id,
-        "movement_type": str(m.movement_type),
-        "reference_no": m.reference_no,
-        "quantity": m.quantity,
-        "balance_after": m.balance_after,
-        "movement_date": m.movement_date,
-        "note": m.note,
-        "created_at": getattr(m, "created_at", None),
-    }
+# ============================================================
+# READ
+# ============================================================
 
 
 @router.get(
@@ -62,7 +51,7 @@ def list_movements(
         store_id=store_id, stock_item_id=stock_item_id, movement_type=movement_type,
     )
     return paginate_response(
-        items=[_serialize(m) for m in items],
+        items=items,
         total=total, skip=skip, limit=limit,
         message="Stock movements fetched successfully.",
     )
@@ -81,7 +70,7 @@ def post_movement(
     service: Annotated[StockMovementService, Depends(get_stock_movement_service)],
 ):
     movement = service.post_movement(payload, actor_user_id=actor.id)
-    return {"success": True, "message": "Stock movement posted.", "movement": _serialize(movement)}
+    return {"success": True, "message": "Stock movement posted.", "movement": movement}
 
 
 @router.post(
@@ -98,8 +87,8 @@ def transfer_stock(
     return {
         "success": True,
         "message": "Stock transferred.",
-        "out_movement": _serialize(result["out_movement"]),
-        "in_movement": _serialize(result["in_movement"]),
+        "out_movement": result["out_movement"],
+        "in_movement": result["in_movement"],
     }
 
 
@@ -113,4 +102,4 @@ def get_movement(
     _: Annotated[User, Depends(require_permission("INVENTORY_READ"))],
     service: Annotated[StockMovementService, Depends(get_stock_movement_service)],
 ):
-    return _serialize(service.get(movement_id))
+    return service.get(movement_id)

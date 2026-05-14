@@ -132,38 +132,6 @@ def _service(db: Annotated[Session, Depends(get_db)]) -> TenantEmailService:
     return TenantEmailService(db)
 
 
-def _serialize(rec) -> EmailConfigReadSchema:
-    return EmailConfigReadSchema(
-        id=rec.id,
-        provider=rec.provider,
-        display_name=rec.display_name,
-        description=rec.description,
-        from_email=rec.from_email,
-        from_name=rec.from_name,
-        reply_to=rec.reply_to,
-        footer_text=rec.footer_text,
-        footer_html=rec.footer_html,
-        is_active=rec.is_active,
-        is_default=rec.is_default,
-        sandbox_mode=rec.sandbox_mode,
-        smtp_host=rec.smtp_host,
-        smtp_port=rec.smtp_port,
-        smtp_security=rec.smtp_security,
-        smtp_username=rec.smtp_username,
-        api_base_url=rec.api_base_url,
-        api_region=rec.api_region,
-        api_domain=rec.api_domain,
-        last_used_at=rec.last_used_at,
-        last_test_at=rec.last_test_at,
-        last_test_status=rec.last_test_status,
-        last_test_error=rec.last_test_error,
-        sent_count=rec.sent_count or 0,
-        has_smtp_password=bool(rec.smtp_password_encrypted),
-        has_api_key=bool(rec.api_key_encrypted),
-        has_api_secret=bool(rec.api_secret_encrypted),
-    )
-
-
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
@@ -179,7 +147,7 @@ def list_email_configs(
     service: Annotated[TenantEmailService, Depends(_service)],
     only_active: bool = False,
 ):
-    return [_serialize(c) for c in service.list_configs(only_active=only_active)]
+    return service.list_configs(only_active=only_active)
 
 
 @router.post(
@@ -194,7 +162,7 @@ def create_email_config(
     service: Annotated[TenantEmailService, Depends(_service)],
 ):
     creds = payload.credentials.model_dump(exclude_none=True) if payload.credentials else None
-    rec = service.create(
+    return service.create(
         provider=payload.provider,
         display_name=payload.display_name,
         description=payload.description,
@@ -215,7 +183,6 @@ def create_email_config(
         api_domain=payload.api_domain,
         credentials=creds,
     )
-    return _serialize(rec)
 
 
 @router.put(
@@ -230,7 +197,7 @@ def update_email_config(
     service: Annotated[TenantEmailService, Depends(_service)],
 ):
     creds = payload.credentials.model_dump(exclude_none=True) if payload.credentials else None
-    rec = service.update(
+    return service.update(
         config_id,
         provider=payload.provider,
         display_name=payload.display_name,
@@ -252,7 +219,6 @@ def update_email_config(
         api_domain=payload.api_domain,
         credentials=creds,
     )
-    return _serialize(rec)
 
 
 @router.delete(

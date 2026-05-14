@@ -253,3 +253,22 @@ class QueueRepository:
             .order_by(QueueTicket.id.asc())
             .all()
         )
+
+    def get_batch_previous_tickets(self, visit_ids: list[int], current_ticket_ids: list[int]) -> list[QueueTicket]:
+        """
+        Fetch historical tickets for multiple visits in a single query.
+        """
+        if not visit_ids:
+            return []
+            
+        return (
+            self.db.query(QueueTicket)
+            .options(joinedload(QueueTicket.service_delivery_point))
+            .filter(
+                QueueTicket.visit_id.in_(visit_ids),
+                QueueTicket.is_deleted.is_(False),
+                QueueTicket.status.in_([QueueStatus.SERVED, QueueStatus.TRANSFERRED]),
+            )
+            .order_by(QueueTicket.id.asc())
+            .all()
+        )

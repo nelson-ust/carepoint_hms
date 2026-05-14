@@ -103,6 +103,35 @@ class PushBatchSchema(BaseModel):
     rows: list[PushRowSchema]
 
 
+class SyncJournalReadSchema(BaseModel):
+    seq: int
+    client_uuid: str
+    entity_type: str
+    entity_id: Optional[int] = None
+    op: SyncJournalOp
+    payload: Optional[dict[str, Any]] = None
+    occurred_at: Optional[datetime] = None
+    origin: Optional[str] = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class SyncPullResponseSchema(BaseModel):
+    node: str
+    cursor: int
+    count: int
+    rows: list[SyncJournalReadSchema]
+    has_more: bool
+
+
+class SyncPushResponseSchema(BaseModel):
+    node: str
+    applied: int
+    duplicates: int
+    rejected: int
+    rejected_details: list[dict[str, Any]] = Field(default_factory=list)
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -217,6 +246,7 @@ def edge_handshake(
 
 @sync_router.get(
     "/pull",
+    response_model=SyncPullResponseSchema,
     summary="Pull cloud-authored journal rows since cursor",
 )
 def edge_pull(
@@ -229,6 +259,7 @@ def edge_pull(
 
 @sync_router.post(
     "/push",
+    response_model=SyncPushResponseSchema,
     summary="Push edge-authored journal rows to the cloud",
 )
 def edge_push(

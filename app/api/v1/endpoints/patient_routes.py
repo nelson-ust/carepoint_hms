@@ -77,6 +77,9 @@ def get_patient_service(
     return PatientService(db)
 
 
+
+
+
 # ============================================================
 # ROUTES
 # ============================================================
@@ -142,7 +145,9 @@ def check_for_possible_duplicates(
     """
     candidates = service.check_for_possible_duplicates(payload)
 
-    serialized_candidates = []
+    # Note: The match score calculation is kept here as it's logic specific to the duplicate check view.
+    # However, we return the ORM patient objects directly within the response structure.
+    results = []
     for candidate in candidates:
         matched_on: list[str] = []
 
@@ -169,19 +174,9 @@ def check_for_possible_duplicates(
 
         score = min(100.0, float(len(set(matched_on)) * 20))
 
-        serialized_candidates.append(
+        results.append(
             {
-                "patient": {
-                    "id": candidate.id,
-                    "hospital_number": candidate.hospital_number,
-                    "first_name": candidate.first_name,
-                    "last_name": candidate.last_name,
-                    "middle_name": candidate.middle_name,
-                    "date_of_birth": candidate.date_of_birth,
-                    "gender": _safe_enum(candidate.gender),
-                    "phone_number": candidate.phone_number,
-                    "patient_type": _safe_enum(candidate.patient_type),
-                },
+                "patient": candidate,
                 "match_score": score,
                 "matched_on": sorted(set(matched_on)),
             }
@@ -189,11 +184,11 @@ def check_for_possible_duplicates(
 
     return {
         "success": True,
-        "possible_duplicate_found": len(serialized_candidates) > 0,
-        "candidates": serialized_candidates,
+        "possible_duplicate_found": len(results) > 0,
+        "candidates": results,
         "message": (
             "Possible duplicate patient record(s) found."
-            if serialized_candidates
+            if results
             else "No possible duplicate patient records found."
         ),
     }
@@ -497,13 +492,12 @@ async def create_patient_attachment(
     )
 
     file_bytes = await file.read()
-    attachment = service.create_patient_attachment(
+    return service.create_patient_attachment(
         patient_id,
         payload,
         file_bytes=file_bytes,
         uploaded_by_id=current_user.id,
     )
-    return _serialize_attachment(attachment)
 
 
 @router.post(
@@ -531,13 +525,12 @@ async def create_patient_scanned_form(
     )
 
     file_bytes = await file.read()
-    form = service.create_patient_scanned_form(
+    return service.create_patient_scanned_form(
         patient_id,
         payload,
         file_bytes=file_bytes,
         uploaded_by_id=current_user.id,
     )
-    return _serialize_scanned_form(form)
 
 
 @router.post(
@@ -555,12 +548,11 @@ def create_patient_consent_record(
     """
     Create patient consent record.
     """
-    consent = service.create_patient_consent_record(
+    return service.create_patient_consent_record(
         patient_id,
         payload,
         recorded_by_id=current_user.id,
     )
-    return _serialize_consent(consent)
 
 
 @router.delete(

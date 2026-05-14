@@ -52,51 +52,9 @@ def get_movement_service(db: Annotated[Session, Depends(get_db)]) -> StockMoveme
     return StockMovementService(db)
 
 
-def _serialize_store(s) -> dict:
-    return {
-        "id": s.id,
-        "name": s.name,
-        "code": s.code,
-        "location_description": s.location_description,
-        "description": s.description,
-        "created_at": getattr(s, "created_at", None),
-        "updated_at": getattr(s, "updated_at", None),
-    }
-
-
-def _serialize_item(i) -> dict:
-    return {
-        "id": i.id,
-        "store_id": i.store_id,
-        "drug_id": i.drug_id,
-        "item_type": str(i.item_type),
-        "item_name": i.item_name,
-        "sku": i.sku,
-        "unit_of_measure": i.unit_of_measure,
-        "quantity_on_hand": i.quantity_on_hand,
-        "reorder_level": i.reorder_level,
-        "unit_cost": i.unit_cost,
-        "expiry_date": i.expiry_date,
-        "batch_no": i.batch_no,
-        "created_at": getattr(i, "created_at", None),
-        "updated_at": getattr(i, "updated_at", None),
-    }
-
-
-def _serialize_movement(m) -> dict:
-    return {
-        "id": m.id,
-        "store_id": m.store_id,
-        "stock_item_id": m.stock_item_id,
-        "performed_by_staff_id": m.performed_by_staff_id,
-        "movement_type": str(m.movement_type),
-        "reference_no": m.reference_no,
-        "quantity": m.quantity,
-        "balance_after": m.balance_after,
-        "movement_date": m.movement_date,
-        "note": m.note,
-    }
-
+# ============================================================
+# READ
+# ============================================================
 
 # ----- STORES -----
 
@@ -119,7 +77,7 @@ def list_stores(
     """
     items, total = service.list(skip=skip, limit=limit, search=search)
     return paginate_response(
-        items=[_serialize_store(s) for s in items],
+        items=items,
         total=total, skip=skip, limit=limit,
         message="Inventory stores fetched successfully.",
     )
@@ -142,7 +100,7 @@ def create_store(
     Permissions: INVENTORY_MANAGE
     """
     s = service.create(payload)
-    return {"success": True, "message": "Store created.", "store": _serialize_store(s)}
+    return {"success": True, "message": "Store created.", "store": s}
 
 
 @router.get(
@@ -160,7 +118,7 @@ def get_store(
     
     Permissions: INVENTORY_READ
     """
-    return _serialize_store(service.get(store_id))
+    return service.get(store_id)
 
 
 @router.put(
@@ -180,7 +138,7 @@ def update_store(
     Permissions: INVENTORY_MANAGE
     """
     s = service.update(store_id, payload)
-    return {"success": True, "message": "Store updated.", "store": _serialize_store(s)}
+    return {"success": True, "message": "Store updated.", "store": s}
 
 
 @router.delete(
@@ -237,7 +195,7 @@ def list_items(
         only_expiring_within_days=only_expiring_within_days,
     )
     return paginate_response(
-        items=[_serialize_item(i) for i in items],
+        items=items,
         total=total, skip=skip, limit=limit,
         message="Stock items fetched successfully.",
     )
@@ -260,7 +218,7 @@ def create_item(
     Permissions: INVENTORY_MANAGE
     """
     i = service.create(payload)
-    return {"success": True, "message": "Stock item created.", "stock_item": _serialize_item(i)}
+    return {"success": True, "message": "Stock item created.", "stock_item": i}
 
 
 @router.get(
@@ -278,7 +236,7 @@ def get_item(
     
     Permissions: INVENTORY_READ
     """
-    return _serialize_item(service.get(item_id))
+    return service.get(item_id)
 
 
 @router.put(
@@ -298,7 +256,7 @@ def update_item(
     Permissions: INVENTORY_MANAGE
     """
     i = service.update(item_id, payload)
-    return {"success": True, "message": "Stock item updated.", "stock_item": _serialize_item(i)}
+    return {"success": True, "message": "Stock item updated.", "stock_item": i}
 
 
 @router.delete(
@@ -345,7 +303,7 @@ def list_movements(
         store_id=store_id, stock_item_id=stock_item_id, movement_type=movement_type
     )
     return paginate_response(
-        items=[_serialize_movement(m) for m in items],
+        items=items,
         total=total, skip=skip, limit=limit,
         message="Stock movements fetched successfully.",
     )
@@ -371,7 +329,7 @@ def record_movement(
     Permissions: INVENTORY_MANAGE
     """
     m = service.create(payload)
-    return {"success": True, "message": "Stock movement recorded.", "movement": _serialize_movement(m)}
+    return {"success": True, "message": "Stock movement recorded.", "movement": m}
 
 
 @router.get(
@@ -389,4 +347,4 @@ def get_movement(
     
     Permissions: INVENTORY_READ
     """
-    return _serialize_movement(service.get(movement_id))
+    return service.get(movement_id)

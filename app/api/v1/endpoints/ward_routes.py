@@ -63,31 +63,6 @@ def get_ward_service(
 
 
 # ============================================================
-# SERIALIZATION HELPERS
-# ============================================================
-
-def _serialize_ward(ward) -> dict[str, Any]:
-    """
-    Serialize a Ward ORM object into the response shape expected by WardReadSchema.
-
-    Args:
-        ward: Ward ORM instance.
-
-    Returns:
-        dict[str, Any]: Serialized ward payload.
-    """
-    return {
-        "id": ward.id,
-        "name": ward.name,
-        "code": ward.code,
-        "ward_type": ward.ward_type,
-        "description": ward.description,
-        "created_at": ward.created_at,
-        "updated_at": ward.updated_at,
-    }
-
-
-# ============================================================
 # ROUTES
 # ============================================================
 
@@ -109,8 +84,7 @@ def create_ward(
     - ward name must be unique
     - ward code must be unique
     """
-    ward = service.create_ward(payload)
-    return _serialize_ward(ward)
+    return service.create_ward(payload)
 
 
 @router.get(
@@ -158,8 +132,7 @@ def get_ward(
     """
     Return the basic details of a single ward.
     """
-    ward = service.get_ward(ward_id)
-    return _serialize_ward(ward)
+    return service.get_ward(ward_id)
 
 
 @router.get(
@@ -205,8 +178,7 @@ def update_ward(
     - updated ward name must remain unique
     - updated ward code must remain unique
     """
-    ward = service.update_ward(ward_id, payload)
-    return _serialize_ward(ward)
+    return service.update_ward(ward_id, payload)
 
 
 @router.delete(

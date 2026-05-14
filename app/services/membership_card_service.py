@@ -68,8 +68,8 @@ class MembershipCardService:
 
         return card
 
-    def get_card(self, card_id: int) -> MembershipCard:
-        card = self.repository.get_by_id(card_id)
+    def get_card(self, card_id: int, include_transactions: bool = False) -> MembershipCard:
+        card = self.repository.get_by_id(card_id, include_transactions=include_transactions)
         if not card:
             raise NotFoundError(f"Membership card with id {card_id} not found.")
         return card

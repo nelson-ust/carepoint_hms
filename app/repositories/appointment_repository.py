@@ -128,7 +128,11 @@ class AppointmentRepository:
         """Paginated list with the most common filters."""
         query = (
             self.db.query(Appointment)
-            .options(joinedload(Appointment.patient))
+            .options(
+                joinedload(Appointment.patient),
+                joinedload(Appointment.staff_profile),
+                joinedload(Appointment.service_delivery_point),
+            )
             .filter(Appointment.is_deleted.is_(False))
         )
 
@@ -172,7 +176,11 @@ class AppointmentRepository:
 
         query = (
             self.db.query(Appointment)
-            .options(joinedload(Appointment.patient))
+            .options(
+                joinedload(Appointment.patient),
+                joinedload(Appointment.staff_profile),
+                joinedload(Appointment.service_delivery_point),
+            )
             .filter(
                 Appointment.is_deleted.is_(False),
                 Appointment.scheduled_start_at >= day_start,

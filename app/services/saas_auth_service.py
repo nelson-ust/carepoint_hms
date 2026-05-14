@@ -94,10 +94,7 @@ class SaaSAuthService:
             "access_token": access_token,
             "refresh_token": refresh_token,
             "token_type": "bearer",
-            "admin_id": admin.id,
-            "email": admin.email,
-            "first_name": admin.first_name,
-            "last_name": admin.last_name,
+            "user": admin,
         }
 
     def impersonate_tenant(
@@ -317,7 +314,7 @@ class SaaSAuthService:
             "success": True,
             "message": "Verification successful.",
             "verified": True,
-            "admin_id": admin.id,
+            "user": admin,
             "tokens": tokens,
         }
 

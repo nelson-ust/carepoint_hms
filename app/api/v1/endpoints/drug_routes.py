@@ -40,36 +40,6 @@ def get_drug_category_service(db: Annotated[Session, Depends(get_db)]) -> DrugCa
     return DrugCategoryService(db)
 
 
-def _serialize_drug(d) -> dict:
-    return {
-        "id": d.id,
-        "name": d.name,
-        "generic_name": d.generic_name,
-        "brand_name": d.brand_name,
-        "strength": d.strength,
-        "dosage_form": d.dosage_form,
-        "pack_size": d.pack_size,
-        "sku": d.sku,
-        "drug_category_id": d.drug_category_id,
-        "unit_price": d.unit_price,
-        "reorder_level": d.reorder_level,
-        "is_controlled": bool(d.is_controlled),
-        "created_at": getattr(d, "created_at", None),
-        "updated_at": getattr(d, "updated_at", None),
-    }
-
-
-def _serialize_category(c) -> dict:
-    return {
-        "id": c.id,
-        "name": c.name,
-        "code": c.code,
-        "description": c.description,
-        "created_at": getattr(c, "created_at", None),
-        "updated_at": getattr(c, "updated_at", None),
-    }
-
-
 # ---------- DRUG CATEGORIES ----------
 
 @router.get(
@@ -86,7 +56,7 @@ def list_categories(
 ):
     items, total = service.list(skip=skip, limit=limit, search=search)
     return paginate_response(
-        items=[_serialize_category(c) for c in items],
+        items=items,
         total=total, skip=skip, limit=limit,
         message="Drug categories fetched successfully.",
     )
@@ -104,7 +74,7 @@ def create_category(
     service: Annotated[DrugCategoryService, Depends(get_drug_category_service)],
 ):
     cat = service.create(payload)
-    return {"success": True, "message": "Drug category created.", "category": _serialize_category(cat)}
+    return {"success": True, "message": "Drug category created.", "category": cat}
 
 
 @router.put(
@@ -119,7 +89,7 @@ def update_category(
     service: Annotated[DrugCategoryService, Depends(get_drug_category_service)],
 ):
     cat = service.update(cat_id, payload)
-    return {"success": True, "message": "Drug category updated.", "category": _serialize_category(cat)}
+    return {"success": True, "message": "Drug category updated.", "category": cat}
 
 
 @router.delete(
@@ -156,7 +126,7 @@ def list_drugs(
         category_id=category_id, is_controlled=is_controlled,
     )
     return paginate_response(
-        items=[_serialize_drug(d) for d in items],
+        items=items,
         total=total, skip=skip, limit=limit,
         message="Drugs fetched successfully.",
     )
@@ -174,7 +144,7 @@ def create_drug(
     service: Annotated[DrugService, Depends(get_drug_service)],
 ):
     drug = service.create(payload)
-    return {"success": True, "message": "Drug created.", "drug": _serialize_drug(drug)}
+    return {"success": True, "message": "Drug created.", "drug": drug}
 
 
 @router.get(
@@ -187,7 +157,7 @@ def get_drug(
     _: Annotated[User, Depends(require_permission("PRESCRIPTION_WRITE", "PRESCRIPTION_DISPENSE", "INVENTORY_READ"))],
     service: Annotated[DrugService, Depends(get_drug_service)],
 ):
-    return _serialize_drug(service.get(drug_id))
+    return service.get(drug_id)
 
 
 @router.put(
@@ -202,7 +172,20 @@ def update_drug(
     service: Annotated[DrugService, Depends(get_drug_service)],
 ):
     drug = service.update(drug_id, payload)
-    return {"success": True, "message": "Drug updated.", "drug": _serialize_drug(drug)}
+    return {"success": True, "message": "Drug updated.", "drug": drug}
+
+
+@router.delete(
+    "/{drug_id}",
+    summary="Soft-delete a drug",
+)
+def delete_drug(
+    drug_id: int,
+    _: Annotated[User, Depends(require_permission("PHARMACY_STOCK_MANAGE", "INVENTORY_MANAGE"))],
+    service: Annotated[DrugService, Depends(get_drug_service)],
+):
+    drug = service.soft_delete(drug_id)
+    return {"success": True, "message": "Drug deactivated.", "drug_id": drug.id}
 
 
 @router.delete(

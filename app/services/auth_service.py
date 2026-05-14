@@ -224,7 +224,7 @@ class AuthService:
         return {
             "success": True,
             "message": "Login successful.",
-            "user": self._serialize_auth_user(user),
+            "user": user,
             "tokens": {
                 "access_token": login_result["access_token"],
                 "refresh_token": login_result["refresh_token"],
@@ -348,7 +348,7 @@ class AuthService:
         return {
             "success": True,
             "message": "Authenticated user fetched successfully.",
-            "user": self._serialize_authenticated_profile(user),
+            "user": user,
             "session": None,
         }
 
@@ -537,7 +537,7 @@ class AuthService:
             "success": True,
             "message": "Verification successful.",
             "verified": True,
-            "user": self._serialize_auth_user(user),
+            "user": user,
             "tokens": tokens,
         }
 
@@ -679,7 +679,7 @@ class AuthService:
             "success": True,
             "message": "Verification successful.",
             "verified": True,
-            "user": self._serialize_auth_user(user),
+            "user": user,
             "tokens": {
                 "access_token": access_token,
                 "refresh_token": refresh_result["refresh_token"],
@@ -930,7 +930,7 @@ class AuthService:
         return {
             "success": True,
             "message": "Login successful.",
-            "user": self._serialize_auth_user(user),
+            "user": user,
             "tokens": {
                 "access_token": login_result["access_token"],
                 "refresh_token": login_result["refresh_token"],
@@ -1397,66 +1397,7 @@ class AuthService:
 
         return role_codes
 
-    def _serialize_auth_user(self, user) -> dict[str, Any]:
-        """
-        Serialize lightweight auth user payload.
-        """
-        return {
-            "id": user.id,
-            "username": user.username,
-            "email": getattr(user, "email", None),
-            "phone_number": getattr(user, "phone_number", None),
-            "first_name": user.first_name,
-            "last_name": user.last_name,
-            "middle_name": getattr(user, "middle_name", None),
-            "status": str(getattr(user, "status", None)) if getattr(user, "status", None) is not None else None,
-            "is_superuser": getattr(user, "is_superuser", False),
-            "is_email_verified": getattr(user, "is_email_verified", False),
-            "is_phone_verified": getattr(user, "is_phone_verified", False),
-            "is_two_factor_enabled": getattr(user, "is_two_factor_enabled", False),
-        }
 
-    def _serialize_authenticated_profile(self, user) -> dict[str, Any]:
-        """
-        Serialize authenticated profile payload.
-        """
-        roles: list[dict[str, Any]] = []
-        for user_role in getattr(user, "user_roles", []) or []:
-            role = getattr(user_role, "role", None)
-            if role is None:
-                continue
-
-            role_payload = {
-                "id": role.id,
-                "name": role.name,
-                "code": getattr(role, "code", None),
-                "description": getattr(role, "description", None),
-            }
-            if role_payload not in roles:
-                roles.append(role_payload)
-
-        return {
-            "id": user.id,
-            "username": user.username,
-            "email": getattr(user, "email", None),
-            "phone_number": getattr(user, "phone_number", None),
-            "first_name": user.first_name,
-            "last_name": user.last_name,
-            "middle_name": getattr(user, "middle_name", None),
-            "status": str(getattr(user, "status", None)) if getattr(user, "status", None) is not None else None,
-            "is_superuser": getattr(user, "is_superuser", False),
-            "is_email_verified": getattr(user, "is_email_verified", False),
-            "is_phone_verified": getattr(user, "is_phone_verified", False),
-            "is_two_factor_enabled": getattr(user, "is_two_factor_enabled", False),
-            "two_factor_method": None,
-            "two_factor_email_enabled": False,
-            "two_factor_sms_enabled": False,
-            "two_factor_whatsapp_enabled": False,
-            "two_factor_authenticator_enabled": False,
-            "roles": roles,
-            "created_at": getattr(user, "created_at", None),
-            "updated_at": getattr(user, "updated_at", None),
-        }
     def _discover_and_set_tenant(self, identifier: str) -> None:
         """
         Attempt to resolve and set the tenant context based on the login identifier.

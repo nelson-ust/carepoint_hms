@@ -61,7 +61,7 @@ def list_membership_cards(
 def get_membership_card(card_id: int, db=Depends(get_db)):
     """Retrieve membership card details and transaction history."""
     service = MembershipCardService(db)
-    card = service.get_card(card_id)
+    card = service.get_card(card_id, include_transactions=True)
     # The transactions are loaded via relationship in the schema if configured, 
     # but we can also manually load them if needed.
     return card

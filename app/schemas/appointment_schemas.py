@@ -18,9 +18,9 @@ Lifecycle reflected in these schemas:
 """
 
 from datetime import datetime
-from typing import Optional
+from typing import Any, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 # ============================================================
@@ -104,8 +104,33 @@ class AppointmentReadSchema(BaseModel):
     scheduled_end_at: Optional[datetime] = None
     reason: Optional[str] = None
     status: str
+    
+    # Demographic & Context Details (Populated via model_validator)
+    patient_name: Optional[str] = None
+    patient_phone: Optional[str] = None
+    staff_name: Optional[str] = None
+    service_delivery_point_name: Optional[str] = None
+    
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def resolve_names(cls, data: Any) -> Any:
+        if hasattr(data, "patient") and data.patient:
+            data.patient_name = f"{data.patient.first_name} {data.patient.last_name}"
+            data.patient_phone = data.patient.phone_number
+        
+        if hasattr(data, "staff_profile") and data.staff_profile:
+            # Assumes StaffProfile has a user relationship with name fields
+            user = getattr(data.staff_profile, "user", None)
+            if user:
+                data.staff_name = f"{user.first_name} {user.last_name}"
+        
+        if hasattr(data, "service_delivery_point") and data.service_delivery_point:
+            data.service_delivery_point_name = data.service_delivery_point.name
+            
+        return data
 
 
 class AppointmentListResponseSchema(BaseModel):

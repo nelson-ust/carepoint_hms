@@ -38,48 +38,6 @@ def get_referral_service(db: Annotated[Session, Depends(get_db)]) -> ReferralSer
     return ReferralService(db)
 
 
-def _serialize(r) -> dict:
-    """ORM -> response dict translation."""
-    return {
-        "id": r.id,
-        "referral_no": r.referral_no,
-        "patient_id": r.patient_id,
-        "visit_id": r.visit_id,
-        "referring_staff_id": r.referring_staff_id,
-        "destination_facility": r.destination_facility,
-        "reason_for_referral": r.reason_for_referral,
-        "clinical_summary": r.clinical_summary,
-        "referral_date": r.referral_date,
-        "status": str(r.status),
-        "priority": str(r.priority),
-        "date_created": getattr(r, "date_created", None),
-        "date_updated": getattr(r, "date_updated", None),
-    }
-
-
-def _serialize_inter_facility(r) -> dict:
-    return {
-        "id": r.id,
-        "referral_no": r.referral_no,
-        "source_tenant_id": r.source_tenant_id,
-        "source_facility_id": r.source_facility_id,
-        "target_tenant_id": r.target_tenant_id,
-        "target_facility_id": r.target_facility_id,
-        "patient_global_id": r.patient_global_id,
-        "reason_for_referral": r.reason_for_referral,
-        "clinical_summary": r.clinical_summary,
-        "status": str(r.status),
-        "acceptance_note": r.acceptance_note,
-        "declined_reason": r.declined_reason,
-        "referral_date": r.referral_date,
-        "responded_at": r.responded_at,
-        "is_history_access_granted": r.is_history_access_granted,
-        "access_expires_at": r.access_expires_at,
-        "date_created": getattr(r, "date_created", None),
-        "date_updated": getattr(r, "date_updated", None),
-    }
-
-
 # ============================================================
 # LOCAL REFERRALS
 # ============================================================
@@ -110,7 +68,7 @@ def list_referrals(
         status=status_filter,
     )
     return paginate_response(
-        items=[_serialize(r) for r in items],
+        items=items,
         total=total,
         skip=skip,
         limit=limit,
@@ -129,7 +87,7 @@ def get_referral(
     service: Annotated[ReferralService, Depends(get_referral_service)],
 ):
     """Read a single referral by id."""
-    return _serialize(service.get(referral_id))
+    return service.get(referral_id)
 
 
 @router.post(
@@ -157,7 +115,7 @@ def create_referral(
     return {
         "success": True,
         "message": "Referral created successfully.",
-        "referral": _serialize(referral),
+        "referral": referral,
     }
 
 
@@ -178,7 +136,7 @@ def update_referral(
     return {
         "success": True,
         "message": "Referral updated successfully.",
-        "referral": _serialize(referral),
+        "referral": referral,
     }
 
 
@@ -199,7 +157,7 @@ def cancel_referral(
     return {
         "success": True,
         "message": "Referral cancelled.",
-        "referral": _serialize(referral),
+        "referral": referral,
     }
 
 
@@ -238,7 +196,7 @@ def create_inter_facility_referral(
     return {
         "success": True,
         "message": "Inter-facility referral initiated.",
-        "referral": _serialize_inter_facility(referral),
+        "referral": referral,
     }
 
 
@@ -268,7 +226,7 @@ def list_incoming_referrals(
         status=status_filter,
     )
     return paginate_response(
-        items=[_serialize_inter_facility(r) for r in items],
+        items=items,
         total=total,
         skip=skip,
         limit=limit,
@@ -297,5 +255,5 @@ def respond_to_inter_facility_referral(
     return {
         "success": True,
         "message": f"Referral {payload.status.lower()} successfully.",
-        "referral": _serialize_inter_facility(referral),
+        "referral": referral,
     }

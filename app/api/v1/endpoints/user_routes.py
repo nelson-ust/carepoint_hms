@@ -57,33 +57,9 @@ def get_user_service(db: Annotated[Session, Depends(get_db)]) -> UserService:
     return UserService(db)
 
 
-def _serialize_user(user: UserModel) -> dict:
-    """
-    Lite serialization for user responses.
-    """
-    return {
-        "id": user.id,
-        "username": user.username,
-        "email": user.email,
-        "phone_number": user.phone_number,
-        "first_name": user.first_name,
-        "last_name": user.last_name,
-        "middle_name": user.middle_name,
-        "status": str(user.status),
-        "is_superuser": user.is_superuser,
-        "is_email_verified": user.is_email_verified,
-        "is_phone_verified": user.is_phone_verified,
-        "is_two_factor_enabled": user.is_two_factor_enabled,
-        "roles": [
-            {
-                "id": assoc.role.id,
-                "name": assoc.role.name,
-                "code": assoc.role.code,
-            }
-            for assoc in user.user_roles or []
-            if not assoc.is_deleted
-        ],
-    }
+# ============================================================
+# ROUTES
+# ============================================================
 
 
 @router.get(
@@ -114,7 +90,7 @@ def list_users(
         is_superuser=is_superuser,
     )
     return paginate_response(
-        items=[_serialize_user(u) for u in users],
+        items=users,
         total=total,
         skip=skip,
         limit=limit,
@@ -139,7 +115,7 @@ def create_user(
     return {
         "success": True,
         "message": "User created successfully.",
-        "user": _serialize_user(user),
+        "user": user,
     }
 
 
@@ -161,7 +137,7 @@ def invite_user(
     return {
         "success": True,
         "message": "User invited successfully. A temporary password has been generated.",
-        "user": _serialize_user(user),
+        "user": user,
     }
 
 
@@ -201,7 +177,7 @@ def update_user(
     return {
         "success": True,
         "message": "User profile updated successfully.",
-        "user": _serialize_user(user),
+        "user": user,
     }
 
 
@@ -224,7 +200,7 @@ def update_user_status(
     return {
         "success": True,
         "message": f"User status updated to {payload.status}.",
-        "user": _serialize_user(user),
+        "user": user,
     }
 
 
@@ -246,7 +222,7 @@ def unlock_user(
     return {
         "success": True,
         "message": "User account unlocked successfully.",
-        "user": _serialize_user(user),
+        "user": user,
     }
 
 
@@ -269,7 +245,7 @@ def lock_user(
     return {
         "success": True,
         "message": "User account locked.",
-        "user": _serialize_user(user),
+        "user": user,
     }
 
 
@@ -292,7 +268,7 @@ def deactivate_user(
     return {
         "success": True,
         "message": "User account deactivated.",
-        "user": _serialize_user(user),
+        "user": user,
     }
 
 
@@ -312,7 +288,7 @@ def reactivate_user(
     return {
         "success": True,
         "message": "User account reactivated.",
-        "user": _serialize_user(user),
+        "user": user,
     }
 
 
@@ -335,7 +311,7 @@ def assign_roles(
     return {
         "success": True,
         "message": "Roles assigned successfully.",
-        "user": _serialize_user(user),
+        "user": user,
     }
 
 
@@ -358,7 +334,7 @@ def revoke_roles(
     return {
         "success": True,
         "message": "Roles revoked successfully.",
-        "user": _serialize_user(user),
+        "user": user,
     }
 
 
@@ -381,7 +357,7 @@ def force_password_reset(
     return {
         "success": True,
         "message": "Password reset successfully.",
-        "user": _serialize_user(user),
+        "user": user,
     }
 
 
@@ -425,7 +401,7 @@ def revoke_all_sessions(
     return {
         "success": True,
         "message": f"Successfully revoked {count} sessions.",
-        "user": _serialize_user(user),
+        "user": user,
     }
 
 

@@ -1,6 +1,7 @@
 # app/api/v1/endpoints/vital_sign_routes.py
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query, status
@@ -26,24 +27,9 @@ def get_vital_sign_service(db: Annotated[Session, Depends(get_db)]) -> VitalSign
     return VitalSignService(db)
 
 
-def _serialize(v) -> dict:
-    return {
-        "id": v.id,
-        "visit_id": v.visit_id,
-        "recorded_by_staff_id": v.recorded_by_staff_id,
-        "temperature_celsius": v.temperature_celsius,
-        "pulse_rate": v.pulse_rate,
-        "respiratory_rate": v.respiratory_rate,
-        "systolic_bp": v.systolic_bp,
-        "diastolic_bp": v.diastolic_bp,
-        "oxygen_saturation": v.oxygen_saturation,
-        "weight_kg": v.weight_kg,
-        "height_cm": v.height_cm,
-        "bmi": v.bmi,
-        "pain_score": v.pain_score,
-        "recorded_at": v.recorded_at,
-        "created_at": getattr(v, "created_at", None),
-    }
+# ============================================================
+# READ
+# ============================================================
 
 
 @router.get(
@@ -60,7 +46,7 @@ def list_for_visit(
 ):
     items, total = service.list_for_visit(visit_id, skip=skip, limit=limit)
     return paginate_response(
-        items=[_serialize(v) for v in items],
+        items=items,
         total=total,
         skip=skip,
         limit=limit,
@@ -83,7 +69,7 @@ def latest_for_visit(
         return {
             "id": 0,
             "visit_id": visit_id,
-            "recorded_at": None,
+            "recorded_at": datetime.now(),
             "recorded_by_staff_id": None,
             "temperature_celsius": None,
             "pulse_rate": None,
@@ -96,7 +82,7 @@ def latest_for_visit(
             "bmi": None,
             "pain_score": None,
         }
-    return _serialize(latest)
+    return latest
 
 
 @router.post(
@@ -115,5 +101,5 @@ def create_vitals(
     return {
         "success": True,
         "message": "Vital signs recorded.",
-        "vital_sign": _serialize(record),
+        "vital_sign": record,
     }

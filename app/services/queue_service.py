@@ -105,45 +105,61 @@ class QueueService:
     def _populate_history(self, tickets: list[QueueTicket]) -> None:
         """
         Injects historical step information into each ticket object for the frontend.
+        Uses a batch query to avoid N+1 issues.
         """
+        if not tickets:
+            return
+
+        ticket_ids = [t.id for t in tickets]
+        visit_ids = list(set(t.visit_id for t in tickets))
+        
+        # Fetch all previous tickets for all visits in this batch in one go
+        all_previous = self.repository.get_batch_previous_tickets(visit_ids, ticket_ids)
+        
+        # Group them by visit_id for easy lookup
+        history_map = {}
+        for p in all_previous:
+            if p.visit_id not in history_map:
+                history_map[p.visit_id] = []
+            history_map[p.visit_id].append(p)
+
         for t in tickets:
-            previous_tickets = self.repository.get_previous_tickets_for_visit(t.visit_id, t.id)
             t.previous_steps = []
+            visit_history = history_map.get(t.visit_id, [])
             
-            for p in previous_tickets:
-                services = []
-                # Handle cases where relationship might not be loaded or name is missing
-                raw_name = getattr(p.service_delivery_point, "name", "Unknown Service Point")
-                sdp_name = raw_name.lower()
-                
-                # Heuristic for "Services Provided" based on SDP name
-                if any(x in sdp_name for x in ["triage", "nursing", "vitals"]):
-                    services.append("Vitals & Triage")
-                elif any(x in sdp_name for x in ["consult", "clinic", "doctor", "physician"]):
-                    services.append("Clinical Consultation")
-                elif "lab" in sdp_name:
-                    services.append("Laboratory Investigation")
-                elif "pharmacy" in sdp_name:
-                    services.append("Pharmacy Dispensing")
-                elif any(x in sdp_name for x in ["radiology", "imaging", "scan", "xray"]):
-                    services.append("Radiology/Imaging")
-                elif any(x in sdp_name for x in ["billing", "cashier", "account", "payment"]):
-                    services.append("Payment & Billing")
-                elif any(x in sdp_name for x in ["front", "reception", "records"]):
-                    services.append("Patient Registration/Check-in")
-                
-                # Fallback if no heuristic matched but we want to show something
-                if not services:
-                    services.append(f"Service at {raw_name}")
-                
-                t.previous_steps.append({
-                    "service_delivery_point_id": p.service_delivery_point_id,
-                    "service_delivery_point_name": raw_name,
-                    "status": str(p.status),
-                    "services_provided": services,
-                    "started_at": p.service_started_at,
-                    "ended_at": p.service_ended_at,
-                })
+            # Filter history to only include tickets BEFORE the current one
+            for p in visit_history:
+                if p.id < t.id:
+                    services = []
+                    raw_name = getattr(p.service_delivery_point, "name", "Unknown Service Point")
+                    sdp_name = raw_name.lower()
+                    
+                    if any(x in sdp_name for x in ["triage", "nursing", "vitals"]):
+                        services.append("Vitals & Triage")
+                    elif any(x in sdp_name for x in ["consult", "clinic", "doctor", "physician"]):
+                        services.append("Clinical Consultation")
+                    elif "lab" in sdp_name:
+                        services.append("Laboratory Investigation")
+                    elif "pharmacy" in sdp_name:
+                        services.append("Pharmacy Dispensing")
+                    elif any(x in sdp_name for x in ["radiology", "imaging", "scan", "xray"]):
+                        services.append("Radiology/Imaging")
+                    elif any(x in sdp_name for x in ["billing", "cashier", "account", "payment"]):
+                        services.append("Payment & Billing")
+                    elif any(x in sdp_name for x in ["front", "reception", "records"]):
+                        services.append("Patient Registration/Check-in")
+                    
+                    if not services:
+                        services.append(f"Service at {raw_name}")
+                    
+                    t.previous_steps.append({
+                        "service_delivery_point_id": p.service_delivery_point_id,
+                        "service_delivery_point_name": raw_name,
+                        "status": str(p.status),
+                        "services_provided": services,
+                        "started_at": p.service_started_at,
+                        "ended_at": p.service_ended_at,
+                    })
 
     def list_for_visit(self, visit_id: int) -> list[QueueTicket]:
         return self.repository.list_for_visit(visit_id)

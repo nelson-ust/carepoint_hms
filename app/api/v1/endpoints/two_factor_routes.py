@@ -48,21 +48,9 @@ def get_two_factor_service(
     return TwoFactorService(db)
 
 
-def _serialize_challenge(challenge) -> dict:
-    return {
-        "id": challenge.id,
-        "user_id": challenge.user_id,
-        "challenge_type": str(challenge.challenge_type),
-        "purpose": str(challenge.purpose),
-        "destination": getattr(challenge, "destination", None),
-        "attempt_count": int(getattr(challenge, "attempt_count", 0) or 0),
-        "max_attempts": int(getattr(challenge, "max_attempts", 5) or 5),
-        "is_verified": bool(getattr(challenge, "is_verified", False)),
-        "verified_at": getattr(challenge, "verified_at", None),
-        "expires_at": challenge.expires_at,
-        "created_at": getattr(challenge, "created_at", None),
-        "updated_at": getattr(challenge, "updated_at", None),
-    }
+# ============================================================
+# ROUTES
+# ============================================================
 
 
 @router.get(
@@ -96,7 +84,7 @@ def list_challenges(
         only_active=only_active,
     )
     return paginate_response(
-        items=[_serialize_challenge(c) for c in items],
+        items=items,
         total=total,
         skip=skip,
         limit=limit,
@@ -115,8 +103,7 @@ def get_challenge(
     _: AdminUser,
     service: Annotated[TwoFactorService, Depends(get_two_factor_service)],
 ):
-    challenge = service.get_challenge(challenge_id)
-    return _serialize_challenge(challenge)
+    return service.get_challenge(challenge_id)
 
 
 @router.post(
@@ -135,7 +122,7 @@ def expire_challenge(
     return {
         "success": True,
         "message": "Challenge expired successfully.",
-        "challenge": _serialize_challenge(challenge),
+        "challenge": challenge,
     }
 
 

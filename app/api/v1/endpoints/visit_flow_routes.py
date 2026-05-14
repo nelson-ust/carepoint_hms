@@ -62,132 +62,6 @@ def get_visit_flow_service(
 
 
 # ============================================================
-# SERIALIZATION HELPERS
-# ============================================================
-
-def _safe_enum(value) -> Optional[str]:
-    """
-    Convert enum-like values to strings safely.
-    """
-    if value is None:
-        return None
-    return str(value)
-
-
-def _serialize_service_delivery_point(service_point) -> Optional[dict[str, Any]]:
-    """
-    Serialize a lightweight service delivery point payload.
-    """
-    if not service_point:
-        return None
-
-    return {
-        "id": service_point.id,
-        "name": service_point.name,
-        "code": service_point.code,
-        "service_point_type": _safe_enum(getattr(service_point, "service_point_type", None)),
-        "department_id": getattr(service_point, "department_id", None),
-        "location_description": getattr(service_point, "location_description", None),
-        "queue_prefix": getattr(service_point, "queue_prefix", None),
-        "supports_appointments": getattr(service_point, "supports_appointments", False),
-        "supports_walk_in": getattr(service_point, "supports_walk_in", False),
-    }
-
-
-def _serialize_template_step(step) -> dict[str, Any]:
-    """
-    Serialize a reusable visit flow template step.
-    """
-    return {
-        "id": step.id,
-        "template_id": step.template_id,
-        "service_delivery_point_id": step.service_delivery_point_id,
-        "step_order": step.step_order,
-        "is_required": step.is_required,
-        "notes": step.notes,
-        "service_delivery_point": _serialize_service_delivery_point(
-            getattr(step, "service_delivery_point", None)
-        ),
-        "created_at": step.created_at,
-        "updated_at": step.updated_at,
-    }
-
-
-def _serialize_template(template) -> dict[str, Any]:
-    """
-    Serialize a reusable visit flow template.
-    """
-    return {
-        "id": template.id,
-        "name": template.name,
-        "code": template.code,
-        "description": template.description,
-        "steps": [
-            _serialize_template_step(step)
-            for step in (template.steps or [])
-        ],
-        "created_at": template.created_at,
-        "updated_at": template.updated_at,
-    }
-
-
-def _serialize_runtime_step(step) -> dict[str, Any]:
-    """
-    Serialize a runtime visit flow step.
-    """
-    return {
-        "id": step.id,
-        "visit_id": step.visit_id,
-        "service_delivery_point_id": step.service_delivery_point_id,
-        "step_order": step.step_order,
-        "status": _safe_enum(step.status),
-        "is_current": step.is_current,
-        "is_required": step.is_required,
-        "is_skipped": step.is_skipped,
-        "routed_by_id": step.routed_by_id,
-        "started_at": step.started_at,
-        "completed_at": step.completed_at,
-        "notes": step.notes,
-        "service_delivery_point": _serialize_service_delivery_point(
-            getattr(step, "service_delivery_point", None)
-        ),
-        "created_at": step.created_at,
-        "updated_at": step.updated_at,
-    }
-
-
-def _serialize_template_list_step(step) -> dict[str, Any]:
-    """
-    Serialize a template step for the list view (flat).
-    """
-    sdp = getattr(step, "service_delivery_point", None)
-    return {
-        "id": step.id,
-        "template_id": step.template_id,
-        "service_delivery_point_id": step.service_delivery_point_id,
-        "service_delivery_point_name": getattr(sdp, "name", None) if sdp else None,
-        "step_order": step.step_order,
-        "notes": step.notes,
-    }
-
-
-def _serialize_template_list_item(template) -> dict[str, Any]:
-    """
-    Serialize a template list item with flat steps.
-    """
-    return {
-        "id": template.id,
-        "name": template.name,
-        "code": template.code,
-        "description": template.description,
-        "associated_visit_flow_templates_steps": [
-            _serialize_template_list_step(step)
-            for step in (template.steps or [])
-        ],
-    }
-
-
-# ============================================================
 # TEMPLATE ROUTES
 # ============================================================
 
@@ -205,8 +79,7 @@ def create_template(
     """
     Create a reusable visit flow template.
     """
-    template = service.create_template(payload)
-    return _serialize_template(template)
+    return service.create_template(payload)
 
 
 @router.get(
@@ -234,7 +107,7 @@ def list_templates(
     )
 
     return paginate_response(
-        items=[_serialize_template_list_item(item) for item in items],
+        items=items,
         total=total,
         skip=skip,
         limit=limit,
@@ -256,8 +129,7 @@ def get_template(
     """
     Return a reusable visit flow template with ordered steps.
     """
-    template = service.get_template(template_id)
-    return _serialize_template(template)
+    return service.get_template(template_id)
 
 
 @router.put(
@@ -275,8 +147,7 @@ def update_template(
     """
     Update a reusable visit flow template.
     """
-    template = service.update_template(template_id, payload)
-    return _serialize_template(template)
+    return service.update_template(template_id, payload)
 
 
 @router.delete(
@@ -318,8 +189,7 @@ def create_template_step(
     """
     Create a reusable visit flow template step.
     """
-    step = service.create_template_step(payload)
-    return _serialize_template_step(step)
+    return service.create_template_step(payload)
 
 
 @router.put(
@@ -337,8 +207,7 @@ def update_template_step(
     """
     Update a reusable visit flow template step.
     """
-    step = service.update_template_step(template_step_id, payload)
-    return _serialize_template_step(step)
+    return service.update_template_step(template_step_id, payload)
 
 
 @router.delete(
@@ -380,8 +249,7 @@ def create_visit_step(
     """
     Create a runtime visit flow step for a specific visit.
     """
-    step = service.create_visit_step(payload)
-    return _serialize_runtime_step(step)
+    return service.create_visit_step(payload)
 
 
 @router.get(
@@ -407,7 +275,7 @@ def list_visit_steps(
     )
 
     return paginate_response(
-        items=[_serialize_runtime_step(item) for item in items],
+        items=items,
         total=total,
         skip=skip,
         limit=limit,
@@ -429,8 +297,7 @@ def get_visit_step(
     """
     Return a runtime visit flow step.
     """
-    step = service.get_visit_step(visit_step_id)
-    return _serialize_runtime_step(step)
+    return service.get_visit_step(visit_step_id)
 
 
 @router.put(
@@ -448,8 +315,7 @@ def update_visit_step(
     """
     Update a runtime visit flow step.
     """
-    step = service.update_visit_step(visit_step_id, payload)
-    return _serialize_runtime_step(step)
+    return service.update_visit_step(visit_step_id, payload)
 
 
 @router.delete(
@@ -497,13 +363,7 @@ def create_combined_flow_records(
     return {
         "success": True,
         "message": result["message"],
-        "template": _serialize_template(result["template"]) if result["template"] else None,
-        "created_template_steps": [
-            _serialize_template_step(step)
-            for step in result["created_template_steps"]
-        ],
-        "created_visit_steps": [
-            _serialize_runtime_step(step)
-            for step in result["created_visit_steps"]
-        ],
+        "template": result["template"],
+        "created_template_steps": result["created_template_steps"],
+        "created_visit_steps": result["created_visit_steps"],
     }

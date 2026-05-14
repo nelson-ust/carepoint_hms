@@ -27,18 +27,9 @@ def get_triage_service(db: Annotated[Session, Depends(get_db)]) -> TriageService
     return TriageService(db)
 
 
-def _serialize_triage(t) -> dict:
-    return {
-        "id": t.id,
-        "visit_id": t.visit_id,
-        "assessed_by_staff_id": t.assessed_by_staff_id,
-        "chief_complaint": t.chief_complaint,
-        "triage_note": t.triage_note,
-        "priority": str(t.priority),
-        "assessed_at": t.assessed_at,
-        "created_at": getattr(t, "created_at", None),
-        "updated_at": getattr(t, "updated_at", None),
-    }
+# ============================================================
+# READ
+# ============================================================
 
 
 @router.get(
@@ -55,7 +46,7 @@ def list_for_visit(
 ):
     items, total = service.list_for_visit(visit_id, skip=skip, limit=limit)
     return paginate_response(
-        items=[_serialize_triage(t) for t in items],
+        items=items,
         total=total,
         skip=skip,
         limit=limit,
@@ -79,7 +70,7 @@ def create_triage(
     return {
         "success": True,
         "message": "Triage assessment recorded.",
-        "triage": _serialize_triage(triage),
+        "triage": triage,
     }
 
 
@@ -93,7 +84,7 @@ def get_triage(
     _: Annotated[User, Depends(require_permission("TRIAGE_PERFORM", "VISIT_READ"))],
     service: Annotated[TriageService, Depends(get_triage_service)],
 ):
-    return _serialize_triage(service.get(triage_id))
+    return service.get(triage_id)
 
 
 @router.put(
@@ -112,5 +103,5 @@ def update_triage(
     return {
         "success": True,
         "message": "Triage assessment updated.",
-        "triage": _serialize_triage(triage),
+        "triage": triage,
     }

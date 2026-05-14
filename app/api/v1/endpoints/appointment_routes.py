@@ -58,24 +58,6 @@ def get_appointment_service(db: Annotated[Session, Depends(get_db)]) -> Appointm
     return AppointmentService(db)
 
 
-def _serialize(a) -> dict:
-    """ORM -> response dict translation kept in one place."""
-    return {
-        "id": a.id,
-        "appointment_code": a.appointment_code,
-        "patient_id": a.patient_id,
-        "facility_id": a.facility_id,
-        "service_delivery_point_id": a.service_delivery_point_id,
-        "staff_profile_id": a.staff_profile_id,
-        "scheduled_start_at": a.scheduled_start_at,
-        "scheduled_end_at": a.scheduled_end_at,
-        "reason": a.reason,
-        "status": str(a.status),
-        "created_at": getattr(a, "created_at", None),
-        "updated_at": getattr(a, "updated_at", None),
-    }
-
-
 # ============================================================
 # READ
 # ============================================================
@@ -115,7 +97,7 @@ def list_appointments(
         to_dt=to_dt,
     )
     return paginate_response(
-        items=[_serialize(a) for a in items],
+        items=items,
         total=total,
         skip=skip,
         limit=limit,
@@ -142,7 +124,7 @@ def arrival_board(
         facility_id=facility_id,
     )
     return paginate_response(
-        items=[_serialize(a) for a in items],
+        items=items,
         total=len(items),
         skip=0,
         limit=len(items) or 1,
@@ -176,7 +158,7 @@ def check_availability(
         "success": True,
         "message": "Availability fetched successfully.",
         "available": not conflicts,
-        "conflicts": [_serialize(c) for c in conflicts],
+        "conflicts": conflicts,
     }
 
 
@@ -191,7 +173,7 @@ def get_appointment(
     service: Annotated[AppointmentService, Depends(get_appointment_service)],
 ):
     """Read a single appointment by id."""
-    return _serialize(service.get(appointment_id))
+    return service.get(appointment_id)
 
 
 # ============================================================
@@ -216,7 +198,7 @@ def book_appointment(
     return {
         "success": True,
         "message": "Appointment booked.",
-        "appointment": _serialize(appointment),
+        "appointment": appointment,
     }
 
 
@@ -237,7 +219,7 @@ def reschedule_appointment(
     return {
         "success": True,
         "message": "Appointment rescheduled.",
-        "appointment": _serialize(appointment),
+        "appointment": appointment,
     }
 
 
@@ -258,7 +240,7 @@ def cancel_appointment(
     return {
         "success": True,
         "message": "Appointment cancelled.",
-        "appointment": _serialize(appointment),
+        "appointment": appointment,
     }
 
 
@@ -279,7 +261,7 @@ def mark_no_show(
     return {
         "success": True,
         "message": "Appointment marked missed.",
-        "appointment": _serialize(appointment),
+        "appointment": appointment,
     }
 
 
@@ -312,7 +294,7 @@ def check_in_appointment(
             if visit is not None
             else "Appointment checked in."
         ),
-        "appointment": _serialize(appointment),
+        "appointment": appointment,
         "visit_id": getattr(visit, "id", None),
         "visit_code": getattr(visit, "visit_code", None),
         "queue_ticket_id": getattr(queue_ticket, "id", None),

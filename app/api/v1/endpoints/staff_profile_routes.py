@@ -80,186 +80,6 @@ def get_staff_profile_service(
 # SERIALIZATION HELPERS
 # ============================================================
 
-def _serialize_user(user: User) -> dict[str, Any]:
-    """
-    Serialize a User ORM object into the shape expected by UserReadSchema.
-
-    This serializer also includes:
-    - assigned roles
-    - linked staff profile (when present)
-
-    Args:
-        user: ORM user instance.
-
-    Returns:
-        dict[str, Any]: Serialized user payload.
-    """
-    roles: list[dict[str, Any]] = []
-    for link in user.user_roles or []:
-        if link.role and not link.role.is_deleted:
-            roles.append(
-                {
-                    "id": link.role.id,
-                    "name": link.role.name,
-                    "code": link.role.code,
-                    "description": link.role.description,
-                }
-            )
-
-    staff_profile_payload = None
-    if user.staff_profile and not user.staff_profile.is_deleted:
-        staff_profile_payload = {
-            "id": user.staff_profile.id,
-            "user_id": user.staff_profile.user_id,
-            "department_id": user.staff_profile.department_id,
-            "service_delivery_point_id": user.staff_profile.service_delivery_point_id,
-            "staff_no": user.staff_profile.staff_no,
-            "job_title": user.staff_profile.job_title,
-            "professional_license_no": user.staff_profile.professional_license_no,
-            "specialty": user.staff_profile.specialty,
-            "created_at": user.staff_profile.created_at,
-            "updated_at": user.staff_profile.updated_at,
-        }
-
-    return {
-        "id": user.id,
-        "username": user.username,
-        "email": user.email,
-        "phone_number": user.phone_number,
-        "first_name": user.first_name,
-        "last_name": user.last_name,
-        "middle_name": user.middle_name,
-        "status": str(user.status),
-        "is_superuser": user.is_superuser,
-        "is_two_factor_enabled": user.is_two_factor_enabled,
-        "is_email_verified": user.is_email_verified,
-        "is_phone_verified": user.is_phone_verified,
-        "last_login_at": user.last_login_at,
-        "password_changed_at": user.password_changed_at,
-        "created_at": user.created_at,
-        "updated_at": user.updated_at,
-        "roles": roles,
-        "staff_profile": staff_profile_payload,
-    }
-
-
-def _serialize_staff_profile(staff_profile: StaffProfile) -> dict[str, Any]:
-    """
-    Serialize a basic StaffProfile ORM object into StaffProfileReadSchema shape.
-
-    Args:
-        staff_profile: ORM staff profile instance.
-
-    Returns:
-        dict[str, Any]: Serialized basic staff profile payload.
-    """
-    return {
-        "id": staff_profile.id,
-        "user_id": staff_profile.user_id,
-        "department_id": staff_profile.department_id,
-        "service_delivery_point_id": staff_profile.service_delivery_point_id,
-        "staff_no": staff_profile.staff_no,
-        "job_title": staff_profile.job_title,
-        "professional_license_no": staff_profile.professional_license_no,
-        "specialty": staff_profile.specialty,
-        "created_at": staff_profile.created_at,
-        "updated_at": staff_profile.updated_at,
-    }
-
-
-def _serialize_detailed_staff_profile(staff_profile: StaffProfile) -> dict[str, Any]:
-    """
-    Serialize a detailed StaffProfile ORM object.
-
-    Includes:
-    - linked user account
-    - assigned department
-    - assigned service delivery point
-    - assigned roles from the linked user
-
-    Args:
-        staff_profile: ORM staff profile instance with eager-loaded relations.
-
-    Returns:
-        dict[str, Any]: Serialized detailed staff profile payload.
-    """
-    roles: list[dict[str, Any]] = []
-    if staff_profile.user:
-        for link in staff_profile.user.user_roles or []:
-            if link.role and not link.role.is_deleted:
-                roles.append(
-                    {
-                        "id": link.role.id,
-                        "name": link.role.name,
-                        "code": link.role.code,
-                        "description": link.role.description,
-                    }
-                )
-
-    department_payload = None
-    if staff_profile.department and not staff_profile.department.is_deleted:
-        department_payload = {
-            "id": staff_profile.department.id,
-            "name": staff_profile.department.name,
-            "code": staff_profile.department.code,
-            "description": staff_profile.department.description,
-        }
-
-    service_point_payload = None
-    if (
-        staff_profile.service_delivery_point
-        and not staff_profile.service_delivery_point.is_deleted
-    ):
-        service_point_payload = {
-            "id": staff_profile.service_delivery_point.id,
-            "name": staff_profile.service_delivery_point.name,
-            "code": staff_profile.service_delivery_point.code,
-            "service_point_type": str(staff_profile.service_delivery_point.service_point_type),
-            "location_description": staff_profile.service_delivery_point.location_description,
-            "queue_prefix": staff_profile.service_delivery_point.queue_prefix,
-            "supports_appointments": staff_profile.service_delivery_point.supports_appointments,
-            "supports_walk_in": staff_profile.service_delivery_point.supports_walk_in,
-        }
-
-    user_payload = None
-    if staff_profile.user and not staff_profile.user.is_deleted:
-        user_payload = {
-            "id": staff_profile.user.id,
-            "username": staff_profile.user.username,
-            "email": staff_profile.user.email,
-            "phone_number": staff_profile.user.phone_number,
-            "first_name": staff_profile.user.first_name,
-            "last_name": staff_profile.user.last_name,
-            "middle_name": staff_profile.user.middle_name,
-            "status": str(staff_profile.user.status),
-            "is_superuser": staff_profile.user.is_superuser,
-            "is_two_factor_enabled": staff_profile.user.is_two_factor_enabled,
-            "is_email_verified": staff_profile.user.is_email_verified,
-            "is_phone_verified": staff_profile.user.is_phone_verified,
-            "last_login_at": staff_profile.user.last_login_at,
-            "password_changed_at": staff_profile.user.password_changed_at,
-            "created_at": staff_profile.user.created_at,
-            "updated_at": staff_profile.user.updated_at,
-        }
-
-    return {
-        "id": staff_profile.id,
-        "user_id": staff_profile.user_id,
-        "department_id": staff_profile.department_id,
-        "service_delivery_point_id": staff_profile.service_delivery_point_id,
-        "staff_no": staff_profile.staff_no,
-        "job_title": staff_profile.job_title,
-        "professional_license_no": staff_profile.professional_license_no,
-        "specialty": staff_profile.specialty,
-        "created_at": staff_profile.created_at,
-        "updated_at": staff_profile.updated_at,
-        "user": user_payload,
-        "department": department_payload,
-        "service_delivery_point": service_point_payload,
-        "roles": roles,
-    }
-
-
 # ============================================================
 # USER ADMINISTRATION ROUTES
 # ============================================================
@@ -303,8 +123,7 @@ def get_user(
     """
     Return full details for a single user, including roles and linked staff profile.
     """
-    user = service.get_user(user_id)
-    return _serialize_user(user)
+    return service.get_user(user_id)
 
 
 @router.post(
@@ -323,8 +142,7 @@ def create_user_with_staff_profile(
 
     The business payload includes staff profile data as part of onboarding.
     """
-    user = service.create_user_with_staff_profile(payload)
-    return _serialize_user(user)
+    return service.create_user_with_staff_profile(payload)
 
 
 @router.put(
@@ -342,8 +160,7 @@ def update_user_and_staff_profile(
     """
     Update a user account and optionally update the linked staff profile.
     """
-    user = service.update_user_and_staff_profile(user_id, payload)
-    return _serialize_user(user)
+    return service.update_user_and_staff_profile(user_id, payload)
 
 
 @router.post(
@@ -360,8 +177,7 @@ def activate_user(
     """
     Activate a user account.
     """
-    user = service.activate_user(user_id)
-    return _serialize_user(user)
+    return service.activate_user(user_id)
 
 
 @router.post(
@@ -378,8 +194,7 @@ def deactivate_user(
     """
     Deactivate a user account and revoke active sessions.
     """
-    user = service.deactivate_user(user_id)
-    return _serialize_user(user)
+    return service.deactivate_user(user_id)
 
 
 # ============================================================
@@ -401,8 +216,7 @@ def assign_roles(
     """
     Add one or more roles to a user.
     """
-    user = service.assign_roles(user_id, payload)
-    return _serialize_user(user)
+    return service.assign_roles(user_id, payload)
 
 
 @router.put(
@@ -420,8 +234,7 @@ def replace_roles(
     """
     Replace all current role assignments for a user.
     """
-    user = service.replace_roles(user_id, payload)
-    return _serialize_user(user)
+    return service.replace_roles(user_id, payload)
 
 
 @router.delete(
@@ -439,8 +252,7 @@ def remove_roles(
     """
     Remove selected roles from a user.
     """
-    user = service.remove_roles(user_id, payload)
-    return _serialize_user(user)
+    return service.remove_roles(user_id, payload)
 
 
 # ============================================================
@@ -464,8 +276,7 @@ def admin_reset_password(
 
     This also revokes active sessions for the user.
     """
-    user = service.admin_reset_password(user_id, payload)
-    return _serialize_user(user)
+    return service.admin_reset_password(user_id, payload)
 
 
 @router.post(
@@ -482,8 +293,7 @@ def change_own_password(
     """
     Change the current authenticated user's password.
     """
-    user = service.change_own_password(current_user.id, payload)
-    return _serialize_user(user)
+    return service.change_own_password(current_user.id, payload)
 
 
 @router.post(
@@ -501,8 +311,7 @@ def toggle_mfa(
     """
     Enable or disable MFA for a user account.
     """
-    user = service.toggle_mfa(user_id, payload)
-    return _serialize_user(user)
+    return service.toggle_mfa(user_id, payload)
 
 
 # ============================================================
@@ -606,7 +415,7 @@ def get_user_access_summary(
     """
     user, permissions = service.get_user_access_summary(user_id)
     return {
-        "user": _serialize_user(user),
+        "user": user,
         "permissions": [
             {
                 "id": permission.id,
@@ -641,7 +450,7 @@ def list_staff_profiles(
     """
     items, total = service.list_staff_profiles(skip=skip, limit=limit)
 
-    serialized_items = [_serialize_detailed_staff_profile(item) for item in items]
+    serialized_items = items
 
     return paginate_response(
         items=serialized_items,
@@ -666,8 +475,7 @@ def get_detailed_staff_profile_by_id(
     """
     Return a detailed staff profile record by staff profile ID.
     """
-    staff_profile = service.get_detailed_staff_profile_by_id(staff_profile_id)
-    return _serialize_detailed_staff_profile(staff_profile)
+    return service.get_detailed_staff_profile_by_id(staff_profile_id)
 
 
 @router.get(
@@ -684,8 +492,7 @@ def get_detailed_staff_profile_by_user_id(
     """
     Return a detailed staff profile record using the linked user ID.
     """
-    staff_profile = service.get_detailed_staff_profile_by_user_id(user_id)
-    return _serialize_detailed_staff_profile(staff_profile)
+    return service.get_detailed_staff_profile_by_user_id(user_id)
 
 
 @router.delete(
@@ -702,5 +509,4 @@ def soft_delete_staff_profile(
     """
     Soft-delete a staff profile record.
     """
-    staff_profile = service.soft_delete_staff_profile(staff_profile_id)
-    return _serialize_staff_profile(staff_profile)
+    return service.soft_delete_staff_profile(staff_profile_id)

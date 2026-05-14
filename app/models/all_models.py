@@ -250,6 +250,18 @@ class Role(TenantTable):
         cascade="all, delete-orphan",
     )
 
+    @property
+    def permissions(self) -> list["Permission"]:
+        """
+        Return a list of non-deleted permissions associated with this role.
+        Useful for Pydantic serialization.
+        """
+        return [
+            link.permission
+            for link in self.role_permissions
+            if link.permission and not link.permission.is_deleted
+        ]
+
 
 class Permission(TenantTable):
     """
@@ -373,6 +385,38 @@ class User(TenantTable):
         back_populates="user",
         cascade="all, delete-orphan",
     )
+
+    @property
+    def roles(self) -> list["Role"]:
+        """
+        Return a list of non-deleted roles associated with this user.
+        Useful for Pydantic serialization.
+        """
+        return [
+            assoc.role
+            for assoc in self.user_roles
+            if assoc.role and not assoc.role.is_deleted and not assoc.is_deleted
+        ]
+
+    @property
+    def two_factor_method(self) -> Optional[str]:
+        return None
+
+    @property
+    def two_factor_email_enabled(self) -> bool:
+        return False
+
+    @property
+    def two_factor_sms_enabled(self) -> bool:
+        return False
+
+    @property
+    def two_factor_whatsapp_enabled(self) -> bool:
+        return False
+
+    @property
+    def two_factor_authenticator_enabled(self) -> bool:
+        return False
 
 
 class UserRoleAssociation(TenantTable):
@@ -687,76 +731,10 @@ class StaffServiceDeliveryPointAssociation(TenantTable):
         UniqueConstraint("staff_profile_id", "service_delivery_point_id", name="uq_staff_sdp_association"),
     )
 
-# # ============================================================
-# # PATIENTS / REGISTRATION
-# # ============================================================
-
-
-# class Patient(TenantTable):
-#     """Master patient record."""
-
-#     hospital_number: Mapped[str] = mapped_column(String(100), unique=True, nullable=False, index=True)
-
-#     first_name: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
-#     last_name: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
-#     middle_name: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
-
-#     date_of_birth: Mapped[Optional[date]] = mapped_column(Date, nullable=True, index=True)
-#     gender: Mapped[Optional[Gender]] = mapped_column(Enum(Gender), nullable=True, index=True)
-#     marital_status: Mapped[Optional[MaritalStatus]] = mapped_column(Enum(MaritalStatus), nullable=True)
-
-#     phone_number: Mapped[Optional[str]] = mapped_column(String(30), nullable=True, index=True)
-#     alternate_phone_number: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)
-#     email: Mapped[Optional[str]] = mapped_column(String(255), nullable=True, index=True)
-
-#     address: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-#     city: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
-#     state: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
-#     country: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
-
-#     blood_group: Mapped[Optional[BloodGroup]] = mapped_column(Enum(BloodGroup), nullable=True)
-#     genotype: Mapped[Optional[Genotype]] = mapped_column(Enum(Genotype), nullable=True)
-#     allergies: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-
-#     emergency_contact_name: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
-#     emergency_contact_phone: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)
-#     emergency_contact_relationship: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
-
-#     patient_type: Mapped[PatientType] = mapped_column(
-#         Enum(PatientType),
-#         default=PatientType.OUTPATIENT,
-#         nullable=False,
-#         index=True,
-#     )
-
-#     registrations: Mapped[list["PatientRegistration"]] = relationship(back_populates="patient")
-#     appointments: Mapped[list["Appointment"]] = relationship(back_populates="patient")
-#     visits: Mapped[list["Visit"]] = relationship(back_populates="patient")
-#     admissions: Mapped[list["Admission"]] = relationship(back_populates="patient")
-#     billings: Mapped[list["Billing"]] = relationship(back_populates="patient")
-#     invoices: Mapped[list["Invoice"]] = relationship(back_populates="patient")
-#     notifications: Mapped[list["Notification"]] = relationship(back_populates="patient")
-#     insurance_records: Mapped[list["PatientInsurance"]] = relationship(back_populates="patient")
-#     loyalty_memberships: Mapped[list["PatientLoyalty"]] = relationship(back_populates="patient")
-
-
-# class PatientRegistration(TenantTable):
-#     """Logs patient registration events."""
-
-#     patient_id: Mapped[int] = mapped_column(ForeignKey("patient.id"), nullable=False, index=True)
-#     registered_by_id: Mapped[Optional[int]] = mapped_column(ForeignKey("user.id"), nullable=True, index=True)
-
-#     registration_date: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-#     notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-
-#     patient: Mapped["Patient"] = relationship(back_populates="registrations")
-#     registered_by: Mapped[Optional["User"]] = relationship()
-
 
 # ============================================================
 # PATIENTS / REGISTRATION / MPI / IDENTIFIERS / CONSENTS
 # ============================================================
-
 
 class Patient(TenantTable):
     """Master patient record."""
@@ -2143,10 +2121,10 @@ class MembershipCard(TenantTable):
     status: Mapped[MembershipCardStatus] = mapped_column(
         Enum(MembershipCardStatus), default=MembershipCardStatus.ACTIVE, nullable=False
     )
-    issuing_facility_id: Mapped[int] = mapped_column(ForeignKey("facility.id"), nullable=False)
-    issued_by_id: Mapped[int] = mapped_column(ForeignKey("user.id"), nullable=False)
-    date_issued: Mapped[date] = mapped_column(Date, nullable=False, default=lambda: datetime.utcnow().date())
-    expiry_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+    issuing_facility_id: Mapped[int] = mapped_column(ForeignKey("facility.id"), nullable=False, index=True)
+    issued_by_id: Mapped[int] = mapped_column(ForeignKey("user.id"), nullable=False, index=True)
+    date_issued: Mapped[date] = mapped_column(Date, nullable=False, default=lambda: datetime.utcnow().date(), index=True)
+    expiry_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True, index=True)
 
     patient: Mapped["Patient"] = relationship(back_populates="membership_cards")
     issuing_facility: Mapped["Facility"] = relationship()
@@ -2166,14 +2144,14 @@ class MembershipCardTransaction(TenantTable):
     payment_reference: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     balance_before: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
     balance_after: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
-    facility_id: Mapped[int] = mapped_column(ForeignKey("facility.id"), nullable=False)
-    processed_by_id: Mapped[int] = mapped_column(ForeignKey("user.id"), nullable=False)
-    transaction_date: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
+    facility_id: Mapped[int] = mapped_column(ForeignKey("facility.id"), nullable=False, index=True)
+    processed_by_id: Mapped[int] = mapped_column(ForeignKey("user.id"), nullable=False, index=True)
+    transaction_date: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=datetime.utcnow, index=True)
     narration: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     
-    invoice_id: Mapped[Optional[int]] = mapped_column(ForeignKey("invoice.id"), nullable=True)
-    visit_id: Mapped[Optional[int]] = mapped_column(ForeignKey("visit.id"), nullable=True)
-    payment_id: Mapped[Optional[int]] = mapped_column(ForeignKey("payment.id"), nullable=True)
+    invoice_id: Mapped[Optional[int]] = mapped_column(ForeignKey("invoice.id"), nullable=True, index=True)
+    visit_id: Mapped[Optional[int]] = mapped_column(ForeignKey("visit.id"), nullable=True, index=True)
+    payment_id: Mapped[Optional[int]] = mapped_column(ForeignKey("payment.id"), nullable=True, index=True)
 
     membership_card: Mapped["MembershipCard"] = relationship(back_populates="transactions")
     patient: Mapped["Patient"] = relationship()
@@ -2182,6 +2160,14 @@ class MembershipCardTransaction(TenantTable):
     invoice: Mapped[Optional["Invoice"]] = relationship()
     visit: Mapped[Optional["Visit"]] = relationship()
     payment: Mapped[Optional["Payment"]] = relationship(back_populates="membership_card_transaction")
+
+    __table_args__ = (
+        Index(
+            "ix_membership_card_transaction_lookup",
+            "membership_card_id",
+            "transaction_date",
+        ),
+    )
 
 
 class PaystackTransaction(TenantTable):
@@ -3187,6 +3173,26 @@ class SaaSAdmin(MasterTable):
     failed_login_attempts: Mapped[int] = mapped_column(Integer, default=0)
     locked_until: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     last_login_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    @property
+    def username(self) -> str:
+        return self.email
+
+    @property
+    def is_active(self) -> bool:
+        return self.status == UserStatus.ACTIVE
+
+    @property
+    def is_email_verified(self) -> bool:
+        return True  # SaaS Admins are assumed verified on creation/management
+
+    @property
+    def is_phone_verified(self) -> bool:
+        return bool(self.phone_number)
+
+    @property
+    def is_two_factor_enabled(self) -> bool:
+        return False  # Placeholder until SaaS 2FA is implemented
 
 
 class SupportAccessGrant(MasterTable):
@@ -5790,6 +5796,18 @@ class TenantEmailConfig(TenantTable):
     last_test_status: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
     last_test_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     sent_count: Mapped[int] = mapped_column(BigInteger, default=0)
+
+    @property
+    def has_smtp_password(self) -> bool:
+        return bool(self.smtp_password_encrypted)
+
+    @property
+    def has_api_key(self) -> bool:
+        return bool(self.api_key_encrypted)
+
+    @property
+    def has_api_secret(self) -> bool:
+        return bool(self.api_secret_encrypted)
 
 
 class TenantPaymentMethodConfig(TenantTable):

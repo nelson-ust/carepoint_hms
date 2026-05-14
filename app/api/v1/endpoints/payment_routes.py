@@ -31,21 +31,9 @@ def get_payment_service(db: Annotated[Session, Depends(get_db)]) -> PaymentServi
     return PaymentService(db)
 
 
-def _serialize(p) -> dict:
-    return {
-        "id": p.id,
-        "invoice_id": p.invoice_id,
-        "received_by_staff_id": p.received_by_staff_id,
-        "payment_reference": p.payment_reference,
-        "payment_method": p.payment_method,
-        "payment_status": str(p.payment_status),
-        "amount": p.amount,
-        "currency": p.currency,
-        "paid_at": p.paid_at,
-        "transaction_metadata": p.transaction_metadata,
-        "note": p.note,
-        "created_at": getattr(p, "created_at", None),
-    }
+# ============================================================
+# READ
+# ============================================================
 
 
 @router.get(
@@ -67,7 +55,7 @@ def list_payments(
         payment_method=payment_method, payment_status=payment_status,
     )
     return paginate_response(
-        items=[_serialize(p) for p in items],
+        items=items,
         total=total, skip=skip, limit=limit,
         message="Payments fetched successfully.",
     )
@@ -85,7 +73,7 @@ def list_for_invoice(
 ):
     items = service.list_for_invoice(invoice_id)
     return paginate_response(
-        items=[_serialize(p) for p in items],
+        items=items,
         total=len(items), skip=0, limit=len(items) or 1,
         message="Payments fetched successfully.",
     )
@@ -104,7 +92,7 @@ def receive_payment(
     service: Annotated[PaymentService, Depends(get_payment_service)],
 ):
     p = service.receive_payment(payload, actor_user_id=actor.id)
-    return {"success": True, "message": "Payment received.", "payment": _serialize(p)}
+    return {"success": True, "message": "Payment received.", "payment": p}
 
 
 @router.post(
@@ -119,7 +107,7 @@ def refund_payment(
     service: Annotated[PaymentService, Depends(get_payment_service)],
 ):
     p = service.refund_payment(payload, actor_user_id=actor.id)
-    return {"success": True, "message": "Payment refunded.", "payment": _serialize(p)}
+    return {"success": True, "message": "Payment refunded.", "payment": p}
 
 
 @router.get(
@@ -132,4 +120,4 @@ def get_payment(
     _: Annotated[User, Depends(require_permission("BILLING_READ", "PAYMENT_RECEIVE"))],
     service: Annotated[PaymentService, Depends(get_payment_service)],
 ):
-    return _serialize(service.get(payment_id))
+    return service.get(payment_id)

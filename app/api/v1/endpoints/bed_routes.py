@@ -63,32 +63,6 @@ def get_bed_service(
 
 
 # ============================================================
-# SERIALIZATION HELPERS
-# ============================================================
-
-def _serialize_bed(bed) -> dict[str, Any]:
-    """
-    Serialize a Bed ORM object into the response shape expected by BedReadSchema.
-
-    Args:
-        bed: Bed ORM instance.
-
-    Returns:
-        dict[str, Any]: Serialized bed payload.
-    """
-    return {
-        "id": bed.id,
-        "ward_id": bed.ward_id,
-        "bed_no": bed.bed_no,
-        "bed_status": str(bed.bed_status),
-        "bed_type": bed.bed_type,
-        "notes": bed.notes,
-        "created_at": bed.created_at,
-        "updated_at": bed.updated_at,
-    }
-
-
-# ============================================================
 # ROUTES
 # ============================================================
 
@@ -110,8 +84,7 @@ def create_bed(
     - linked ward must exist
     - bed number must be unique within the ward
     """
-    bed = service.create_bed(payload)
-    return _serialize_bed(bed)
+    return service.create_bed(payload)
 
 
 @router.get(
@@ -159,8 +132,7 @@ def get_bed(
     """
     Return the basic details of a single bed.
     """
-    bed = service.get_bed(bed_id)
-    return _serialize_bed(bed)
+    return service.get_bed(bed_id)
 
 
 @router.get(
@@ -205,8 +177,7 @@ def update_bed(
     - final (ward_id, bed_no) combination must remain unique
     - moving a bed across wards is blocked when admissions already exist
     """
-    bed = service.update_bed(bed_id, payload)
-    return _serialize_bed(bed)
+    return service.update_bed(bed_id, payload)
 
 
 @router.delete(

@@ -314,7 +314,7 @@ class EdgeSyncService:
                 skip_origin=f"edge:{self.node.code}",
             )
 
-            payload = [self._serialize_row(r) for r in rows]
+            payload = rows
             highest = rows[-1].seq if rows else cursor
 
             batch = SyncBatch(
@@ -453,22 +453,24 @@ class EdgeSyncService:
             "rejected_details": rejected_details[:50],
         }
 
-    # ------------------------------------------------------------------
-    # Helpers
-    # ------------------------------------------------------------------
 
-    @staticmethod
-    def _serialize_row(rec: SyncJournal) -> dict[str, Any]:
-        return {
-            "seq": int(rec.seq),
-            "client_uuid": rec.client_uuid,
-            "entity_type": rec.entity_type,
-            "entity_id": rec.entity_id,
-            "op": getattr(rec.op, "value", rec.op),
-            "payload": rec.payload,
-            "occurred_at": rec.occurred_at.isoformat() if rec.occurred_at else None,
-            "origin": rec.origin,
-        }
+# ---------------------------------------------------------------------------
+# Misc utility
+# ---------------------------------------------------------------------------
+
+
+def _parse_dt(value: Any) -> Optional[datetime]:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, str):
+        try:
+            # Handle the common "2026-05-02T13:46:01+00:00" / "Z" forms.
+            return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    return None
 
 
 # ---------------------------------------------------------------------------

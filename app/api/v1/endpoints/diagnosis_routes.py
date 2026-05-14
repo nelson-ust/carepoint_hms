@@ -27,18 +27,9 @@ def get_diagnosis_service(db: Annotated[Session, Depends(get_db)]) -> DiagnosisS
     return DiagnosisService(db)
 
 
-def _serialize(d) -> dict:
-    return {
-        "id": d.id,
-        "visit_id": d.visit_id,
-        "consultation_id": d.consultation_id,
-        "diagnosis_code": d.diagnosis_code,
-        "diagnosis_name": d.diagnosis_name,
-        "diagnosis_type": d.diagnosis_type,
-        "diagnosis_note": d.diagnosis_note,
-        "created_at": getattr(d, "created_at", None),
-        "updated_at": getattr(d, "updated_at", None),
-    }
+# ============================================================
+# READ
+# ============================================================
 
 
 @router.get(
@@ -55,7 +46,7 @@ def list_for_visit(
 ):
     items, total = service.list_for_visit(visit_id, skip=skip, limit=limit)
     return paginate_response(
-        items=[_serialize(d) for d in items],
+        items=items,
         total=total,
         skip=skip,
         limit=limit,
@@ -79,7 +70,7 @@ def create_diagnosis(
     return {
         "success": True,
         "message": "Diagnosis recorded.",
-        "diagnosis": _serialize(diagnosis),
+        "diagnosis": diagnosis,
     }
 
 
@@ -93,7 +84,7 @@ def get_diagnosis(
     _: Annotated[User, Depends(require_permission("CONSULTATION_READ"))],
     service: Annotated[DiagnosisService, Depends(get_diagnosis_service)],
 ):
-    return _serialize(service.get(diagnosis_id))
+    return service.get(diagnosis_id)
 
 
 @router.put(
@@ -112,5 +103,5 @@ def update_diagnosis(
     return {
         "success": True,
         "message": "Diagnosis updated.",
-        "diagnosis": _serialize(diagnosis),
+        "diagnosis": diagnosis,
     }

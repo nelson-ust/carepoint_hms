@@ -60,36 +60,6 @@ def get_consultation_service(db: Annotated[Session, Depends(get_db)]) -> Consult
 # SERIALIZATION HELPERS
 # ============================================================
 
-def _serialize(c) -> dict:
-    """
-    Map Consultation model to a comprehensive dictionary representation.
-    
-    Includes patient and clinician context for immediate frontend display.
-    """
-    visit = getattr(c, "visit", None)
-    patient = getattr(visit, "patient", None) if visit else None
-    staff = getattr(c, "clinician_staff", None)
-    user = getattr(staff, "user", None) if staff else None
-
-    return {
-        "id": c.id,
-        "visit_id": c.visit_id,
-        "patient_name": f"{patient.first_name} {patient.last_name}" if patient else "N/A",
-        "hospital_number": getattr(patient, "hospital_number", "N/A"),
-        "clinician_staff_id": c.clinician_staff_id,
-        "clinician_name": f"{user.first_name} {user.last_name}" if user else "N/A",
-        "status": str(c.status),
-        "subjective_note": c.subjective_note,
-        "objective_note": c.objective_note,
-        "assessment_note": c.assessment_note,
-        "plan_note": c.plan_note,
-        "consultation_started_at": c.consultation_started_at,
-        "consultation_ended_at": c.consultation_ended_at,
-        "created_at": getattr(c, "created_at", None),
-        "updated_at": getattr(c, "updated_at", None),
-    }
-
-
 # ============================================================
 # READ ROUTES
 # ============================================================
@@ -111,7 +81,7 @@ def list_for_visit(
     """
     items, total = service.list_for_visit(visit_id, skip=skip, limit=limit)
     return paginate_response(
-        items=[_serialize(c) for c in items],
+        items=items,
         total=total,
         skip=skip,
         limit=limit,
@@ -132,7 +102,7 @@ def get_consultation(
     """
     Retrieve full clinical details for a single encounter.
     """
-    return _serialize(service.get(consultation_id))
+    return service.get(consultation_id)
 
 
 # ============================================================
@@ -160,7 +130,7 @@ def create_consultation(
     return {
         "success": True,
         "message": "Consultation started.",
-        "consultation": _serialize(consultation),
+        "consultation": consultation,
     }
 
 
@@ -179,11 +149,11 @@ def update_consultation(
     """
     Amend or update clinical notes (Subjective, Objective, Assessment, Plan).
     """
-    consultation = consultation = service.update(consultation_id, payload, actor_user_id=actor.id)
+    consultation = service.update(consultation_id, payload, actor_user_id=actor.id)
     return {
         "success": True,
         "message": "Consultation updated.",
-        "consultation": _serialize(consultation),
+        "consultation": consultation,
     }
 
 
@@ -206,7 +176,7 @@ def finalize_consultation(
     return {
         "success": True,
         "message": "Consultation finalized.",
-        "consultation": _serialize(consultation),
+        "consultation": consultation,
     }
 
 
@@ -229,5 +199,5 @@ def cancel_consultation(
     return {
         "success": True,
         "message": "Consultation cancelled.",
-        "consultation": _serialize(consultation),
+        "consultation": consultation,
     }

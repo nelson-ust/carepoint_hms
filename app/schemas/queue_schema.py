@@ -6,9 +6,9 @@ Pydantic schemas for queue tickets and service-point worklists.
 """
 
 from datetime import datetime
-from typing import Optional
+from typing import Any, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class QueueTicketCreateSchema(BaseModel):
@@ -88,8 +88,22 @@ class QueueTicketReadSchema(BaseModel):
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 
+    # Demographic Context (Populated via model_validator)
+    patient_name: Optional[str] = None
+    patient_phone: Optional[str] = None
+    hospital_number: Optional[str] = None
+
     # Extended info for providers
     previous_steps: list[QueueTicketPreviousStepSchema] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def resolve_patient_details(cls, data: Any) -> Any:
+        if hasattr(data, "patient") and data.patient:
+            data.patient_name = f"{data.patient.first_name} {data.patient.last_name}"
+            data.patient_phone = data.patient.phone_number
+            data.hospital_number = data.patient.hospital_number
+        return data
 
 
 class QueueTicketListResponseSchema(BaseModel):

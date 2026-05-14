@@ -56,18 +56,9 @@ def get_permission_service(
     return PermissionService(db)
 
 
-def _serialize_permission(permission) -> dict:
-    return {
-        "id": permission.id,
-        "name": permission.name,
-        "code": permission.code,
-        "module": permission.module,
-        "description": permission.description,
-        "is_system": bool(getattr(permission, "is_system", False)),
-        "created_at": permission.created_at,
-        "updated_at": permission.updated_at,
-    }
-
+# ============================================================
+# ROUTES
+# ============================================================
 
 @router.get(
     "/",
@@ -93,7 +84,7 @@ def list_permissions(
         search=search,
     )
     return paginate_response(
-        items=[_serialize_permission(p) for p in items],
+        items=items,
         total=total,
         skip=skip,
         limit=limit,
@@ -164,8 +155,7 @@ def get_permission(
     """
     Return permission details.
     """
-    permission = service.get_permission(permission_id)
-    return _serialize_permission(permission)
+    return service.get_permission(permission_id)
 
 
 @router.post(
@@ -182,8 +172,7 @@ def create_permission(
     """
     Create a new permission.
     """
-    permission = service.create_permission(payload)
-    return _serialize_permission(permission)
+    return service.create_permission(payload)
 
 
 @router.put(
@@ -201,8 +190,7 @@ def update_permission(
     """
     Update an existing permission. System permissions are immutable except for description.
     """
-    permission = service.update_permission(permission_id, payload)
-    return _serialize_permission(permission)
+    return service.update_permission(permission_id, payload)
 
 
 @router.delete(
@@ -249,5 +237,5 @@ def bulk_upsert_permissions(
         "created_count": result["created_count"],
         "updated_count": result["updated_count"],
         "skipped_count": result["skipped_count"],
-        "items": [_serialize_permission(p) for p in result["items"]],
+        "items": result["items"],
     }

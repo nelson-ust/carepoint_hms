@@ -69,57 +69,6 @@ def get_staff_profile_service(
 
 
 # ============================================================
-# SERIALIZATION HELPERS
-# ============================================================
-
-def _safe_enum(value) -> Optional[str]:
-    """
-    Convert enum-like values to strings safely.
-    """
-    if value is None:
-        return None
-    return str(value)
-
-
-def _serialize_service_delivery_point(record) -> dict[str, Any]:
-    """
-    Serialize a service delivery point ORM object into the response shape
-    expected by ServiceDeliveryPointReadSchema.
-    """
-    return {
-        "id": record.id,
-        "name": record.name,
-        "code": record.code,
-        "service_point_type": _safe_enum(record.service_point_type),
-        "department_id": getattr(record, "department_id", None),
-        "location_description": getattr(record, "location_description", None),
-        "queue_prefix": getattr(record, "queue_prefix", None),
-        "supports_appointments": getattr(record, "supports_appointments", False),
-        "supports_walk_in": getattr(record, "supports_walk_in", False),
-        "is_active": getattr(record, "is_active", True),
-        "created_at": getattr(record, "created_at", None),
-        "updated_at": getattr(record, "updated_at", None),
-    }
-
-
-def _serialize_service_delivery_point_list_item(record) -> dict[str, Any]:
-    """
-    Serialize a service delivery point ORM object into list-item shape.
-    """
-    return {
-        "id": record.id,
-        "name": record.name,
-        "code": record.code,
-        "service_point_type": _safe_enum(record.service_point_type),
-        "department_id": getattr(record, "department_id", None),
-        "queue_prefix": getattr(record, "queue_prefix", None),
-        "supports_appointments": getattr(record, "supports_appointments", False),
-        "supports_walk_in": getattr(record, "supports_walk_in", False),
-        "is_active": getattr(record, "is_active", True),
-    }
-
-
-# ============================================================
 # ROUTES
 # ============================================================
 
@@ -137,8 +86,7 @@ def create_service_delivery_point(
     """
     Create a new service delivery point.
     """
-    record = service.create_service_delivery_point(payload)
-    return _serialize_service_delivery_point(record)
+    return service.create_service_delivery_point(payload)
 
 
 @router.get(
@@ -176,7 +124,7 @@ def list_service_delivery_points(
     )
 
     return paginate_response(
-        items=[_serialize_service_delivery_point_list_item(item) for item in items],
+        items=items,
         total=total,
         skip=skip,
         limit=limit,
@@ -209,7 +157,7 @@ def list_active_service_delivery_points(
     )
 
     return paginate_response(
-        items=[_serialize_service_delivery_point_list_item(item) for item in items],
+        items=items,
         total=total,
         skip=skip,
         limit=limit,
@@ -231,8 +179,7 @@ def get_service_delivery_point_by_code(
     """
     Return a service delivery point by code.
     """
-    record = service.get_service_delivery_point_by_code(code)
-    return _serialize_service_delivery_point(record)
+    return service.get_service_delivery_point_by_code(code)
 
 
 @router.get(
@@ -249,8 +196,7 @@ def get_service_delivery_point(
     """
     Return a single service delivery point by ID.
     """
-    record = service.get_service_delivery_point(service_delivery_point_id)
-    return _serialize_service_delivery_point(record)
+    return service.get_service_delivery_point(service_delivery_point_id)
 
 
 @router.put(
@@ -268,8 +214,7 @@ def update_service_delivery_point(
     """
     Update a service delivery point.
     """
-    record = service.update_service_delivery_point(service_delivery_point_id, payload)
-    return _serialize_service_delivery_point(record)
+    return service.update_service_delivery_point(service_delivery_point_id, payload)
 
 
 @router.patch(
@@ -287,8 +232,7 @@ def set_service_delivery_point_status(
     """
     Activate or deactivate a service delivery point.
     """
-    record = service.set_active_status(service_delivery_point_id, payload)
-    return _serialize_service_delivery_point(record)
+    return service.set_active_status(service_delivery_point_id, payload)
 
 
 @router.delete(
