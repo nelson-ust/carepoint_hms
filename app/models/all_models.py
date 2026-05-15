@@ -106,6 +106,8 @@ from app.core.enums import (
     LoyaltyTransactionType,
     MaintenanceStatus,
     MaritalStatus,
+    MealRecipient,
+    MealStatus,
     MessageStatus,
     MembershipCardStatus,
     MembershipCardTransactionType,
@@ -312,6 +314,14 @@ class User(TenantTable):
 
     last_login_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     password_changed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    # Password reset (forgot-password) flow. ``password_reset_token`` stores the
+    # SHA-256 hash of the opaque token emailed to the user — never the raw token.
+    # ``password_reset_token_expires_at`` bounds how long the token stays valid.
+    password_reset_token: Mapped[Optional[str]] = mapped_column(String(255), nullable=True, index=True)
+    password_reset_token_expires_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     # Brute-force and credential-stuffing protection fields.
     # These are updated by the auth service when login attempts succeed/fail.
@@ -2328,6 +2338,73 @@ class Discharge(TenantTable):
 
 
 # ============================================================
+# DIETARY & MEAL MANAGEMENT
+# ============================================================
+
+
+class MealType(TenantTable):
+    """
+    Catalog of meals served by the hospital (e.g., Standard Breakfast, VIP Lunch).
+    Each meal type can be linked to a BillableService for automatic pricing.
+    """
+
+    name: Mapped[str] = mapped_column(String(150), nullable=False, unique=True)
+    code: Mapped[str] = mapped_column(String(100), nullable=False, unique=True, index=True)
+    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    base_price: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)
+    
+    # Optional link to a billable service for pricing and billing consistency
+    billable_service_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("billable_service.id"), nullable=True, index=True
+    )
+
+    billable_service: Mapped[Optional["BillableService"]] = relationship()
+
+
+class MealOrder(TenantTable):
+    """
+    Record of a meal ordered/served to a patient or their caregiver.
+    Automatically generates a billable line item on the associated visit's invoice.
+    """
+
+    visit_id: Mapped[int] = mapped_column(ForeignKey("visit.id"), nullable=False, index=True)
+    patient_id: Mapped[int] = mapped_column(ForeignKey("patient.id"), nullable=False, index=True)
+    meal_type_id: Mapped[int] = mapped_column(ForeignKey("meal_type.id"), nullable=False, index=True)
+    
+    recipient_type: Mapped[MealRecipient] = mapped_column(
+        Enum(MealRecipient), default=MealRecipient.PATIENT, nullable=False, index=True
+    )
+    # Name of the caregiver if not for the patient
+    caregiver_name: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    
+    status: Mapped[MealStatus] = mapped_column(
+        Enum(MealStatus), default=MealStatus.ORDERED, nullable=False, index=True
+    )
+    
+    unit_price: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)
+    quantity: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=1)
+    total_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)
+    
+    ordered_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    served_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    
+    ordered_by_staff_id: Mapped[Optional[int]] = mapped_column(ForeignKey("staff_profile.id"), nullable=True)
+    served_by_staff_id: Mapped[Optional[int]] = mapped_column(ForeignKey("staff_profile.id"), nullable=True)
+    
+    # Link to the generated invoice item for audit and reconciliation
+    invoice_item_id: Mapped[Optional[int]] = mapped_column(ForeignKey("invoice_item.id"), nullable=True)
+    
+    notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    visit: Mapped["Visit"] = relationship()
+    patient: Mapped["Patient"] = relationship()
+    meal_type: Mapped["MealType"] = relationship()
+    ordered_by_staff: Mapped[Optional["StaffProfile"]] = relationship(foreign_keys=[ordered_by_staff_id])
+    served_by_staff: Mapped[Optional["StaffProfile"]] = relationship(foreign_keys=[served_by_staff_id])
+    invoice_item: Mapped[Optional["InvoiceItem"]] = relationship()
+
+
+# ============================================================
 # INVENTORY / STOCK
 # ============================================================
 
@@ -3173,6 +3250,14 @@ class SaaSAdmin(MasterTable):
     failed_login_attempts: Mapped[int] = mapped_column(Integer, default=0)
     locked_until: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     last_login_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    # Password reset (forgot-password) flow, mirroring User for parity.
+    # ``password_reset_token`` stores the SHA-256 hash of the opaque token
+    # emailed to the admin — never the raw token.
+    password_reset_token: Mapped[Optional[str]] = mapped_column(String(255), nullable=True, index=True)
+    password_reset_token_expires_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     @property
     def username(self) -> str:

@@ -268,7 +268,28 @@ class ResetPasswordSchema(BaseModel):
     new_password: str = Field(..., min_length=8, max_length=255)
     confirm_new_password: str = Field(..., min_length=8, max_length=255)
 
-    @field_validator("reset_token", "new_password", "confirm_new_password")
+    @field_validator("reset_token")
+    @classmethod
+    def normalize_reset_token(cls, value: str) -> str:
+        """
+        Accept the reset token in a forgiving way.
+
+        Users (and quick curl tests) sometimes paste the whole reset link or
+        the entire query string instead of just the token. This validator
+        extracts the bare token value: it strips any leading URL/query
+        portion up to ``token=`` and drops any trailing query parameters
+        (e.g. ``&tenant_code=...``) or URL fragments.
+        """
+        normalized = value.strip()
+        if "token=" in normalized:
+            normalized = normalized.split("token=", 1)[1]
+        # Drop any trailing query string / fragment artifacts.
+        normalized = normalized.split("&", 1)[0].split("#", 1)[0].strip()
+        if not normalized:
+            raise ValueError("reset_token cannot be empty.")
+        return normalized
+
+    @field_validator("new_password", "confirm_new_password")
     @classmethod
     def normalize_required_fields(cls, value: str) -> str:
         normalized = value.strip()

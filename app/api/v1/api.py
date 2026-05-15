@@ -133,6 +133,7 @@ from app.api.v1.endpoints.vital_sign_routes import router as vital_sign_router
 from app.api.v1.endpoints.consultation_routes import router as consultation_router
 from app.api.v1.endpoints.diagnosis_routes import router as diagnosis_router
 from app.api.v1.endpoints.referral_routes import router as referral_router
+from app.api.v1.endpoints.meal_routes import router as meal_router
 
 # Laboratory
 from app.api.v1.endpoints.lab_routes import router as lab_router
@@ -304,6 +305,7 @@ api_router.include_router(vital_sign_router)
 api_router.include_router(consultation_router)
 api_router.include_router(diagnosis_router)
 api_router.include_router(referral_router)
+api_router.include_router(meal_router)
 
 # Laboratory
 api_router.include_router(lab_router)

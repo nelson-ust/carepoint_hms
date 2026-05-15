@@ -85,6 +85,19 @@ class Settings(BaseSettings):
     PORT: int = 8005
 
     # =========================================================
+    # FRONTEND / CLIENT SETTINGS
+    # =========================================================
+    FRONTEND_URL: str = Field(
+        "http://localhost:3000",
+        validation_alias=AliasChoices("FRONTEND_URL", "CAREPOINT_HMS_FRONTEND_URL"),
+        description="Base URL of the frontend client, used to build links in emails such as the password reset link.",
+    )
+    PASSWORD_RESET_URL_PATH: str = Field(
+        "/reset-password",
+        description="Frontend path that handles password reset. The reset token is appended as a query parameter.",
+    )
+
+    # =========================================================
     # DATABASE SETTINGS
     # =========================================================
     DATABASE_URL: str = Field(

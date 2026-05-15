@@ -1,18 +1,30 @@
 # app/services/saas_auth_service.py
-from datetime import datetime, timezone
+import hmac
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
+from app.core.cryptography import decrypt_string, encrypt_string
 from app.core.enums import TwoFactorPurpose, TwoFactorType, UserStatus
-from app.core.exceptions import BadRequestError, NotFoundError, UnauthorizedError, ValidationError
+from app.core.exceptions import (
+    BadRequestError,
+    NotFoundError,
+    TokenError,
+    UnauthorizedError,
+    ValidationError,
+)
 from app.core.security import (
+    build_password_reset_link,
     create_access_token,
     create_otp_challenge_payload,
     create_refresh_token,
     create_reset_token,
+    generate_password_reset_token,
     get_password_hash,
     validate_password_strength,
+    validate_token_type,
     verify_two_factor_code,
     verify_user_password,
 )
@@ -141,60 +153,129 @@ class SaaSAuthService:
 
     def forgot_password(self, payload: ForgotPasswordSchema) -> dict[str, Any]:
         """
-        Start password reset flow for SaaS Admin.
+        Start the password reset flow for a SaaS Admin (Master DB).
+
+        Generates a short, opaque, single-use reset token. The token is
+        encrypted and stored on the admin's ``password_reset_token`` column,
+        with ``password_reset_token_expires_at`` bounding its validity. The
+        raw token is emailed inside a reset link. The response is always the
+        same masked message so the endpoint does not reveal account existence.
         """
-        admin = self.db.query(SaaSAdmin).filter(SaaSAdmin.email == payload.identifier.lower().strip()).first()
-        if not admin:
-            return {
-                "success": True,
-                "message": "If the account exists, password reset instructions have been sent.",
-            }
-
-        challenge = self._create_and_send_otp_challenge(
-            admin=admin,
-            purpose=TwoFactorPurpose.PASSWORD_RESET,
-        )
-        self.db.commit()
-
-        return {
+        masked_response = {
             "success": True,
             "message": "If the account exists, password reset instructions have been sent.",
-            "challenge_reference": str(challenge.id),
-            "delivery_method": str(challenge.challenge_type),
         }
+
+        admin = self.db.query(SaaSAdmin).filter(
+            SaaSAdmin.email == payload.identifier.lower().strip()
+        ).first()
+        if not admin or not admin.email:
+            return masked_response
+
+        expires_minutes = int(getattr(settings, "PASSWORD_RESET_TOKEN_EXPIRE_MINUTES", 30))
+
+        raw_token = generate_password_reset_token()
+        admin.password_reset_token = encrypt_string(raw_token)
+        admin.password_reset_token_expires_at = (
+            datetime.now(timezone.utc) + timedelta(minutes=expires_minutes)
+        )
+        self.db.add(admin)
+        self.db.commit()
+
+        # SaaS admins are not tenant-scoped, so no tenant_code on the link.
+        reset_link = build_password_reset_link(raw_token)
+        self._send_password_reset_link(
+            email=admin.email,
+            reset_link=reset_link,
+            expires_minutes=expires_minutes,
+        )
+
+        return masked_response
+
+    def _match_admin_by_reset_token(self, raw_token: str) -> Optional[SaaSAdmin]:
+        """
+        Find the SaaS Admin whose stored (encrypted) reset token decrypts to
+        ``raw_token``.
+
+        The token is encrypted at rest with a non-deterministic cipher, so it
+        cannot be matched with a SQL equality filter — each candidate is
+        decrypted and compared in constant time.
+        """
+        if not raw_token:
+            return None
+        candidates = (
+            self.db.query(SaaSAdmin)
+            .filter(SaaSAdmin.password_reset_token.isnot(None))
+            .all()
+        )
+        for candidate in candidates:
+            stored = candidate.password_reset_token
+            if not stored:
+                continue
+            try:
+                if hmac.compare_digest(decrypt_string(stored), raw_token):
+                    return candidate
+            except Exception:
+                continue
+        return None
 
     def reset_password(self, payload: ResetPasswordSchema) -> dict[str, Any]:
         """
-        Complete password reset for SaaS Admin using a reset token.
+        Complete a SaaS Admin password reset using a reset token.
+
+        Accepted tokens
+        ---------------
+        - Primary: a short opaque token issued by ``forgot_password``. The
+          supplied token is matched against the decrypted value of each
+          pending ``password_reset_token`` (must not be expired). It is
+          single-use because it is cleared once consumed.
+        - Fallback: a legacy JWT ``reset`` token carrying the
+          ``is_saas_admin`` claim, kept for backward compatibility.
         """
-        from app.core.security import decode_token, validate_token_type
-        try:
-            # We expect a 'reset' type token
-            token_payload = validate_token_type(payload.reset_token, "reset")
+        raw_token = payload.reset_token
+
+        # Primary: opaque token stored (encrypted) on the admin record.
+        admin = self._match_admin_by_reset_token(raw_token)
+        used_model_token = admin is not None
+
+        if used_model_token:
+            expires_at = admin.password_reset_token_expires_at
+            if expires_at is None:
+                raise BadRequestError(message="Invalid or expired reset token.")
+            if expires_at.tzinfo is None:
+                expires_at = expires_at.replace(tzinfo=timezone.utc)
+            if datetime.now(timezone.utc) >= expires_at:
+                raise BadRequestError(
+                    message="This reset link has expired. Please request a new one.",
+                )
+        else:
+            # Backward-compatible fallback: legacy JWT reset token.
+            try:
+                token_payload = validate_token_type(raw_token, "reset")
+            except TokenError as exc:
+                raise BadRequestError(message="Invalid or expired reset token.") from exc
+
             admin_id = token_payload.get("sub")
             if not admin_id or not token_payload.get("is_saas_admin"):
-                 raise BadRequestError(message="Invalid SaaS reset token.")
-            
+                raise BadRequestError(message="Invalid SaaS reset token.")
+
             admin = self.db.query(SaaSAdmin).filter(SaaSAdmin.id == int(admin_id)).first()
-        except Exception as exc:
-             raise BadRequestError(message=f"Invalid or expired reset token: {str(exc)}")
 
         if not admin:
             raise NotFoundError(message="SaaS Admin not found.")
 
         validate_password_strength(payload.new_password)
-        
+
         admin.password_hash = get_password_hash(payload.new_password)
+        # Clear the reset token so it cannot be reused (single-use).
+        admin.password_reset_token = None
+        admin.password_reset_token_expires_at = None
         self.db.add(admin)
-        
-        # Revoke all admin sessions
-        self.db.query(SaaSAdminSession).filter(SaaSAdminSession.saas_admin_id == admin.id).update({"is_revoked": True})
-        
-        # Mark all reset challenges as verified for this user
-        self.db.query(SaaSAdminTwoFactorChallenge).filter(
-            SaaSAdminTwoFactorChallenge.saas_admin_id == admin.id,
-            SaaSAdminTwoFactorChallenge.purpose == TwoFactorPurpose.PASSWORD_RESET
-        ).update({"is_verified": True, "verified_at": datetime.now(timezone.utc)})
+
+        # Revoke all admin sessions.
+        self.db.query(SaaSAdminSession).filter(
+            SaaSAdminSession.saas_admin_id == admin.id
+        ).update({"is_revoked": True})
 
         self.db.commit()
 
@@ -317,6 +398,60 @@ class SaaSAuthService:
             "user": admin,
             "tokens": tokens,
         }
+
+    def _send_password_reset_link(
+        self,
+        *,
+        email: str,
+        reset_link: str,
+        expires_minutes: int,
+    ) -> bool:
+        """
+        Deliver a SaaS Admin password reset link by email.
+
+        SaaS admins are not tenant-scoped, so delivery goes through the
+        platform SMTP transport only. Delivery failures are caught (the
+        forgot-password endpoint must never reveal whether an account exists)
+        but every outcome is logged so an operator can see *why* a reset email
+        did not arrive.
+
+        Returns:
+            bool: True if the message was accepted by the transport.
+        """
+        from app.core.logger import get_logger
+        from app.utils.email_utils import build_password_reset_email_content, send_email
+
+        logger = get_logger(__name__)
+        content = build_password_reset_email_content(reset_link, expires_minutes)
+
+        try:
+            result = send_email(
+                subject=content["subject"],
+                recipients=[email],
+                body_text=content["body_text"],
+                body_html=content["body_html"],
+            )
+            if isinstance(result, dict) and result.get("success"):
+                logger.info("SaaS password reset link emailed to %s via platform SMTP.", email)
+                return True
+
+            detail = (
+                result.get("error") or result.get("message")
+                if isinstance(result, dict) else result
+            )
+            logger.error(
+                "SaaS password reset email to %s failed via platform SMTP: %s", email, detail
+            )
+        except Exception as exc:
+            logger.error(
+                "SaaS password reset email to %s could not be sent — the platform SMTP "
+                "transport is not configured (enable EMAILS_ENABLED + SMTP_* settings). "
+                "Underlying error: %s",
+                email,
+                exc,
+            )
+
+        return False
 
     def _create_and_send_otp_challenge(
         self,

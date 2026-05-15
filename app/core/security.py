@@ -36,6 +36,8 @@ This module expects:
 
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
+import hashlib
+import secrets
 import uuid
 
 from jose import JWTError, jwt
@@ -203,16 +205,21 @@ def create_reset_token(
     subject: str,
     tenant_id: Optional[int] = None,
     tenant_code: Optional[str] = None,
-    expires_minutes: int = 15,
+    expires_minutes: Optional[int] = None,
     extra_claims: Optional[dict[str, Any]] = None,
 ) -> str:
     """
     Create a signed JWT password reset token.
+
+    The token is short-lived. When ``expires_minutes`` is not supplied it
+    falls back to ``settings.PASSWORD_RESET_TOKEN_EXPIRE_MINUTES`` so the
+    expiry window is centrally configurable.
     """
+    minutes = expires_minutes or getattr(settings, "PASSWORD_RESET_TOKEN_EXPIRE_MINUTES", 30)
     payload = create_token_payload(
         subject=subject,
         token_type="reset",
-        expires_delta=timedelta(minutes=expires_minutes),
+        expires_delta=timedelta(minutes=minutes),
         tenant_id=tenant_id,
         tenant_code=tenant_code,
         extra_claims=extra_claims,
@@ -223,6 +230,50 @@ def create_reset_token(
         algorithm=settings.ALGORITHM,
     )
     return token
+
+
+def build_password_reset_link(reset_token: str, *, tenant_code: Optional[str] = None) -> str:
+    """
+    Build the frontend password-reset URL that carries the reset token.
+
+    For tenant users the ``tenant_code`` is appended as a query parameter so
+    the frontend can send it back as the ``X-Tenant-Code`` header when it
+    calls the reset-password endpoint. SaaS admins have no tenant code.
+    """
+    from urllib.parse import urlencode
+
+    base = str(getattr(settings, "FRONTEND_URL", "") or "").rstrip("/")
+    path = str(getattr(settings, "PASSWORD_RESET_URL_PATH", "/reset-password") or "/reset-password")
+    if not path.startswith("/"):
+        path = "/" + path
+
+    params: dict[str, str] = {"token": reset_token}
+    if tenant_code:
+        params["tenant_code"] = tenant_code
+
+    return f"{base}{path}?{urlencode(params)}"
+
+
+def generate_password_reset_token() -> str:
+    """
+    Generate a short, opaque, URL-safe password reset token.
+
+    Unlike a JWT, this token carries no payload — it is just a random
+    secret. The server stores only its hash and looks the token up at
+    reset time, which keeps the emailed link short and makes the token
+    trivially single-use and revocable.
+    """
+    return secrets.token_urlsafe(32)
+
+
+def hash_reset_token(token: str) -> str:
+    """
+    Deterministically hash a password reset token for storage and lookup.
+
+    A plain (unsalted) SHA-256 digest is used so the token can be looked
+    up directly by its hash. The raw token is never persisted.
+    """
+    return hashlib.sha256(token.strip().encode("utf-8")).hexdigest()
 
 
 def decode_token(token: str) -> dict[str, Any]:

@@ -321,24 +321,21 @@ def forgot_password(
     service: Annotated[AuthService, Depends(get_auth_service)],
 ):
     """
-    Begin password reset flow.
+    Begin the password reset flow.
+
+    A short-lived reset token is generated and emailed to the user as a
+    reset link. SaaS Admins are resolved against the Master DB; tenant users
+    are resolved against their tenant DB (the ``X-Tenant-Code`` header is
+    required so the tenant context can be established).
     """
-    # Partition logic similar to Login flow
-    from app.core.multitenancy import get_current_tenant, get_current_tenant_code
-    tenant_obj = get_current_tenant()
-    tenant_code = get_current_tenant_code()
-    
-    print(f"DEBUG: forgot_password - tenant_obj: {tenant_obj}, tenant_code: {tenant_code}")
-    
-    if tenant_code is None:
+    # Partition logic similar to Login flow.
+    if get_current_tenant() is None:
         # SaaS Admin Forgot Password (Master DB)
-        print("DEBUG: Routing to SaaSAuthService")
         with get_master_db_context() as master_db:
             saas_service = SaaSAuthService(master_db)
             return saas_service.forgot_password(payload)
 
     # Tenant User Forgot Password (Tenant DB)
-    print(f"DEBUG: Routing to AuthService (Tenant: {tenant_code})")
     return service.forgot_password(payload)
 
 
@@ -353,7 +350,12 @@ def reset_password(
     service: Annotated[AuthService, Depends(get_auth_service)],
 ):
     """
-    Complete password reset using a reset token.
+    Complete password reset using the reset token issued by forgot-password.
+
+    The client submits the token (delivered via the emailed reset link)
+    together with the new password. SaaS Admin tokens are processed against
+    the Master DB; tenant-user tokens require the ``X-Tenant-Code`` header so
+    the request resolves to the correct tenant DB.
     """
     # Partition logic similar to Login flow
     if get_current_tenant() is None:

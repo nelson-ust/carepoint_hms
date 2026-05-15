@@ -1761,3 +1761,22 @@ class AiScribeJobStatus(StringEnum):
     PROCESSING = "PROCESSING"
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
+
+
+# ============================================================
+# DIETARY & MEAL MANAGEMENT
+# ============================================================
+
+class MealRecipient(StringEnum):
+    """Target of a meal order (Patient or Caregiver)."""
+    PATIENT = "PATIENT"
+    CAREGIVER = "CAREGIVER"
+
+
+class MealStatus(StringEnum):
+    """Lifecycle of a meal order."""
+    ORDERED = "ORDERED"
+    PREPARING = "PREPARING"
+    SERVED = "SERVED"
+    CANCELLED = "CANCELLED"
+

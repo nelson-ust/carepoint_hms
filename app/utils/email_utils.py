@@ -560,3 +560,164 @@ def send_otp_email(email: str, code: str, purpose: str) -> dict[str, Any]:
         html_template=html_template,
         context=context
     )
+
+
+def build_password_reset_email_content(
+    reset_link: str,
+    expires_minutes: int = 30,
+) -> dict[str, str]:
+    """
+    Render the password reset email (subject, plain text, and HTML) without
+    sending it.
+
+    This lets callers dispatch the same styled message through any transport
+    — the tenant's own email configuration or the platform SMTP — instead of
+    being locked into one sender.
+
+    Returns:
+        dict[str, str]: ``{"subject", "body_text", "body_html"}``.
+    """
+    context = {
+        "reset_link": reset_link,
+        "expires_minutes": str(expires_minutes),
+    }
+
+    text_template = (
+        "Carepoint HMS\n\n"
+        "Reset Your Password\n"
+        "Hello,\n\n"
+        "We received a request to reset the password for your Carepoint HMS account.\n"
+        "Use the link below to choose a new password:\n\n"
+        "{reset_link}\n\n"
+        "This link will expire in {expires_minutes} minutes. "
+        "If you did not request a password reset, please ignore this email — "
+        "your password will remain unchanged.\n"
+    )
+
+    html_template = """
+<!DOCTYPE html>
+<html>
+<head>
+    <style>
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+            background-color: #f9fafb;
+            margin: 0;
+            padding: 40px;
+            -webkit-font-smoothing: antialiased;
+        }
+        .container {
+            max-width: 600px;
+            margin: 0 auto;
+            background-color: #ffffff;
+            border-radius: 16px;
+            padding: 48px;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+        }
+        .header {
+            text-align: center;
+            margin-bottom: 32px;
+        }
+        .logo {
+            font-weight: 800;
+            font-size: 24px;
+            color: #0d9488;
+            letter-spacing: -0.025em;
+        }
+        h1 {
+            color: #111827;
+            font-size: 24px;
+            font-weight: 700;
+            margin-bottom: 16px;
+            text-align: center;
+        }
+        p {
+            color: #4b5563;
+            font-size: 16px;
+            line-height: 1.6;
+            margin-bottom: 24px;
+        }
+        .button-container {
+            text-align: center;
+            margin: 32px 0;
+        }
+        .reset-button {
+            display: inline-block;
+            background-color: #0d9488;
+            color: #ffffff !important;
+            font-size: 16px;
+            font-weight: 700;
+            text-decoration: none;
+            padding: 14px 32px;
+            border-radius: 12px;
+        }
+        .link-fallback {
+            font-size: 13px;
+            color: #6b7280;
+            word-break: break-all;
+        }
+        .footer {
+            text-align: center;
+            margin-top: 48px;
+            color: #9ca3af;
+            font-size: 14px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <span class="logo">CAREPOINT</span>
+        </div>
+        <h1>Reset Your Password</h1>
+        <p>Hello,</p>
+        <p>We received a request to reset the password for your Carepoint HMS account. Click the button below to choose a new password:</p>
+
+        <div class="button-container">
+            <a href="{reset_link}" class="reset-button">Reset Password</a>
+        </div>
+
+        <p class="link-fallback">If the button does not work, copy and paste this link into your browser:<br>{reset_link}</p>
+
+        <p>This link will expire in {expires_minutes} minutes. If you did not request a password reset, please ignore this email — your password will remain unchanged.</p>
+
+        <div class="footer">
+            &copy; 2026 Carepoint HMS. All rights reserved.<br>
+            Carepoint Hospital Management System
+        </div>
+    </div>
+</body>
+</html>
+    """
+
+    return {
+        "subject": "Carepoint HMS - Reset Your Password",
+        "body_text": render_email_template(text_template, context),
+        "body_html": render_email_template(html_template, context),
+    }
+
+
+def send_password_reset_email(
+    email: str,
+    reset_link: str,
+    expires_minutes: int = 30,
+) -> dict[str, Any]:
+    """
+    Send a styled password reset email containing a tokenized reset link via
+    the platform SMTP transport.
+
+    Args:
+        email: Recipient email address.
+        reset_link: Fully built frontend URL carrying the reset token.
+        expires_minutes: How long the reset link remains valid, in minutes.
+
+    Returns:
+        dict[str, Any]: Structured send result from `send_email`.
+    """
+    content = build_password_reset_email_content(reset_link, expires_minutes)
+    return send_email(
+        subject=content["subject"],
+        recipients=email,
+        body_text=content["body_text"],
+        body_html=content["body_html"],
+    )

@@ -209,8 +209,41 @@ class BillingRepository:
         self.db.flush()
         return item
 
+    def get_active_billing_for_visit(self, visit_id: int) -> Optional[Billing]:
+        """Find the current OPEN billing session for a given visit."""
+        return (
+            self.db.query(Billing)
+            .filter(
+                Billing.visit_id == visit_id,
+                Billing.status == str(BillingStatus.OPEN),
+                Billing.is_deleted.is_(False)
+            )
+            .first()
+        )
+
+    def recompute_totals(self, billing: Billing) -> None:
+        """
+        Force re-calculation of header totals by summing up all non-deleted items.
+        Useful when items are added or removed from the billing session.
+        """
+        gross = Decimal("0.00")
+        discount = Decimal("0.00")
+        
+        for item in (billing.items or []):
+            if not item.is_deleted:
+                gross += (item.unit_price * item.quantity)
+                discount += item.discount_amount
+        
+        billing.gross_amount = gross
+        billing.discount_amount = discount
+        billing.net_amount = gross - discount
+        
+        self.db.add(billing)
+        self.db.flush()
+
     def save(self, b: Billing) -> Billing:
         self.db.add(b)
         self.db.flush()
         self.db.refresh(b)
         return b
+

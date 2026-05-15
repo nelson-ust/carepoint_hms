@@ -29,6 +29,16 @@ router = APIRouter(
 
 
 # ---------------------------------------------------------------------------
+# Dependencies
+# ---------------------------------------------------------------------------
+
+
+def _service(db: Annotated[Session, Depends(get_db)]) -> TenantPaymentMethodService:
+    """Provide a TenantPaymentMethodService bound to the request's DB session."""
+    return TenantPaymentMethodService(db)
+
+
+# ---------------------------------------------------------------------------
 # Schemas
 # ---------------------------------------------------------------------------
 

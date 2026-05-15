@@ -8,6 +8,7 @@ OTP verification, email/phone verification, and optional two-factor
 authentication for Carepoint HMS.
 """
 
+import hmac
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
@@ -16,16 +17,25 @@ from app.core.multitenancy import get_current_tenant_id, get_current_tenant_code
 from app.services.tenant_usage_service import TenantUsageService
 
 from app.core.config import settings
+from app.core.cryptography import decrypt_string, encrypt_string
 from app.core.enums import TwoFactorPurpose, TwoFactorType, UserStatus
-from app.core.exceptions import BadRequestError, NotFoundError, UnauthorizedError, ValidationError
+from app.core.exceptions import (
+    BadRequestError,
+    NotFoundError,
+    TokenError,
+    UnauthorizedError,
+    ValidationError,
+)
 from app.core.security import (
     assert_login_password,
     assert_user_is_active,
     build_login_result,
+    build_password_reset_link,
     build_post_2fa_access_token,
     create_otp_challenge_payload,
     create_reset_token,
     decode_token,
+    generate_password_reset_token,
     get_password_hash,
     validate_password_strength,
     validate_token_type,
@@ -409,47 +419,137 @@ class AuthService:
 
     def forgot_password(self, payload: ForgotPasswordSchema) -> dict[str, Any]:
         """
-        Start password reset flow.
+        Start the password reset flow for a tenant user.
 
-        Current implementation
-        ----------------------
-        Creates a PASSWORD_RESET OTP challenge and dispatches it to the best
-        available destination.
+        Implementation
+        --------------
+        Generates a short, opaque, single-use reset token. The token is
+        encrypted and stored on the user's ``password_reset_token`` column,
+        with ``password_reset_token_expires_at`` bounding its validity. The
+        raw token is emailed inside a reset link and expires after
+        ``settings.PASSWORD_RESET_TOKEN_EXPIRE_MINUTES`` minutes.
+
+        The response is always the same masked message so the endpoint does
+        not reveal whether an account exists.
         """
-        user = self.repository.get_user_by_identifier(payload.identifier)
-        if not user:
-            return {
-                "success": True,
-                "message": "If the account exists, password reset instructions have been sent.",
-            }
+        masked_response = {
+            "success": True,
+            "message": "If the account exists, password reset instructions have been sent.",
+        }
 
-        challenge = self._create_and_send_otp_challenge(
-            user=user,
-            purpose=TwoFactorPurpose.PASSWORD_RESET,
+        user = self.repository.get_user_by_identifier(payload.identifier)
+        if not user or not user.email:
+            # No account, or no email on file to deliver the link to.
+            return masked_response
+
+        tenant_code = get_current_tenant_code()
+        expires_minutes = int(getattr(settings, "PASSWORD_RESET_TOKEN_EXPIRE_MINUTES", 30))
+
+        raw_token = generate_password_reset_token()
+        self.repository.set_password_reset_token(
+            user,
+            encrypted_token=encrypt_string(raw_token),
+            expires_at=datetime.now(timezone.utc) + timedelta(minutes=expires_minutes),
+        )
+
+        reset_link = build_password_reset_link(raw_token, tenant_code=tenant_code)
+        self._send_password_reset_link(
+            email=user.email,
+            reset_link=reset_link,
+            expires_minutes=expires_minutes,
+        )
+
+        record_security_event(
+            self.db,
+            user_id=user.id,
+            event_type="PASSWORD_RESET_REQUESTED",
+            severity="INFO",
+            event_detail=f"Password reset link issued for {user.username}.",
         )
         self.db.commit()
 
-        return {
-            "success": True,
-            "message": "If the account exists, password reset instructions have been sent.",
-            "challenge_reference": str(challenge.id),
-            "delivery_method": str(challenge.challenge_type),
-        }
+        return masked_response
+
+    def _match_user_by_reset_token(self, raw_token: str) -> Optional[Any]:
+        """
+        Find the user whose stored (encrypted) reset token decrypts to
+        ``raw_token``.
+
+        The token is encrypted at rest with a non-deterministic cipher, so it
+        cannot be matched with a SQL equality filter — instead each candidate
+        is decrypted and compared in constant time.
+        """
+        if not raw_token:
+            return None
+        for candidate in self.repository.list_users_with_pending_reset_token():
+            stored = candidate.password_reset_token
+            if not stored:
+                continue
+            try:
+                if hmac.compare_digest(decrypt_string(stored), raw_token):
+                    return candidate
+            except Exception:
+                continue
+        return None
 
     def reset_password(self, payload: ResetPasswordSchema) -> dict[str, Any]:
         """
-        Complete password reset using a token.
+        Complete a tenant-user password reset using a reset token.
 
-        Expected token
-        --------------
-        A JWT token whose subject is the user ID.
+        Accepted tokens
+        ---------------
+        - Primary: a short opaque token issued by ``forgot_password``. The
+          supplied token is matched against the decrypted value of each
+          pending ``password_reset_token``. The stored token must not be
+          expired (``password_reset_token_expires_at``); it is single-use
+          because it is cleared once consumed.
+        - Fallback: a legacy JWT ``reset`` token (e.g. one issued by the OTP
+          verification flow), kept for backward compatibility.
         """
-        token_payload = decode_token(payload.reset_token)
-        user_id = token_payload.get("sub")
-        if not user_id:
-            raise BadRequestError(message="Invalid reset token.")
+        raw_token = payload.reset_token
 
-        user = self.repository.get_user_by_id(int(user_id))
+        # Primary: opaque token stored (encrypted) on the user record.
+        user = self._match_user_by_reset_token(raw_token)
+        used_model_token = user is not None
+
+        if used_model_token:
+            expires_at = user.password_reset_token_expires_at
+            if expires_at is None:
+                raise BadRequestError(message="Invalid or expired reset token.")
+            if expires_at.tzinfo is None:
+                expires_at = expires_at.replace(tzinfo=timezone.utc)
+            if datetime.now(timezone.utc) >= expires_at:
+                raise BadRequestError(
+                    message="This reset link has expired. Please request a new one.",
+                )
+        else:
+            # Backward-compatible fallback: legacy JWT reset token.
+            try:
+                token_payload = validate_token_type(raw_token, "reset")
+            except TokenError as exc:
+                raise BadRequestError(message="Invalid or expired reset token.") from exc
+
+            user_id = token_payload.get("sub")
+            if not user_id:
+                raise BadRequestError(message="Invalid reset token.")
+
+            token_tenant_code = token_payload.get("tenant_code")
+            current_tenant_code = get_current_tenant_code()
+            if token_tenant_code and current_tenant_code and token_tenant_code != current_tenant_code:
+                raise BadRequestError(message="Reset token does not match the current tenant.")
+
+            user = self.repository.get_user_by_id(int(user_id))
+            if user is not None:
+                issued_at = token_payload.get("iat")
+                if issued_at and user.password_changed_at:
+                    pwd_changed_at = user.password_changed_at
+                    if pwd_changed_at.tzinfo is None:
+                        pwd_changed_at = pwd_changed_at.replace(tzinfo=timezone.utc)
+                    if datetime.fromtimestamp(int(issued_at), tz=timezone.utc) < pwd_changed_at:
+                        raise BadRequestError(
+                            message="This reset link has already been used. Please request a new one.",
+                        )
+
         if not user:
             raise NotFoundError(message="User not found.")
 
@@ -471,6 +571,10 @@ class AuthService:
         self.repository.update_password_changed_at(user, when=datetime.now(timezone.utc))
         self.repository.revoke_all_user_sessions(user.id, when=datetime.now(timezone.utc))
 
+        # Clear the opaque reset token so it cannot be reused (single-use).
+        if used_model_token:
+            self.repository.clear_password_reset_token(user)
+
         record_security_event(
             self.db,
             user_id=user.id,
@@ -485,6 +589,88 @@ class AuthService:
             "success": True,
             "message": "Password reset successful.",
         }
+
+    def _send_password_reset_link(
+        self,
+        *,
+        email: str,
+        reset_link: str,
+        expires_minutes: int,
+    ) -> bool:
+        """
+        Deliver a password reset link by email.
+
+        Transport order
+        ---------------
+        1. The tenant's own email configuration (``TenantEmailConfig``), so the
+           message comes from a sender the tenant controls.
+        2. The platform SMTP transport, as a fallback.
+
+        Both transports send the styled HTML message. Delivery failures are
+        caught (the forgot-password endpoint must never leak whether an account
+        exists, nor 500 when email is down) but — unlike before — every outcome
+        is logged so an operator can see *why* a reset email did not arrive.
+
+        Returns:
+            bool: True if a transport accepted the message, False otherwise.
+        """
+        from app.core.logger import get_logger
+        from app.utils.email_utils import build_password_reset_email_content
+
+        logger = get_logger(__name__)
+        content = build_password_reset_email_content(reset_link, expires_minutes)
+
+        # 1. Tenant-configured email provider (no platform fallback here — we
+        #    fall back ourselves below so the styled HTML body is preserved).
+        try:
+            from app.services.tenant_email_service import send_tenant_email
+
+            if send_tenant_email(
+                self.db,
+                subject=content["subject"],
+                recipients=[email],
+                body_text=content["body_text"],
+                body_html=content["body_html"],
+                fall_back_to_platform=False,
+            ):
+                logger.info("Password reset link emailed to %s via tenant email config.", email)
+                return True
+        except Exception as exc:
+            logger.warning(
+                "Tenant email dispatch for password reset to %s failed: %s", email, exc
+            )
+
+        # 2. Platform SMTP transport.
+        try:
+            from app.utils.email_utils import send_email
+
+            result = send_email(
+                subject=content["subject"],
+                recipients=[email],
+                body_text=content["body_text"],
+                body_html=content["body_html"],
+            )
+            if isinstance(result, dict) and result.get("success"):
+                logger.info("Password reset link emailed to %s via platform SMTP.", email)
+                return True
+
+            detail = (
+                result.get("error") or result.get("message")
+                if isinstance(result, dict) else result
+            )
+            logger.error(
+                "Password reset email to %s failed via platform SMTP: %s", email, detail
+            )
+        except Exception as exc:
+            logger.error(
+                "Password reset email to %s could not be sent — no email transport is "
+                "configured. Set up a TenantEmailConfig for the tenant, or enable the "
+                "platform SMTP (EMAILS_ENABLED + SMTP_* settings). Underlying error: %s",
+                email,
+                exc,
+            )
+
+        return False
 
     # ============================================================
     # OTP / TWO-FACTOR

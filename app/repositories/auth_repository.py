@@ -288,6 +288,62 @@ class AuthRepository:
         return user
 
     # ============================================================
+    # PASSWORD RESET TOKEN
+    # ============================================================
+
+    def set_password_reset_token(
+        self,
+        user: User,
+        *,
+        encrypted_token: str,
+        expires_at: datetime,
+    ) -> User:
+        """
+        Store an encrypted password reset token and its expiry on the user.
+
+        Only the encrypted form of the token is persisted; the raw token is
+        delivered to the user via the emailed reset link and is recovered by
+        decrypting this column at reset time.
+        """
+        user.password_reset_token = encrypted_token
+        user.password_reset_token_expires_at = expires_at
+        self.db.add(user)
+        self.db.flush()
+        self.db.refresh(user)
+        return user
+
+    def clear_password_reset_token(self, user: User) -> User:
+        """
+        Clear a consumed or invalidated password reset token from the user.
+        """
+        user.password_reset_token = None
+        user.password_reset_token_expires_at = None
+        self.db.add(user)
+        self.db.flush()
+        self.db.refresh(user)
+        return user
+
+    def list_users_with_pending_reset_token(self) -> list[User]:
+        """
+        Return all (non-deleted) users that currently have a password reset
+        token stored.
+
+        The token is encrypted at rest with a non-deterministic cipher, so it
+        cannot be matched with a direct SQL equality filter. The caller
+        decrypts each candidate's token and compares it against the supplied
+        value. In practice only a handful of users have an active reset token
+        at any moment, so this candidate set is very small.
+        """
+        return (
+            self.db.query(User)
+            .filter(
+                User.password_reset_token.isnot(None),
+                User.is_deleted.is_(False),
+            )
+            .all()
+        )
+
+    # ============================================================
     # LOCKOUT / FAILED LOGIN TRACKING
     # ============================================================
 
@@ -621,6 +677,31 @@ class AuthRepository:
             )
             .first()
         )
+
+    def get_two_factor_challenge_by_code_hash(
+        self,
+        *,
+        code_hash: str,
+        purpose=None,
+    ) -> Optional[TwoFactorChallenge]:
+        """
+        Return the most recent challenge matching a stored code hash.
+
+        Used by the password-reset flow to resolve an opaque reset token
+        (the token is hashed and looked up directly by its hash).
+        """
+        query = self.db.query(TwoFactorChallenge).filter(
+            TwoFactorChallenge.code_hash == code_hash,
+            TwoFactorChallenge.is_deleted.is_(False),
+        )
+
+        if purpose is not None:
+            query = query.filter(TwoFactorChallenge.purpose == purpose)
+
+        return query.order_by(
+            TwoFactorChallenge.date_created.desc(),
+            TwoFactorChallenge.id.desc(),
+        ).first()
 
     def list_user_two_factor_challenges(self, user_id: int) -> list[TwoFactorChallenge]:
         """
