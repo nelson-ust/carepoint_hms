@@ -81,6 +81,9 @@ def initiate_visit(
     """
     Initiate a patient visit, resolve the first care point, create the first
     flow step, and place the patient into the operational queue.
+
+    An E-Patient Visit Tag containing a QR code is automatically generated
+    and emailed to the patient's registered email address.
     """
     result = service.initiate_visit(payload, routed_by_id=current_user.id)
 
@@ -93,7 +96,57 @@ def initiate_visit(
         "applied_template": result.get("applied_template"),
         "inherited_from_appointment": result.get("inherited_from_appointment", False),
         "fast_tracked": result.get("fast_tracked", False),
+        "visit_tag_pdf_base64": result.get("visit_tag_pdf_base64"),
     }
+
+
+@router.get(
+    "/{visit_id}/tag",
+    status_code=status.HTTP_200_OK,
+    summary="Download visit tag PDF",
+    responses={200: {"content": {"application/pdf": {}}}},
+)
+def get_visit_tag(
+    visit_id: int,
+    _: AnyAuthenticatedUser,
+    service: Annotated[VisitService, Depends(get_visit_service)],
+):
+    """
+    Download the E-Patient Visit Tag as a PDF file.
+
+    The front-desk staff can download and print this tag for the patient.
+    """
+    from fastapi.responses import Response
+
+    pdf_bytes = service.get_visit_tag_pdf(visit_id)
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f"inline; filename=visit_tag_{visit_id}.pdf",
+        },
+    )
+
+
+@router.post(
+    "/{visit_id}/tag/resend",
+    response_model=VisitActionResponseSchema,
+    status_code=status.HTTP_200_OK,
+    summary="Resend visit tag email",
+)
+def resend_visit_tag_email(
+    visit_id: int,
+    _: AdminUser,
+    service: Annotated[VisitService, Depends(get_visit_service)],
+):
+    """
+    Resend the E-Patient Visit Tag PDF to the patient's registered
+    email address.
+    """
+    result = service.resend_visit_tag_email(visit_id)
+    return result
+
+
 
 
 @router.post(

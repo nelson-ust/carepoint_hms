@@ -424,12 +424,42 @@ class VisitFlowTemplateStepListItemSchema(BaseModel):
     """
     Flat list item schema for a step inside a visit flow template.
     """
+
+    model_config = ConfigDict(from_attributes=True)
+
     id: int
     template_id: int
     service_delivery_point_id: int
     service_delivery_point_name: Optional[str] = None
     step_order: int
+    is_required: bool = True
     notes: Optional[str] = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def resolve_sdp_name(cls, data):
+        """
+        Resolve service_delivery_point_name from the ORM relationship
+        when the schema is populated from an ORM model.
+        """
+        # When constructed from ORM (from_attributes), data is the model instance
+        if hasattr(data, "service_delivery_point") and data.service_delivery_point:
+            sdp = data.service_delivery_point
+            # Only set if not already present
+            if not getattr(data, "service_delivery_point_name", None):
+                # We can't set attributes on frozen ORM objects, so use a dict
+                result = {
+                    "id": data.id,
+                    "template_id": data.template_id,
+                    "service_delivery_point_id": data.service_delivery_point_id,
+                    "service_delivery_point_name": sdp.name if hasattr(sdp, "name") else None,
+                    "step_order": data.step_order,
+                    "is_required": data.is_required,
+                    "notes": data.notes,
+                }
+                return result
+        return data
+
 
 
 class VisitFlowTemplateListItemSchema(BaseModel):
@@ -437,11 +467,17 @@ class VisitFlowTemplateListItemSchema(BaseModel):
     List item schema for visit flow templates.
     """
 
+    model_config = ConfigDict(from_attributes=True)
+
     id: int
     name: str
     code: str
     description: Optional[str] = None
-    associated_visit_flow_templates_steps: list[VisitFlowTemplateStepListItemSchema] = Field(default_factory=list)
+    associated_visit_flow_templates_steps: list[VisitFlowTemplateStepListItemSchema] = Field(
+        default_factory=list,
+        validation_alias="steps",
+    )
+
 
 
 class VisitFlowTemplateListResponseSchema(BaseModel):

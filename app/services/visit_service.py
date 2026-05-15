@@ -49,6 +49,7 @@ from app.core.enums import (
     VisitStatus,
 )
 from app.core.exceptions import BadRequestError, NotFoundError
+from app.core.logger import get_logger
 from app.repositories.visit_repository import VisitRepository
 from app.schemas.visit_schemas import (
     VisitInitiateSchema,
@@ -56,6 +57,9 @@ from app.schemas.visit_schemas import (
     VisitSwitchFlowSchema,
     VisitUpdateSchema,
 )
+
+logger = get_logger(__name__)
+
 
 
 class VisitService:
@@ -292,6 +296,32 @@ class VisitService:
 
         detailed_visit = self.repository.get_detailed_visit_by_id(visit.id)
 
+        # --- E-Patient Visit Tag (PDF) Generation & Email Dispatch ---
+        visit_tag_pdf_base64 = None
+        try:
+            # Build the clinic pathway from the visit's flow steps
+            clinic_pathway, resolved_pathway_name = self._build_clinic_pathway(visit.id)
+
+            # Resolve the pathway/template name — prefer the direct template object
+            pathway_name = None
+            if applied_template_payload and hasattr(applied_template_payload, "name"):
+                pathway_name = applied_template_payload.name
+            elif resolved_pathway_name:
+                pathway_name = resolved_pathway_name
+
+            visit_tag_pdf_base64 = self._generate_and_send_visit_tag(
+                visit=visit,
+                patient=patient,
+                clinic_pathway=clinic_pathway,
+                pathway_name=pathway_name,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Visit tag generation/email failed for visit %s: %s",
+                visit.visit_code, exc,
+            )
+
+
         return {
             "success": True,
             "message": "Visit initiated successfully.",
@@ -304,7 +334,10 @@ class VisitService:
                 payload.fast_track
                 and priority in {VisitPriority.URGENT, VisitPriority.EMERGENCY}
             ),
+            "visit_tag_pdf_base64": visit_tag_pdf_base64,
         }
+
+
 
     # ============================================================
     # REROUTING
@@ -622,8 +655,289 @@ class VisitService:
         return self.repository.get_detailed_visit_by_id(updated.id)
 
     # ============================================================
+    # VISIT TAG
+    # ============================================================
+
+    def _resolve_hospital_context(self) -> tuple[str, Optional[str]]:
+        """
+        Resolve hospital name and logo URL from TenantSetting.
+
+        Returns:
+            tuple[str, str | None]: (hospital_name, logo_url)
+        """
+        from app.models.all_models import TenantSetting
+
+        tenant_setting = self.db.query(TenantSetting).first()
+        hospital_name = "CarePoint Hospital"
+        if tenant_setting and tenant_setting.notification_from_name:
+            hospital_name = tenant_setting.notification_from_name
+        return hospital_name, None
+
+    def _build_clinic_pathway(self, visit_id: int) -> tuple[list[dict], Optional[str]]:
+        """
+        Build the clinic pathway (ordered flow steps) for a visit.
+
+        Returns:
+            tuple[list[dict], str | None]:
+                - List of pathway step dicts
+                - The VisitFlowTemplate name (if resolvable), else None
+        """
+        from app.models.all_models import VisitFlowStep, VisitFlowTemplate, VisitFlowTemplateStep
+
+        steps = (
+            self.db.query(VisitFlowStep)
+            .filter(VisitFlowStep.visit_id == visit_id)
+            .order_by(VisitFlowStep.step_order)
+            .all()
+        )
+
+        pathway = []
+        for step in steps:
+            sdp = step.service_delivery_point
+            service_point_name = sdp.name if sdp else f"Point #{step.service_delivery_point_id}"
+            status_value = step.status.value if hasattr(step.status, "value") else str(step.status)
+            pathway.append({
+                "step_order": step.step_order,
+                "service_point_name": service_point_name,
+                "is_required": step.is_required,
+                "status": status_value,
+            })
+
+        # Attempt to resolve the VisitFlowTemplate name.
+        # Since Visit doesn't store template_id directly, we match via the
+        # first flow step's service_delivery_point_id against template steps.
+        pathway_name: Optional[str] = None
+        if steps:
+            first_sdp_id = steps[0].service_delivery_point_id
+            template_step = (
+                self.db.query(VisitFlowTemplateStep)
+                .filter(
+                    VisitFlowTemplateStep.service_delivery_point_id == first_sdp_id,
+                    VisitFlowTemplateStep.step_order == 1,
+                )
+                .first()
+            )
+            if template_step:
+                template = (
+                    self.db.query(VisitFlowTemplate)
+                    .filter(VisitFlowTemplate.id == template_step.template_id)
+                    .first()
+                )
+                if template:
+                    pathway_name = template.name
+
+        return pathway, pathway_name
+
+    def _generate_and_send_visit_tag(
+        self,
+        *,
+        visit,
+        patient,
+        clinic_pathway: Optional[list[dict]] = None,
+        pathway_name: Optional[str] = None,
+    ) -> Optional[str]:
+        """
+        Generate the E-Patient Visit Tag as a PDF and email it to the patient.
+
+        This is called as a best-effort step after visit initiation.
+        Failures here do not affect the visit workflow.
+
+        Returns:
+            str | None: Base64-encoded PDF bytes, or None if generation failed.
+        """
+        import base64
+        import tempfile
+        import os
+        from app.utils.visit_tag import generate_visit_tag_pdf
+
+        hospital_name, _ = self._resolve_hospital_context()
+        patient_name = f"{patient.first_name} {patient.last_name}".strip()
+
+        # Generate the PDF bytes
+        pdf_bytes = generate_visit_tag_pdf(
+            hospital_name=hospital_name,
+            patient_name=patient_name,
+            patient_hospital_number=patient.hospital_number,
+            visit_code=visit.visit_code,
+            visit_date=visit.visit_date,
+            priority=str(visit.priority.value if hasattr(visit.priority, "value") else visit.priority),
+            clinic_pathway=clinic_pathway,
+            pathway_name=pathway_name,
+        )
+
+        pdf_base64 = base64.b64encode(pdf_bytes).decode("utf-8")
+
+        # Email the PDF as an attachment (best-effort)
+        if patient.email:
+            tmp_path = None
+            try:
+                from app.utils.email_utils import send_email
+
+                # Save PDF to a temporary file for the attachment API
+                tmp_fd, tmp_path = tempfile.mkstemp(
+                    suffix=".pdf",
+                    prefix=f"visit_tag_{visit.visit_code}_",
+                )
+                os.write(tmp_fd, pdf_bytes)
+                os.close(tmp_fd)
+
+                send_email(
+                    subject=f"Your Visit Tag — {visit.visit_code}",
+                    recipients=patient.email,
+                    body_text=(
+                        f"Dear {patient_name},\n\n"
+                        f"Your visit has been initiated at {hospital_name}.\n"
+                        f"Visit Code: {visit.visit_code}\n\n"
+                        f"Please find your E-Patient Visit Tag attached as a PDF.\n"
+                        f"Present the QR code on the tag at any service point for check-in.\n\n"
+                        f"— {hospital_name}"
+                    ),
+                    attachments=[tmp_path],
+                )
+                logger.info(
+                    "Visit tag PDF emailed to %s for visit %s",
+                    patient.email, visit.visit_code,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Failed to email visit tag PDF to %s for visit %s: %s",
+                    patient.email, visit.visit_code, exc,
+                )
+            finally:
+                if tmp_path and os.path.exists(tmp_path):
+                    try:
+                        os.unlink(tmp_path)
+                    except OSError:
+                        pass
+
+        return pdf_base64
+
+    def get_visit_tag_pdf(self, visit_id: int) -> bytes:
+        """
+        Generate and return the E-Patient Visit Tag PDF for an existing visit.
+
+        This is used by the download/print endpoint so front-desk staff
+        can retrieve the tag on demand.
+
+        Args:
+            visit_id: ID of the visit.
+
+        Returns:
+            bytes: PDF file content.
+
+        Raises:
+            NotFoundError: If the visit does not exist.
+        """
+        from app.utils.visit_tag import generate_visit_tag_pdf
+
+        visit = self.repository.get_detailed_visit_by_id(visit_id)
+        if not visit:
+            raise NotFoundError(
+                message="Visit not found.",
+                detail={"visit_id": visit_id},
+            )
+
+        patient = self.repository.get_patient_by_id(visit.patient_id)
+        if not patient:
+            raise NotFoundError(
+                message="Patient not found.",
+                detail={"patient_id": visit.patient_id},
+            )
+
+        hospital_name, _ = self._resolve_hospital_context()
+        patient_name = f"{patient.first_name} {patient.last_name}".strip()
+
+        clinic_pathway, pathway_name = self._build_clinic_pathway(visit_id)
+
+        return generate_visit_tag_pdf(
+            hospital_name=hospital_name,
+            patient_name=patient_name,
+            patient_hospital_number=patient.hospital_number,
+            visit_code=visit.visit_code,
+            visit_date=visit.visit_date,
+            priority=str(visit.priority.value if hasattr(visit.priority, "value") else visit.priority),
+            clinic_pathway=clinic_pathway,
+            pathway_name=pathway_name,
+        )
+
+    def resend_visit_tag_email(self, visit_id: int) -> dict:
+        """
+        Resend the E-Patient Visit Tag email for an existing visit.
+
+        Args:
+            visit_id: ID of the visit.
+
+        Returns:
+            dict: Result of the email send operation.
+        """
+        import tempfile
+        import os
+
+        visit = self.repository.get_detailed_visit_by_id(visit_id)
+        if not visit:
+            raise NotFoundError(
+                message="Visit not found.",
+                detail={"visit_id": visit_id},
+            )
+
+        patient = self.repository.get_patient_by_id(visit.patient_id)
+        if not patient:
+            raise NotFoundError(
+                message="Patient not found.",
+                detail={"patient_id": visit.patient_id},
+            )
+
+        if not patient.email:
+            raise BadRequestError(
+                message="Patient does not have a registered email address.",
+                detail={"patient_id": patient.id},
+            )
+
+        pdf_bytes = self.get_visit_tag_pdf(visit_id)
+        hospital_name, _ = self._resolve_hospital_context()
+        patient_name = f"{patient.first_name} {patient.last_name}".strip()
+
+        tmp_path = None
+        try:
+            from app.utils.email_utils import send_email
+
+            tmp_fd, tmp_path = tempfile.mkstemp(
+                suffix=".pdf",
+                prefix=f"visit_tag_{visit.visit_code}_",
+            )
+            os.write(tmp_fd, pdf_bytes)
+            os.close(tmp_fd)
+
+            result = send_email(
+                subject=f"Your Visit Tag — {visit.visit_code}",
+                recipients=patient.email,
+                body_text=(
+                    f"Dear {patient_name},\n\n"
+                    f"Your visit tag for {visit.visit_code} at {hospital_name} is attached.\n"
+                    f"Please present the QR code on the tag at any service point.\n\n"
+                    f"— {hospital_name}"
+                ),
+                attachments=[tmp_path],
+            )
+
+            return {
+                "success": result.get("success", False),
+                "message": "Visit tag email sent." if result.get("success") else "Failed to send visit tag email.",
+                "visit_code": visit.visit_code,
+                "recipient": patient.email,
+            }
+        finally:
+            if tmp_path and os.path.exists(tmp_path):
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+
+    # ============================================================
     # HELPERS
     # ============================================================
+
+
 
     def _create_queue_ticket_for_step(
         self,

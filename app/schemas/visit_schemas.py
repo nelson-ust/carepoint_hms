@@ -606,6 +606,12 @@ class VisitInitiationResultSchema(BaseModel):
     applied_template: Optional[VisitFlowTemplateReadSchema] = None
     inherited_from_appointment: bool = False
     fast_tracked: bool = False
+    visit_tag_pdf_base64: Optional[str] = Field(
+        None,
+        description="Base64-encoded PDF of the E-Patient Visit Tag with embedded QR code. "
+                    "Decode and save as .pdf to print or preview.",
+    )
+
 
 
 class VisitRerouteResultSchema(BaseModel):

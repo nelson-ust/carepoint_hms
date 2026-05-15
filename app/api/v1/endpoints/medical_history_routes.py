@@ -36,7 +36,6 @@ router = APIRouter(
     dependencies=[Depends(require_plan_feature("clinical"))]
 )
 
-
 def _get_service(db: Annotated[Session, Depends(get_db)]) -> PatientMedicalHistoryService:
     return PatientMedicalHistoryService(db)
 

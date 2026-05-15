@@ -95,12 +95,13 @@ if not DATABASE_URL.startswith("postgresql"):
 
 
 SQLALCHEMY_ECHO: bool = bool(getattr(settings, "SQLALCHEMY_ECHO", False)) if settings else False
-DB_POOL_SIZE: int = int(getattr(settings, "DB_POOL_SIZE", 10)) if settings else 10
-DB_MAX_OVERFLOW: int = int(getattr(settings, "DB_MAX_OVERFLOW", 20)) if settings else 20
+DB_POOL_SIZE: int = int(getattr(settings, "DB_POOL_SIZE", 5)) if settings else 5
+DB_MAX_OVERFLOW: int = int(getattr(settings, "DB_MAX_OVERFLOW", 5)) if settings else 5
 DB_POOL_TIMEOUT: int = int(getattr(settings, "DB_POOL_TIMEOUT", 30)) if settings else 30
-DB_POOL_RECYCLE: int = int(getattr(settings, "DB_POOL_RECYCLE", 1800)) if settings else 1800
+DB_POOL_RECYCLE: int = int(getattr(settings, "DB_POOL_RECYCLE", 600)) if settings else 600
 DB_POOL_PRE_PING: bool = bool(getattr(settings, "DB_POOL_PRE_PING", True)) if settings else True
 DB_ISOLATION_LEVEL: Optional[str] = getattr(settings, "DB_ISOLATION_LEVEL", None) if settings else None
+
 
 
 from sqlalchemy.pool import NullPool

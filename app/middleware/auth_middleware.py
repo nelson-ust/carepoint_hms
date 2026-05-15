@@ -107,6 +107,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 except Exception as exc:
                     # Middleware should usually avoid breaking public/optional
                     # endpoints unless explicitly configured otherwise.
+                    print(f"DEBUG: AuthMiddleware caught exception: {exc}")
+                    logger.debug(f"AuthMiddleware exception: {exc}, ignore_invalid_token: {self.ignore_invalid_token}")
                     if not self.ignore_invalid_token:
                         raise
 

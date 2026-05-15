@@ -21,10 +21,12 @@ operate against the master database.
 """
 from __future__ import annotations
 
+import logging
 from typing import Optional
 
 from fastapi import Request
 from fastapi.responses import JSONResponse
+from sqlalchemy.exc import OperationalError
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from app.core.config import settings
@@ -32,6 +34,8 @@ from app.core.database import get_master_db_context
 from app.core.enums import SubscriptionStatus
 from app.core.multitenancy import set_current_tenant
 from app.repositories.tenant_repository import TenantRepository
+
+logger = logging.getLogger(__name__)
 
 try:
     from jose import JWTError, jwt as _jose_jwt
@@ -180,88 +184,120 @@ class TenantMiddleware(BaseHTTPMiddleware):
             tenant_domain_hdr = tenant_domain_hdr.strip().lower()
 
         # 3. Resolve the tenant from the master database.
-        with get_master_db_context() as db:
-            repo = TenantRepository(db)
-            tenant = None
+        try:
+            with get_master_db_context() as db:
+                repo = TenantRepository(db)
+                tenant = None
 
-            # 3a. Explicit tenant code.
-            if tenant_code_hdr:
-                tenant = repo.get_tenant_by_code(tenant_code_hdr)
+                # 3a. Explicit tenant code.
+                if tenant_code_hdr:
+                    tenant = repo.get_tenant_by_code(tenant_code_hdr)
 
-            # 3b. Explicit custom domain header.
-            if tenant is None and tenant_domain_hdr:
-                tenant = repo.get_tenant_by_domain(tenant_domain_hdr)
+                # 3b. Explicit custom domain header.
+                if tenant is None and tenant_domain_hdr:
+                    tenant = repo.get_tenant_by_domain(tenant_domain_hdr)
 
-            # 3c. Custom domain match on Host header.
-            if tenant is None and host_header:
-                tenant = repo.get_tenant_by_domain(host_header)
+                # 3c. Custom domain match on Host header.
+                if tenant is None and host_header:
+                    tenant = repo.get_tenant_by_domain(host_header)
 
-            # 3d. Subdomain match on Host header.
-            if tenant is None and host_header:
-                first_label = host_header.split(".")[0]
-                reserved = _resolved_reserved_labels()
-                base_domain = _resolved_base_domain()
+                # 3d. Subdomain match on Host header.
+                if tenant is None and host_header:
+                    first_label = host_header.split(".")[0]
+                    reserved = _resolved_reserved_labels()
+                    base_domain = _resolved_base_domain()
 
-                # If a base domain is configured, only treat hosts that end
-                # with it as candidate tenant subdomains. Otherwise fall back
-                # to the legacy behaviour of taking the first dotted label.
-                is_subdomain_candidate = (
-                    bool(first_label)
-                    and first_label not in reserved
-                    and (base_domain is None or host_header.endswith("." + base_domain))
-                )
+                    # If a base domain is configured, only treat hosts that end
+                    # with it as candidate tenant subdomains. Otherwise fall back
+                    # to the legacy behaviour of taking the first dotted label.
+                    is_subdomain_candidate = (
+                        bool(first_label)
+                        and first_label not in reserved
+                        and (base_domain is None or host_header.endswith("." + base_domain))
+                    )
 
-                if is_subdomain_candidate:
-                    tenant = repo.get_tenant_by_code(first_label)
+                    if is_subdomain_candidate:
+                        tenant = repo.get_tenant_by_code(first_label)
 
-            # 3e. JWT login context fallback.
-            if tenant is None:
-                tenant_id = _extract_tenant_id_from_jwt(request)
-                if tenant_id is not None:
-                    tenant = repo.get_tenant_by_id(tenant_id)
+                # 3e. JWT login context fallback.
+                if tenant is None:
+                    tenant_id = _extract_tenant_id_from_jwt(request)
+                    if tenant_id is not None:
+                        tenant = repo.get_tenant_by_id(tenant_id)
 
-            # 3f. Allow main-site / public access when nothing matches AND
-            # the request is reaching the canonical public host. Other
-            # unmatched hosts must fail loudly.
-            if tenant is None:
-                first_label = host_header.split(".")[0] if host_header else ""
-                if first_label in _resolved_reserved_labels() and not tenant_code_hdr:
-                    return await call_next(request)
+                # 3f. Allow main-site / public access when nothing matches AND
+                # the request is reaching the canonical public host. Other
+                # unmatched hosts must fail loudly.
+                if tenant is None:
+                    first_label = host_header.split(".")[0] if host_header else ""
+                    if first_label in _resolved_reserved_labels() and not tenant_code_hdr:
+                        return await call_next(request)
 
-                identifier = tenant_code_hdr or tenant_domain_hdr or host_header or "unknown"
+                    identifier = tenant_code_hdr or tenant_domain_hdr or host_header or "unknown"
+                    return JSONResponse(
+                        status_code=404,
+                        content={
+                            "success": False,
+                            "detail": f"Tenant '{identifier}' not found.",
+                            "tenant_resolution": {
+                                "host": host_header,
+                                "tenant_code_header": tenant_code_hdr,
+                                "tenant_domain_header": tenant_domain_hdr,
+                            },
+                        },
+                    )
+
+                # 4. Subscription / lifecycle gate.
+                sub = tenant.active_subscription
+                if sub is None:
+                    # Trialing tenants should still be allowed if the trial window
+                    # has not closed; that decision is made by SubscriptionStatus.
+                    trialing = any(
+                        s.status == SubscriptionStatus.TRIALING and s.is_active
+                        for s in (tenant.subscriptions or [])
+                    )
+                    if not trialing:
+                        return JSONResponse(
+                            status_code=403,
+                            content={
+                                "success": False,
+                                "detail": "Tenant subscription is inactive, suspended, or missing.",
+                                "tenant_code": tenant.code,
+                            },
+                        )
+
+                # 5. Bind tenant to the request context.
+                set_current_tenant(tenant)
+
+        except OperationalError as exc:
+            err_msg = str(exc.orig) if hasattr(exc, "orig") and exc.orig else str(exc)
+            logger.error("Database connection failure during tenant resolution: %s", err_msg)
+
+            if "too many clients" in err_msg.lower():
                 return JSONResponse(
-                    status_code=404,
+                    status_code=503,
                     content={
                         "success": False,
-                        "detail": f"Tenant '{identifier}' not found.",
-                        "tenant_resolution": {
-                            "host": host_header,
-                            "tenant_code_header": tenant_code_hdr,
-                            "tenant_domain_header": tenant_domain_hdr,
+                        "message": "The server is currently experiencing high demand. Please try again in a few moments.",
+                        "error_code": "DATABASE_CONNECTION_LIMIT",
+                        "detail": {
+                            "reason": "The database connection pool has been exhausted.",
+                            "action": "Please retry your request shortly. If this persists, contact your system administrator.",
                         },
                     },
                 )
 
-            # 4. Subscription / lifecycle gate.
-            sub = tenant.active_subscription
-            if sub is None:
-                # Trialing tenants should still be allowed if the trial window
-                # has not closed; that decision is made by SubscriptionStatus.
-                trialing = any(
-                    s.status == SubscriptionStatus.TRIALING and s.is_active
-                    for s in (tenant.subscriptions or [])
-                )
-                if not trialing:
-                    return JSONResponse(
-                        status_code=403,
-                        content={
-                            "success": False,
-                            "detail": "Tenant subscription is inactive, suspended, or missing.",
-                            "tenant_code": tenant.code,
-                        },
-                    )
-
-            # 5. Bind tenant to the request context.
-            set_current_tenant(tenant)
+            # Other OperationalErrors (connection refused, SSL reset, etc.)
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "success": False,
+                    "message": "The service is temporarily unavailable. Please try again shortly.",
+                    "error_code": "DATABASE_UNAVAILABLE",
+                    "detail": {
+                        "action": "If this persists, contact your system administrator.",
+                    },
+                },
+            )
 
         return await call_next(request)

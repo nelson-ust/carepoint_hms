@@ -53,6 +53,11 @@ from typing import Any, Optional
 
 from fastapi import FastAPI, Request, status
 from fastapi.responses import JSONResponse
+from sqlalchemy.exc import OperationalError as SQLAlchemyOperationalError
+
+import logging
+
+_exc_logger = logging.getLogger(__name__)
 
 
 class AppException(Exception):
@@ -386,6 +391,68 @@ async def app_exception_handler(_: Request, exc: AppException) -> JSONResponse:
     return build_error_response(exc)
 
 
+async def database_operational_error_handler(_: Request, exc: SQLAlchemyOperationalError) -> JSONResponse:
+    """
+    Handle SQLAlchemy OperationalError (connection exhaustion, SSL drops, etc.)
+    with a friendly 503 response instead of a raw traceback.
+    """
+    err_msg = str(exc.orig) if hasattr(exc, "orig") and exc.orig else str(exc)
+    _exc_logger.error("Database OperationalError caught by global handler: %s", err_msg)
+
+    if "too many clients" in err_msg.lower():
+        return JSONResponse(
+            status_code=503,
+            content={
+                "success": False,
+                "message": "The server is currently experiencing high demand. Please try again in a few moments.",
+                "error_code": "DATABASE_CONNECTION_LIMIT",
+                "detail": {
+                    "reason": "The database connection pool has been exhausted.",
+                    "action": "Please retry your request shortly. If this persists, contact your system administrator.",
+                },
+            },
+        )
+
+    if "connection refused" in err_msg.lower():
+        return JSONResponse(
+            status_code=503,
+            content={
+                "success": False,
+                "message": "Unable to reach the database server. Please try again shortly.",
+                "error_code": "DATABASE_UNREACHABLE",
+                "detail": {
+                    "action": "If this persists, contact your system administrator.",
+                },
+            },
+        )
+
+    if "ssl" in err_msg.lower():
+        return JSONResponse(
+            status_code=503,
+            content={
+                "success": False,
+                "message": "A secure connection to the database was interrupted. Please retry your request.",
+                "error_code": "DATABASE_SSL_ERROR",
+                "detail": {
+                    "action": "This is usually temporary. If it persists, contact your system administrator.",
+                },
+            },
+        )
+
+    # Generic fallback for other OperationalErrors
+    return JSONResponse(
+        status_code=503,
+        content={
+            "success": False,
+            "message": "The service is temporarily unavailable. Please try again shortly.",
+            "error_code": "DATABASE_UNAVAILABLE",
+            "detail": {
+                "action": "If this persists, contact your system administrator.",
+            },
+        },
+    )
+
+
 async def generic_exception_handler(_: Request, exc: Exception) -> JSONResponse:
     """
     Fallback handler for unexpected exceptions.
@@ -416,4 +483,5 @@ def register_exception_handlers(app: FastAPI) -> None:
         The FastAPI application instance.
     """
     app.add_exception_handler(AppException, app_exception_handler)
+    app.add_exception_handler(SQLAlchemyOperationalError, database_operational_error_handler)
     app.add_exception_handler(Exception, generic_exception_handler)

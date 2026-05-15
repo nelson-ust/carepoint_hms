@@ -209,6 +209,8 @@ _PUBLIC_AUTH_PATHS: set[str] = {
     f"{API_PREFIX}/auth/email-verification/confirm",
     f"{API_PREFIX}/auth/phone-verification/request",
     f"{API_PREFIX}/auth/phone-verification/confirm",
+    f"{API_PREFIX}/saas/plans",
+    f"{API_PREFIX}/tenants/register",
 }
 
 
