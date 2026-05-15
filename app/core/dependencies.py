@@ -288,7 +288,12 @@ __all__ = [
     "BillingStaffUser",
     "HRStaffUser",
 
+    # Subscription / SaaS primitives
+    "require_plan_feature",
+    "get_subscription_service",
+
     # Composite dependencies
+
     "require_authenticated_verified_user",
     "require_admin_with_two_factor",
     "require_clinical_staff_with_two_factor",

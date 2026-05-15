@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.core.multitenancy import get_current_tenant_id
-from app.core.dependencies import CurrentActiveUser
+from app.core.dependencies import CurrentActiveUser, require_plan_feature
 from app.dependencies.role import require_permission
 from app.models.all_models import User
 from app.schemas.referral_schemas import (
@@ -30,7 +30,11 @@ from app.schemas.referral_schemas import (
 from app.services.referral_service import ReferralService
 from app.utils.pagination import paginate_response
 
-router = APIRouter(prefix="/referrals", tags=["Referrals"])
+router = APIRouter(
+    prefix="/referrals", 
+    tags=["Referrals"],
+    dependencies=[Depends(require_plan_feature("clinical"))]
+)
 
 
 def get_referral_service(db: Annotated[Session, Depends(get_db)]) -> ReferralService:

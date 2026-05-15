@@ -27,7 +27,14 @@ from app.schemas.meal_schemas import (
 from app.services.meal_service import MealService
 from app.utils.pagination import paginate_response
 
-router = APIRouter(prefix="/meals", tags=["Dietary & Meals"])
+from app.dependencies.subscription import require_plan_feature
+
+router = APIRouter(
+    prefix="/meals", 
+    tags=["Dietary & Meals"],
+    dependencies=[Depends(require_plan_feature("dietary"))]
+)
+
 
 
 # --- Service factory -------------------------------------------------------

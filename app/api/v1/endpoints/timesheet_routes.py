@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.core.dependencies import CurrentActiveUser
+from app.core.dependencies import CurrentActiveUser, require_plan_feature
 from app.schemas.timesheet_schemas import (
     TimesheetCreateSchema,
     TimesheetReadSchema,
@@ -16,6 +16,7 @@ from app.services.timesheet_service import TimesheetService
 router = APIRouter(
     prefix="/timesheets",
     tags=["Timesheets"],
+    dependencies=[Depends(require_plan_feature("hr"))]
 )
 
 def get_timesheet_service(db: Annotated[Session, Depends(get_db)]) -> TimesheetService:

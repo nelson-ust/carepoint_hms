@@ -10,7 +10,9 @@ from app.core.database import get_db
 from app.core.dependencies import (
     AnyAuthenticatedUser,
     CurrentActiveUser,
+    require_plan_feature,
 )
+
 from app.dependencies.role import require_permission, require_any_permission
 from app.dependencies.service_delivery_point import (
     require_assigned_to_sdp,
@@ -31,7 +33,12 @@ from app.schemas.queue_schema import (
 from app.services.queue_service import QueueService
 from app.utils.pagination import paginate_response
 
-router = APIRouter(prefix="/queue", tags=["Queue"])
+router = APIRouter(
+    prefix="/queue", 
+    tags=["Queue"],
+    dependencies=[Depends(require_plan_feature("clinical"))]
+)
+
 
 
 # Pydantic schemas for the new "complete-and-route" / "complete-and-end-visit"

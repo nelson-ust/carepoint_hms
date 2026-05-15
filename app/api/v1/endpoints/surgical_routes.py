@@ -79,19 +79,20 @@ from app.utils.pagination import paginate_response
 # Routers
 # ---------------------------------------------------------------------------
 
-theatre_router = APIRouter(prefix="/theatres", tags=["Surgical - Theatres"], dependencies=[Depends(require_plan_feature("clinical"))])
-catalog_router = APIRouter(prefix="/surgical/procedures", tags=["Surgical - Catalog"], dependencies=[Depends(require_plan_feature("clinical"))])
-case_router = APIRouter(prefix="/surgical/cases", tags=["Surgical - Cases"], dependencies=[Depends(require_plan_feature("clinical"))])
-team_router = APIRouter(prefix="/surgical/team", tags=["Surgical - Team"], dependencies=[Depends(require_plan_feature("clinical"))])
-consent_router = APIRouter(prefix="/surgical/consents", tags=["Surgical - Consents"], dependencies=[Depends(require_plan_feature("clinical"))])
-checklist_router = APIRouter(prefix="/surgical/checklists", tags=["Surgical - Checklists"], dependencies=[Depends(require_plan_feature("clinical"))])
+theatre_router = APIRouter(prefix="/theatres", tags=["Surgical - Theatres"], dependencies=[Depends(require_plan_feature("surgical"))])
+catalog_router = APIRouter(prefix="/surgical/procedures", tags=["Surgical - Catalog"], dependencies=[Depends(require_plan_feature("surgical"))])
+case_router = APIRouter(prefix="/surgical/cases", tags=["Surgical - Cases"], dependencies=[Depends(require_plan_feature("surgical"))])
+team_router = APIRouter(prefix="/surgical/team", tags=["Surgical - Team"], dependencies=[Depends(require_plan_feature("surgical"))])
+consent_router = APIRouter(prefix="/surgical/consents", tags=["Surgical - Consents"], dependencies=[Depends(require_plan_feature("surgical"))])
+checklist_router = APIRouter(prefix="/surgical/checklists", tags=["Surgical - Checklists"], dependencies=[Depends(require_plan_feature("surgical"))])
 anaesthesia_router = APIRouter(
-    prefix="/surgical/anaesthesia", tags=["Surgical - Anaesthesia"], dependencies=[Depends(require_plan_feature("clinical"))]
+    prefix="/surgical/anaesthesia", tags=["Surgical - Anaesthesia"], dependencies=[Depends(require_plan_feature("surgical"))]
 )
-note_router = APIRouter(prefix="/surgical/notes", tags=["Surgical - Notes"], dependencies=[Depends(require_plan_feature("clinical"))])
+note_router = APIRouter(prefix="/surgical/notes", tags=["Surgical - Notes"], dependencies=[Depends(require_plan_feature("surgical"))])
 instrument_router = APIRouter(
-    prefix="/surgical/instrument-sets", tags=["Surgical - Instruments"], dependencies=[Depends(require_plan_feature("clinical"))]
+    prefix="/surgical/instrument-sets", tags=["Surgical - Instruments"], dependencies=[Depends(require_plan_feature("surgical"))]
 )
+
 
 
 # ---------------------------------------------------------------------------

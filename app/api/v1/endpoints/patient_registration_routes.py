@@ -18,7 +18,7 @@ from fastapi import APIRouter, Depends, status
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.core.dependencies import CurrentActiveUser
+from app.core.dependencies import CurrentActiveUser, require_plan_feature
 from app.dependencies.role import require_permission
 from app.models.all_models import User
 from app.schemas.patient_registration_schema import (
@@ -27,7 +27,11 @@ from app.schemas.patient_registration_schema import (
 )
 from app.services.patient_registration_service import PatientRegistrationService
 
-router = APIRouter(prefix="/patient-registration", tags=["Patient Registration"])
+router = APIRouter(
+    prefix="/patient-registration", 
+    tags=["Patient Registration"],
+    dependencies=[Depends(require_plan_feature("clinical"))]
+)
 
 
 def get_registration_service(db: Annotated[Session, Depends(get_db)]) -> PatientRegistrationService:

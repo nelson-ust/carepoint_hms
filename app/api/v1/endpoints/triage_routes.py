@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.core.dependencies import CurrentActiveUser
+from app.core.dependencies import CurrentActiveUser, require_plan_feature
 from app.dependencies.role import require_permission
 from app.models.all_models import User
 from app.schemas.triage_schema import (
@@ -20,7 +20,11 @@ from app.schemas.triage_schema import (
 from app.services.triage_service import TriageService
 from app.utils.pagination import paginate_response
 
-router = APIRouter(prefix="/triage", tags=["Triage"])
+router = APIRouter(
+    prefix="/triage", 
+    tags=["Triage"],
+    dependencies=[Depends(require_plan_feature("clinical"))]
+)
 
 
 def get_triage_service(db: Annotated[Session, Depends(get_db)]) -> TriageService:

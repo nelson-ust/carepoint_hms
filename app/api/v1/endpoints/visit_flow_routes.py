@@ -26,7 +26,7 @@ from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.core.dependencies import AdminUser
+from app.core.dependencies import AdminUser, require_plan_feature
 from app.schemas.visit_flow_schemas import (
     VisitFlowActionResponseSchema,
     VisitFlowCombinedCreateResultSchema,
@@ -42,6 +42,7 @@ from app.schemas.visit_flow_schemas import (
     VisitFlowTemplateStepReadSchema,
     VisitFlowTemplateStepUpdateSchema,
     VisitFlowTemplateUpdateSchema,
+    VisitFlowTemplateUpdateSchema,
 )
 from app.services.visit_flow_service import VisitFlowService
 from app.utils.pagination import paginate_response
@@ -49,6 +50,7 @@ from app.utils.pagination import paginate_response
 router = APIRouter(
     prefix="/visit-flows",
     tags=["Visit Flow Management"],
+    dependencies=[Depends(require_plan_feature("clinical"))]
 )
 
 

@@ -15,7 +15,7 @@ from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.core.dependencies import CurrentActiveUser
+from app.core.dependencies import CurrentActiveUser, require_plan_feature
 from app.dependencies.role import require_permission
 from app.models.all_models import User
 from app.schemas.procedure_schema import (
@@ -36,8 +36,16 @@ from app.services.procedure_service import (
 )
 from app.utils.pagination import paginate_response
 
-catalog_router = APIRouter(prefix="/procedures", tags=["Procedures - Catalog"])
-order_router = APIRouter(prefix="/procedure-orders", tags=["Procedures - Orders"])
+catalog_router = APIRouter(
+    prefix="/procedures", 
+    tags=["Procedures - Catalog"],
+    dependencies=[Depends(require_plan_feature("clinical"))]
+)
+order_router = APIRouter(
+    prefix="/procedure-orders", 
+    tags=["Procedures - Orders"],
+    dependencies=[Depends(require_plan_feature("clinical"))]
+)
 
 
 def get_catalog_service(db: Annotated[Session, Depends(get_db)]) -> ProcedureCatalogService:

@@ -102,6 +102,7 @@ from app.api.v1.endpoints.master_backup_routes import router as master_backup_ro
 from app.api.v1.endpoints.saas_notification_routes import router as saas_notification_router
 from app.api.v1.endpoints.saas_dashboard_routes import router as saas_dashboard_router
 from app.api.v1.endpoints.saas_subscription_plan_routes import router as saas_subscription_plan_router
+from app.api.v1.endpoints.saas_subscription_status_routes import router as saas_subscription_status_router
 from app.api.v1.endpoints.saas_usage_routes import router as saas_usage_router
 from app.api.v1.endpoints.saas_admin_routes import router as saas_admin_router
 from app.api.v1.endpoints.integration_routes import router as integration_router
@@ -263,6 +264,7 @@ api_router.include_router(user_profile_router)
 api_router.include_router(saas_notification_router)
 api_router.include_router(saas_dashboard_router)
 api_router.include_router(saas_subscription_plan_router)
+api_router.include_router(saas_subscription_status_router)
 api_router.include_router(saas_usage_router)
 api_router.include_router(saas_admin_router)
 api_router.include_router(auth_router)

@@ -71,9 +71,16 @@ from app.services.compliance_service import (
 from app.utils.pagination import paginate_response
 
 
+from app.core.dependencies import require_plan_feature
+
 # Single router with internal sub-prefixes keeps Swagger tidy and the
 # permission boundaries obvious.
-router = APIRouter(prefix="/compliance", tags=["Compliance & Governance"])
+router = APIRouter(
+    prefix="/compliance", 
+    tags=["Compliance & Governance"],
+    dependencies=[Depends(require_plan_feature("compliance"))]
+)
+
 
 
 # --- Service factories -----------------------------------------------------

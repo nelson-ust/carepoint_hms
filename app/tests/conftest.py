@@ -167,15 +167,41 @@ def database_engine():
         ("salary_advance", "approval_request_id", "BIGINT"),
         ("leave_request", "approval_request_id", "BIGINT"),
         ("reimbursement_request", "approval_request_id", "BIGINT"),
+        ("user", "deleted_by_id", "INTEGER"),
+        ("user", "password_reset_token", "VARCHAR(255)"),
+        ("user", "password_reset_token_expires_at", "TIMESTAMP WITH TIME ZONE"),
+        ("user", "failed_login_attempts", "INTEGER DEFAULT 0"),
+        ("user", "locked_until", "TIMESTAMP WITH TIME ZONE"),
+        ("user", "last_failed_login_at", "TIMESTAMP WITH TIME ZONE"),
+        ("user", "profile_photo_url", "VARCHAR(500)"),
+        ("user", "job_title", "VARCHAR(150)"),
+        ("user", "department_id", "INTEGER"),
+        ("user", "facility_id", "INTEGER"),
+        ("user", "employment_status", "VARCHAR(40)"),
+        ("user", "bio", "TEXT"),
+        ("user", "date_of_birth", "DATE"),
+        ("user", "gender", "VARCHAR(20)"),
+        ("role", "deleted_by_id", "INTEGER"),
+        ("permission", "deleted_by_id", "INTEGER"),
+        ("staff_profile", "deleted_by_id", "INTEGER"),
+        ("patient", "deleted_by_id", "INTEGER"),
+        ("subscription_plan", "has_dietary", "BOOLEAN DEFAULT TRUE"),
+        ("subscription_plan", "has_ambulance", "BOOLEAN DEFAULT TRUE"),
+        ("subscription_plan", "has_compliance", "BOOLEAN DEFAULT TRUE"),
     ]
+
+
     with engine.connect() as conn:
         for table, col, col_type in _missing_columns:
             try:
+                # Quote table names to handle reserved keywords like 'user'
                 conn.execute(text(
-                    f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {col} {col_type}"
+                    f'ALTER TABLE "{table}" ADD COLUMN IF NOT EXISTS {col} {col_type}'
                 ))
-            except Exception:
+            except Exception as e:
+                print(f"[DB] Failed to patch {table}.{col}: {e}")
                 pass
+
         conn.commit()
     
     # Ensure baseline security data exists. Idempotent — adds only
@@ -238,9 +264,26 @@ _MOCK_TENANT = SimpleNamespace(
     active_subscription=SimpleNamespace(
         status="ACTIVE",
         is_active=True,
+        has_clinical=True,
+        has_inpatient=True,
+        has_laboratory=True,
+        has_pharmacy=True,
+        has_inventory=True,
+        has_billing=True,
+        has_reporting=True,
+        has_appointments=True,
+        has_patient_portal=True,
+        has_insurance=True,
+        has_radiology=True,
+        has_surgical=True,
+        has_hr=True,
+        has_dietary=True,
+        has_ambulance=True,
+        has_compliance=True,
     ),
     subscriptions=[],
 )
+
 
 class InjectTestTenantMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request, call_next):

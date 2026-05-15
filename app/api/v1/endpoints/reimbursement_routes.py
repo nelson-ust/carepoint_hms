@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.core.dependencies import CurrentActiveUser
+from app.core.dependencies import CurrentActiveUser, require_plan_feature
 from app.schemas.reimbursement_schemas import (
     ReimbursementCreateSchema,
     ReimbursementReadSchema,
@@ -16,6 +16,7 @@ from app.services.reimbursement_service import ReimbursementService
 router = APIRouter(
     prefix="/reimbursements",
     tags=["Reimbursements"],
+    dependencies=[Depends(require_plan_feature("hr"))]
 )
 
 def get_reimbursement_service(db: Annotated[Session, Depends(get_db)]) -> ReimbursementService:

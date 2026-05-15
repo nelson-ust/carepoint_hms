@@ -3211,6 +3211,10 @@ class SubscriptionPlan(MasterTable):
     has_radiology: Mapped[bool] = mapped_column(Boolean, default=False)
     has_surgical: Mapped[bool] = mapped_column(Boolean, default=False)
     has_hr: Mapped[bool] = mapped_column(Boolean, default=False)
+    has_dietary: Mapped[bool] = mapped_column(Boolean, default=False)
+    has_ambulance: Mapped[bool] = mapped_column(Boolean, default=False)
+    has_compliance: Mapped[bool] = mapped_column(Boolean, default=False)
+
 
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
 

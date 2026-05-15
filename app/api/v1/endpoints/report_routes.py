@@ -11,9 +11,15 @@ from app.schemas.report_schemas import (
 )
 from app.services.report_service import ReportService
 from app.dependencies.role import require_permission
-from app.core.dependencies import CurrentSaaSAdmin
+from app.core.dependencies import CurrentSaaSAdmin, require_plan_feature
 
-router = APIRouter(prefix="/reports", tags=["Reporting & Analytics"])
+
+router = APIRouter(
+    prefix="/reports", 
+    tags=["Reporting & Analytics"],
+    dependencies=[Depends(require_plan_feature("reporting"))]
+)
+
 
 @router.get("/financial-summary", response_model=TenantFinancialSummary)
 def get_financial_summary(

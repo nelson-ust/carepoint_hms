@@ -14,10 +14,14 @@ from app.schemas.procurement_schemas import (
     PurchaseOrderCreateSchema,
     PurchaseOrderReadSchema
 )
-from app.dependencies.auth import get_current_user
+from app.core.dependencies import get_current_user, require_plan_feature
 from app.models.all_models import User
 
-router = APIRouter(prefix="/procurements", tags=["Procurement"])
+router = APIRouter(
+    prefix="/procurements", 
+    tags=["Procurement"],
+    dependencies=[Depends(require_plan_feature("inventory"))]
+)
 
 # ... existing requisition routes ...
 

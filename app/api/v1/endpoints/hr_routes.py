@@ -24,7 +24,8 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.core.dependencies import AdminUser, CurrentActiveUser
+from app.core.dependencies import AdminUser, CurrentActiveUser, require_plan_feature
+
 from app.core.enums import (
     AttendanceMethod,
     DisciplinaryActionKind,
@@ -93,7 +94,12 @@ from app.services.hr_service import (
 )
 
 
-router = APIRouter(prefix="/hr", tags=["HR - Staff Management"])
+router = APIRouter(
+    prefix="/hr", 
+    tags=["HR - Staff Management"],
+    dependencies=[Depends(require_plan_feature("hr"))]
+)
+
 
 
 # ===========================================================================

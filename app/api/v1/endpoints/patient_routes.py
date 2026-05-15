@@ -33,7 +33,8 @@ from fastapi import APIRouter, Depends, File, Form, Query, UploadFile, status
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.core.dependencies import AdminUser, AnyAuthenticatedUser
+from app.core.dependencies import AdminUser, AnyAuthenticatedUser, require_plan_feature
+
 from app.schemas.patient_schemas import (
     PatientActionResponseSchema,
     PatientAttachInsuranceLaterSchema,
@@ -65,7 +66,9 @@ from app.utils.pagination import paginate_response
 router = APIRouter(
     prefix="/patients",
     tags=["Patient Registration & MPI"],
+    dependencies=[Depends(require_plan_feature("clinical"))]
 )
+
 
 
 def get_patient_service(

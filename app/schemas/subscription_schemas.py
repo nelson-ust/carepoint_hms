@@ -27,6 +27,15 @@ class SubscriptionPlanReadSchema(BaseModel):
     has_inventory: bool
     has_billing: bool
     has_reporting: bool
+    has_appointments: bool
+    has_patient_portal: bool
+    has_insurance: bool
+    has_radiology: bool
+    has_surgical: bool
+    has_hr: bool
+    has_dietary: bool
+    has_ambulance: bool
+    has_compliance: bool
     
     is_active: bool
 
@@ -63,6 +72,15 @@ class SubscriptionPlanCreateSchema(BaseModel):
     has_inventory: bool = False
     has_billing: bool = True
     has_reporting: bool = False
+    has_appointments: bool = True
+    has_patient_portal: bool = False
+    has_insurance: bool = False
+    has_radiology: bool = False
+    has_surgical: bool = False
+    has_hr: bool = False
+    has_dietary: bool = False
+    has_ambulance: bool = False
+    has_compliance: bool = False
     
     is_active: bool = True
 
@@ -81,5 +99,24 @@ class SubscriptionPlanUpdateSchema(BaseModel):
     has_inventory: Optional[bool] = None
     has_billing: Optional[bool] = None
     has_reporting: Optional[bool] = None
+    has_appointments: Optional[bool] = None
+    has_patient_portal: Optional[bool] = None
+    has_insurance: Optional[bool] = None
+    has_radiology: Optional[bool] = None
+    has_surgical: Optional[bool] = None
+    has_hr: Optional[bool] = None
+    has_dietary: Optional[bool] = None
+    has_ambulance: Optional[bool] = None
+    has_compliance: Optional[bool] = None
     
     is_active: Optional[bool] = None
+
+class SubscriptionStatusSchema(BaseModel):
+    tenant_id: int
+    plan_name: str
+    plan_code: str
+    subscription_status: SubscriptionStatus
+    expires_at: Optional[datetime] = None
+    enabled_features: List[str]
+    max_users: int
+    max_facilities: int

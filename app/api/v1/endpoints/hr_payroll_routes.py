@@ -9,7 +9,13 @@ from app.schemas.hr_payroll_schemas import (
 )
 from app.services.hr_payroll_service import HRPayrollService
 
-router = APIRouter(prefix="/hr/payroll-config", tags=["HR - Payroll Configuration"])
+from app.core.dependencies import require_plan_feature
+
+router = APIRouter(
+    prefix="/hr/payroll-config", 
+    tags=["HR - Payroll Configuration"],
+    dependencies=[Depends(require_plan_feature("hr"))]
+)
 
 def _get_service(db: Session = Depends(get_db)) -> HRPayrollService:
     return HRPayrollService(db)

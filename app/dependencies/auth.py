@@ -380,6 +380,25 @@ class RequireModule:
             .first()
         )
         if override is not None and not override.is_enabled:
+            # Log the denial
+            try:
+                from app.dependencies.subscription import get_subscription_service
+                service = get_subscription_service(master_db)
+                from fastapi import Request
+                # We can't easily get the request object here without changing signature 
+                # but RequireModule is a class, we can add it to __call__ if we want.
+                # However, many existing callers might not expect it.
+                # For now, I'll just log with available info.
+                service.log_access_attempt(
+                    tenant_id=tenant_id,
+                    feature_code=self.module_name,
+                    user_id=getattr(current_user, "id", None),
+                    is_denied=True,
+                    reason="Module disabled by override"
+                )
+            except Exception:
+                pass
+
             raise ForbiddenError(
                 message=(
                     f"The {self.module_name} module has been disabled for "

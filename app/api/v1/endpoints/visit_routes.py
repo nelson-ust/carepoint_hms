@@ -27,7 +27,8 @@ from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.core.dependencies import AdminUser, AnyAuthenticatedUser
+from app.core.dependencies import AdminUser, AnyAuthenticatedUser, require_plan_feature
+
 from app.schemas.visit_schemas import (
     QueueTicketReadSchema,
     VisitActionResponseSchema,
@@ -48,7 +49,9 @@ from app.utils.pagination import paginate_response
 router = APIRouter(
     prefix="/visits",
     tags=["Visit Management"],
+    dependencies=[Depends(require_plan_feature("clinical"))]
 )
+
 
 
 def get_visit_service(

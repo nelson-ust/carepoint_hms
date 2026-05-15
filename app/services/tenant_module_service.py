@@ -44,7 +44,11 @@ SUPPORTED_MODULES: tuple[tuple[str, str], ...] = (
     ("radiology", "Radiology"),
     ("surgical", "Surgical / Theatre"),
     ("hr", "Human Resources"),
+    ("dietary", "Dietary & Meal Management"),
+    ("ambulance", "Ambulance & Fleet"),
+    ("compliance", "Compliance & Audit"),
 )
+
 
 SUPPORTED_MODULE_CODES: set[str] = {code for code, _ in SUPPORTED_MODULES}
 

@@ -62,16 +62,17 @@ from app.utils.pagination import paginate_response
 # Routers
 # ---------------------------------------------------------------------------
 
-batch_router = APIRouter(prefix="/insurance/batches", tags=["Insurance - Batches"], dependencies=[Depends(require_plan_feature("billing"))])
-claim_router = APIRouter(prefix="/insurance/claims", tags=["Insurance - Claims"], dependencies=[Depends(require_plan_feature("billing"))])
+batch_router = APIRouter(prefix="/insurance/batches", tags=["Insurance - Batches"], dependencies=[Depends(require_plan_feature("insurance"))])
+claim_router = APIRouter(prefix="/insurance/claims", tags=["Insurance - Claims"], dependencies=[Depends(require_plan_feature("insurance"))])
 auth_router = APIRouter(
-    prefix="/insurance/authorizations", tags=["Insurance - Authorizations"], dependencies=[Depends(require_plan_feature("billing"))]
+    prefix="/insurance/authorizations", tags=["Insurance - Authorizations"], dependencies=[Depends(require_plan_feature("insurance"))]
 )
 adjudication_router = APIRouter(
-    prefix="/insurance/adjudications", tags=["Insurance - Adjudications"], dependencies=[Depends(require_plan_feature("billing"))]
+    prefix="/insurance/adjudications", tags=["Insurance - Adjudications"], dependencies=[Depends(require_plan_feature("insurance"))]
 )
-payment_router = APIRouter(prefix="/insurance/payments", tags=["Insurance - Payments"], dependencies=[Depends(require_plan_feature("billing"))])
-appeal_router = APIRouter(prefix="/insurance/appeals", tags=["Insurance - Appeals"], dependencies=[Depends(require_plan_feature("billing"))])
+payment_router = APIRouter(prefix="/insurance/payments", tags=["Insurance - Payments"], dependencies=[Depends(require_plan_feature("insurance"))])
+appeal_router = APIRouter(prefix="/insurance/appeals", tags=["Insurance - Appeals"], dependencies=[Depends(require_plan_feature("insurance"))])
+
 
 
 # ---------------------------------------------------------------------------

@@ -10,10 +10,14 @@ from app.schemas.salary_advance_schemas import (
     SalaryAdvanceReadSchema,
     SalaryAdvanceSubmitSchema
 )
-from app.dependencies.auth import get_current_user
+from app.core.dependencies import get_current_user, require_plan_feature
 from app.models.all_models import User
 
-router = APIRouter(prefix="/salary-advances", tags=["Salary Advance"])
+router = APIRouter(
+    prefix="/salary-advances", 
+    tags=["Salary Advance"],
+    dependencies=[Depends(require_plan_feature("hr"))]
+)
 
 @router.post("", response_model=dict, status_code=status.HTTP_201_CREATED)
 def create_salary_advance(

@@ -67,9 +67,20 @@ from app.services.ambulance_service import AmbulanceService
 from app.utils.pagination import paginate_response
 
 
+from app.core.dependencies import require_plan_feature
+
 # Two routers under one prefix tree keep dispatches discoverable in Swagger.
-router = APIRouter(prefix="/ambulances", tags=["Ambulances"])
-dispatch_router = APIRouter(prefix="/ambulance-dispatches", tags=["Ambulance Dispatches"])
+router = APIRouter(
+    prefix="/ambulances", 
+    tags=["Ambulances"],
+    dependencies=[Depends(require_plan_feature("ambulance"))]
+)
+dispatch_router = APIRouter(
+    prefix="/ambulance-dispatches", 
+    tags=["Ambulance Dispatches"],
+    dependencies=[Depends(require_plan_feature("ambulance"))]
+)
+
 
 
 def get_ambulance_service(db: Annotated[Session, Depends(get_db)]) -> AmbulanceService:

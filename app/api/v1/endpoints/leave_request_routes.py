@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.core.dependencies import CurrentActiveUser
+from app.core.dependencies import CurrentActiveUser, require_plan_feature
 from app.schemas.leave_request_schemas import (
     LeaveRequestCreateSchema,
     LeaveRequestReadSchema,
@@ -16,6 +16,7 @@ from app.services.leave_request_service import LeaveRequestService
 router = APIRouter(
     prefix="/leave-requests",
     tags=["Leave Requests"],
+    dependencies=[Depends(require_plan_feature("hr"))]
 )
 
 def get_leave_request_service(db: Annotated[Session, Depends(get_db)]) -> LeaveRequestService:

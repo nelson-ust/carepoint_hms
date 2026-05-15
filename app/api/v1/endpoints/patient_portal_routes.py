@@ -6,7 +6,8 @@ from fastapi import APIRouter, Depends, HTTPException, status, Request
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.core.dependencies import get_current_user
+from app.core.dependencies import get_current_user, require_plan_feature
+
 from app.models.all_models import User
 from app.services.patient_portal_service import PatientPortalService
 from app.services.patient_portal_auth_service import PatientPortalAuthService
@@ -32,7 +33,12 @@ from app.schemas.notification_schema import NotificationReadSchema
 from app.schemas.auth_schemas import LoginSuccessSchema, OTPActionResponseSchema, OTPVerificationSuccessSchema
 
 
-router = APIRouter(prefix="/portal", tags=["Patient Portal"])
+router = APIRouter(
+    prefix="/portal", 
+    tags=["Patient Portal"],
+    dependencies=[Depends(require_plan_feature("patient_portal"))]
+)
+
 
 
 def get_portal_service(db: Annotated[Session, Depends(get_db)]) -> PatientPortalService:

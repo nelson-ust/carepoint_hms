@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field, ConfigDict
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.core.dependencies import AdminUser, CurrentActiveUser
+from app.core.dependencies import AdminUser, CurrentActiveUser, require_plan_feature
 from app.core.enums import (
     AppointmentRecurrence,
     AppointmentReminderRule,
@@ -26,6 +26,7 @@ from app.services.appointment_extension_service import (
 router = APIRouter(
     prefix="/appointment-scheduling",
     tags=["Appointment Scheduling Extensions"],
+    dependencies=[Depends(require_plan_feature("appointments"))]
 )
 
 

@@ -17,30 +17,37 @@ def auth_header(client, admin_user):
     return _bearer_headers(token)
 
 class TestNotificationRoutes:
-    def test_list_notifications(self, client, auth_header):
+    def test_list_notifications_standard_response(self, client, auth_header):
+        """Verify the optimized list endpoint returns the correct structure."""
         response = client.get("/api/v1/notifications/", headers=auth_header)
         assert response.status_code == 200
         data = response.json()
         assert "items" in data
+        assert "count" in data
+        assert "meta" in data
+        assert isinstance(data["items"], list)
 
-    def test_mark_as_read(self, client, auth_header):
-        # First dispatch a notification so we have one to mark
+    def test_dispatch_and_mark_as_read(self, client, auth_header):
+        # 1. Dispatch a notification
         dispatch_res = client.post(
             "/api/v1/notifications/dispatch-ad-hoc",
-            json={"channel": "IN_APP", "subject": "Test", "body": "Test body"},
+            json={
+                "channel": "IN_APP", 
+                "subject": "Optimization Test", 
+                "body": "Testing fast serialization"
+            },
             headers=auth_header,
         )
-        # If dispatch works, try marking it; otherwise just verify we can
-        # hit the endpoint without 404.
-        if dispatch_res.status_code == 201:
-            note_id = dispatch_res.json().get("notification_id")
-            if note_id:
-                response = client.post(f"/api/v1/notifications/{note_id}/mark-read", headers=auth_header)
-                assert response.status_code in (200, 404)
-                return
-        # Fallback: just verify the list endpoint works
-        assert True
+        assert dispatch_res.status_code == 201
+        note_id = dispatch_res.json().get("notification_id")
+        
+        # 2. Mark it as read
+        if note_id:
+            response = client.post(f"/api/v1/notifications/{note_id}/mark-read", headers=auth_header)
+            assert response.status_code == 200
+            assert response.json()["success"] is True
 
     def test_reject_anonymous(self, client):
         response = client.get("/api/v1/notifications/")
         assert response.status_code == 401
+

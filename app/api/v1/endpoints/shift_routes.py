@@ -1,8 +1,7 @@
 from fastapi import APIRouter, Depends, status
 from sqlalchemy.orm import Session
 
-from app.core.database import get_db
-from app.dependencies.auth import get_current_user
+from app.core.dependencies import get_current_user, require_plan_feature
 from app.models.all_models import User
 from app.services.shift_service import (
     ShiftDefinitionService,
@@ -20,7 +19,11 @@ from app.schemas.shift_schemas import (
     ShiftSwapRequestReadSchema,
 )
 
-router = APIRouter(prefix="/shifts", tags=["Staff Shifts"])
+router = APIRouter(
+    prefix="/shifts", 
+    tags=["Staff Shifts"],
+    dependencies=[Depends(require_plan_feature("hr"))]
+)
 
 
 # ── Shift Definitions ────────────────────────────────────────────────

@@ -55,10 +55,11 @@ from app.services.radiology_service import (
 )
 from app.utils.pagination import paginate_response
 
-catalog_router = APIRouter(prefix="/radiology/procedures", tags=["Radiology - Catalog"], dependencies=[Depends(require_plan_feature("clinical"))])
-order_router = APIRouter(prefix="/radiology/orders", tags=["Radiology - Orders"], dependencies=[Depends(require_plan_feature("clinical"))])
-exam_router = APIRouter(prefix="/radiology/exams", tags=["Radiology - Exams"], dependencies=[Depends(require_plan_feature("clinical"))])
-report_router = APIRouter(prefix="/radiology/reports", tags=["Radiology - Reports"], dependencies=[Depends(require_plan_feature("clinical"))])
+catalog_router = APIRouter(prefix="/radiology/procedures", tags=["Radiology - Catalog"], dependencies=[Depends(require_plan_feature("radiology"))])
+order_router = APIRouter(prefix="/radiology/orders", tags=["Radiology - Orders"], dependencies=[Depends(require_plan_feature("radiology"))])
+exam_router = APIRouter(prefix="/radiology/exams", tags=["Radiology - Exams"], dependencies=[Depends(require_plan_feature("radiology"))])
+report_router = APIRouter(prefix="/radiology/reports", tags=["Radiology - Reports"], dependencies=[Depends(require_plan_feature("radiology"))])
+
 
 
 # ---- Service factories ----------------------------------------------------
