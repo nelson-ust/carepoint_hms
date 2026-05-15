@@ -3740,6 +3740,26 @@ class TenantModuleAccess(MasterTable):
         ),
     )
 
+class FeatureAccessAuditLog(MasterTable):
+    """
+    Audit log for feature gating events.
+    Logs both successful and denied access attempts for modular features.
+    """
+
+    __tablename__ = "feature_access_audit_log"
+
+    tenant_id: Mapped[int] = mapped_column(ForeignKey("tenant.id"), nullable=False, index=True)
+    user_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
+    feature_code: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    path: Mapped[str] = mapped_column(String(255), nullable=False)
+    method: Mapped[str] = mapped_column(String(10), nullable=False)
+    ip_address: Mapped[Optional[str]] = mapped_column(String(45), nullable=True)
+    user_agent: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    is_denied: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    tenant: Mapped["Tenant"] = relationship()
+
 
 class Facility(TenantTable):
     """

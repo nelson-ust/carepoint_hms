@@ -21,10 +21,9 @@ def get_plan_service(db: Annotated[Session, Depends(get_master_db)]) -> Subscrip
     "",
     response_model=List[SubscriptionPlanReadSchema],
     status_code=status.HTTP_200_OK,
-    summary="List subscription plans",
+    summary="List subscription plans (Public)",
 )
 def list_plans(
-    _: CurrentSaaSAdmin,
     service: Annotated[SubscriptionPlanService, Depends(get_plan_service)],
     include_inactive: bool = False
 ):
