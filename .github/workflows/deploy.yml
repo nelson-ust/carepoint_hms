@@ -1,26 +1,49 @@
-name: Test & Deploy
+name: CI / CD Pipeline
 
-# Triggers:
-#   * Every push to main runs the test job, then the deploy job (which only
-#     runs if tests passed AND the push hit main, not a PR).
-#   * Pull requests run the test job only.
 on:
   push:
-    branches: [main]
+    branches: [main, staging]
   pull_request:
     branches: [main]
-  workflow_dispatch: {}     # lets you run the deploy manually from the UI
+  workflow_dispatch:
+    inputs:
+      deploy_env:
+        description: 'Environment to deploy to'
+        required: true
+        default: 'production'
+        type: choice
+        options:
+          - production
+          - staging
 
 concurrency:
   group: deploy-${{ github.ref }}
-  cancel-in-progress: false   # never cancel a running deploy mid-flight
+  cancel-in-progress: false
+
+env:
+  PYTHON_VERSION: '3.12'
 
 jobs:
-  # ─────────────────────────────────────────────────────────────────────
-  # 1. Run the integration test suite against an ephemeral Postgres.
-  # ─────────────────────────────────────────────────────────────────────
+  # ─── LINT ───────────────────────────────────────────────────────────
+  lint:
+    name: Lint and Type Check
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install linters
+        run: pip install ruff
+
+      - name: Ruff lint
+        run: ruff check app/ --output-format=github || true
+
+  # ─── TEST ───────────────────────────────────────────────────────────
   test:
-    name: pytest
+    name: Test Suite
     runs-on: ubuntu-22.04
     services:
       postgres:
@@ -37,22 +60,20 @@ jobs:
           --health-retries 10
     env:
       CAREPOINT_HMS_TEST_DATABASE_URL: postgresql+psycopg2://postgres:Admin123@localhost:5432/carepoint_hms_test
-      CAREPOINT_HMS_DATABASE_URL:      postgresql+psycopg2://postgres:Admin123@localhost:5432/carepoint_hms_test
+      CAREPOINT_HMS_DATABASE_URL: postgresql+psycopg2://postgres:Admin123@localhost:5432/carepoint_hms_test
       CAREPOINT_HMS_MASTER_DATABASE_URL: postgresql+psycopg2://postgres:Admin123@localhost:5432/carepoint_hms_test
       CAREPOINT_HMS_ENVIRONMENT: test
-      CAREPOINT_HMS_SECRET_KEY: ci-secret-key-please-rotate-this-with-openssl-rand-hex-32-2026
-      CAREPOINT_HMS_RATE_LIMIT_ENABLED: "false"
-      CAREPOINT_HMS_EMAILS_ENABLED: "false"
-      CAREPOINT_HMS_SMS_ENABLED: "false"
+      CAREPOINT_HMS_SECRET_KEY: ci-only-secret-key-do-not-use-in-production-2026
+      CAREPOINT_HMS_RATE_LIMIT_ENABLED: 'false'
+      CAREPOINT_HMS_EMAILS_ENABLED: 'false'
+      CAREPOINT_HMS_SMS_ENABLED: 'false'
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
-          # Keep this in sync with PYTHON_VERSION in scripts/provision_droplet.sh
-          # so CI tests on the same interpreter the droplet runs.
-          python-version: '3.12'
-          cache: 'pip'
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
 
       - name: Install dependencies
         run: |
@@ -68,21 +89,28 @@ jobs:
           done
 
       - name: Run tests
-        run: pytest app/tests/integration -x --tb=short -q
+        run: pytest app/tests/integration -x --tb=short -q --junitxml=test-results.xml
 
-  # ─────────────────────────────────────────────────────────────────────
-  # 2. Deploy to the DigitalOcean droplet.
-  #    Runs only on push to main AND only if the test job passed.
-  # ─────────────────────────────────────────────────────────────────────
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-results
+          path: test-results.xml
+          retention-days: 30
+
+  # ─── DEPLOY TO PRODUCTION ──────────────────────────────────────────
   deploy:
-    name: deploy to droplet
+    name: Deploy to Production
     runs-on: ubuntu-22.04
-    needs: test
+    needs: [lint, test]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     environment:
       name: production
-      url: https://${{ secrets.DROPLET_DOMAIN }}
+      url: https://${{ vars.DROPLET_DOMAIN }}
     steps:
+      - uses: actions/checkout@v4
+
       - name: Configure SSH
         run: |
           mkdir -p ~/.ssh
@@ -90,21 +118,31 @@ jobs:
           chmod 600 ~/.ssh/id_ed25519
           ssh-keyscan -H "${{ secrets.DROPLET_HOST }}" >> ~/.ssh/known_hosts
 
-      - name: Run deploy script on droplet
+      - name: Deploy via script
         run: |
-          ssh -i ~/.ssh/id_ed25519 \
+          ssh -o StrictHostKeyChecking=accept-new \
+              -i ~/.ssh/id_ed25519 \
               "${{ secrets.DROPLET_USER }}@${{ secrets.DROPLET_HOST }}" \
-              "bash /opt/carepoint_hms/scripts/deploy.sh main"
+              "bash /opt/carepoint_hms/scripts/deploy_backend_droplet.sh deploy main"
 
-      - name: Smoke-test public endpoint
-        if: ${{ secrets.DROPLET_DOMAIN != '' }}
+      - name: Smoke test
+        env:
+          DOMAIN: ${{ secrets.DROPLET_DOMAIN }}
+        if: env.DOMAIN != ''
         run: |
-          for i in 1 2 3 4 5; do
+          for i in 1 2 3 4 5 6; do
             if curl -fsS --max-time 10 "https://${{ secrets.DROPLET_DOMAIN }}/health" >/dev/null; then
-              echo "Public smoke-test passed."
+              echo "✓ Production smoke test passed."
               exit 0
             fi
             echo "attempt $i — waiting 5s"
             sleep 5
           done
-          echo "::warning::Public health-check did not respond — service may still be warming up."
+          echo "::warning::Health check did not respond — service may still be starting."
+
+      - name: Notify deployment
+        if: always()
+        run: |
+          SHA="${{ github.sha }}"
+          STATUS="${{ job.status }}"
+          echo "Deployment of ${SHA:0:7} finished with status: ${STATUS}"

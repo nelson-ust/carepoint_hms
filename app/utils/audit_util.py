@@ -65,3 +65,8 @@ def build_audit_payload(obj: Any, exclude: Optional[set] = None) -> dict:
             payload[column.name] = value
             
     return payload
+
+
+
+
+

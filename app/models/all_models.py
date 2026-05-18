@@ -786,6 +786,7 @@ class Patient(TenantTable):
     blood_group: Mapped[Optional[BloodGroup]] = mapped_column(Enum(BloodGroup), nullable=True)
     genotype: Mapped[Optional[Genotype]] = mapped_column(Enum(Genotype), nullable=True)
     allergies: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    chronic_conditions: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     # Existing emergency contact (keep)
     emergency_contact_name: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
@@ -880,6 +881,9 @@ class Patient(TenantTable):
     membership_cards: Mapped[list["MembershipCard"]] = relationship(back_populates="patient")
     paystack_transactions: Mapped[list["PaystackTransaction"]] = relationship(back_populates="patient")
     referrals: Mapped[list["Referral"]] = relationship(back_populates="patient")
+    patient_allergies: Mapped[list["PatientAllergy"]] = relationship(back_populates="patient", cascade="all, delete-orphan")
+    surgical_cases: Mapped[list["SurgicalCase"]] = relationship(back_populates="patient")
+    incident_reports: Mapped[list["IncidentReport"]] = relationship(back_populates="patient")
 
     user_id: Mapped[Optional[int]] = mapped_column(ForeignKey("user.id"), nullable=True, unique=True, index=True)
     user: Mapped[Optional["User"]] = relationship(back_populates="patient")
@@ -3086,7 +3090,7 @@ class IncidentReport(TenantTable):
     follow_up_required: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
     reported_by_staff: Mapped[Optional["StaffProfile"]] = relationship()
-    patient: Mapped[Optional["Patient"]] = relationship()
+    patient: Mapped[Optional["Patient"]] = relationship(back_populates="incident_reports")
     visit: Mapped[Optional["Visit"]] = relationship()
     department: Mapped[Optional["Department"]] = relationship()
 
@@ -4074,6 +4078,8 @@ class SurgicalCase(TenantTable):
     operating_theatre_id: Mapped[Optional[int]] = mapped_column(
         ForeignKey("operating_theatre.id"), nullable=True, index=True
     )
+    
+    patient: Mapped["Patient"] = relationship(back_populates="surgical_cases")
 
     case_no: Mapped[str] = mapped_column(String(100), unique=True, nullable=False, index=True)
     status: Mapped[SurgicalCaseStatus] = mapped_column(
@@ -8346,7 +8352,7 @@ class PatientAllergy(TenantTable):
     reaction_description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
 
-    patient: Mapped["Patient"] = relationship()
+    patient: Mapped["Patient"] = relationship(back_populates="patient_allergies")
 
 
 class CdssAlert(TenantTable):

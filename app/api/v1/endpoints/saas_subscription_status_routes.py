@@ -9,7 +9,13 @@ from app.core.exceptions import ForbiddenError
 from app.dependencies.subscription import get_subscription_service
 from app.services.subscription_service import SubscriptionService
 from app.schemas.subscription_schemas import SubscriptionStatusSchema
-from app.models.all_models import TenantSubscription, SubscriptionPlan
+from app.schemas.tenant_schemas import TenantChangePlanSchema
+from app.models.all_models import TenantSubscription, SubscriptionPlan, User
+from app.dependencies.role import require_admin
+from app.services.tenant_service import TenantService
+
+def get_tenant_service(db: Annotated[Session, Depends(get_master_db)]) -> TenantService:
+    return TenantService(db)
 
 router = APIRouter(prefix="/saas", tags=["SaaS - Subscription Status"])
 
@@ -66,3 +72,30 @@ def get_subscription_status(
         max_users=plan.max_users,
         max_facilities=plan.max_facilities
     )
+
+
+@router.post(
+    "/upgrade-plan",
+    response_model=dict,
+    summary="Upgrade the current tenancy's subscription plan",
+)
+def upgrade_subscription_plan(
+    tenant_id: Annotated[int, Depends(get_current_tenant_id)],
+    payload: TenantChangePlanSchema,
+    _: Annotated[User, Depends(require_admin)],
+    service: Annotated[TenantService, Depends(get_tenant_service)],
+):
+    """
+    Allow a Tenant Admin to upgrade their own tenancy's subscription plan.
+    """
+    if not tenant_id:
+        raise ForbiddenError(message="Tenant context is required.")
+
+    subscription = service.change_subscription_plan(tenant_id, payload.plan_code)
+
+    return {
+        "success": True,
+        "message": f"Subscription plan successfully updated to '{payload.plan_code}'.",
+        "subscription_id": subscription.id,
+        "status": subscription.status
+    }

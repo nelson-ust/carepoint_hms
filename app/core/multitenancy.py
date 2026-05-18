@@ -62,3 +62,7 @@ def get_current_tenant_db_url() -> Optional[str]:
     if not tenant or not tenant.db_connection_string:
         return None
     return decrypt_string(tenant.db_connection_string)
+
+
+
+

@@ -280,6 +280,7 @@ class PatientMedicalHistorySchema(BaseModel):
     patient: PatientHistoryDemographicSchema
     summary: dict[str, int]
     allergies: Optional[str] = None
+    structured_allergies: list[dict[str, Any]] = []
     visits: list[VisitHistoryEntrySchema] = []
     consultations: list[ConsultationHistoryEntrySchema] = []
     diagnoses: list[DiagnosisHistoryEntrySchema] = []

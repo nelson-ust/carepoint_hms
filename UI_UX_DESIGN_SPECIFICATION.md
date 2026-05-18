@@ -15,6 +15,14 @@
 ## 🗺️ 3. Master Form & Endpoint Registry
 This section contains **every form and page** in the system, mapped to their specific API endpoints and Pydantic schemas.
 
+> **Source of truth.** This registry is derived from the FastAPI app's OpenAPI schema (the same one served at `/openapi.json`). To regenerate it from the current code — picking up any new endpoints, renamed fields, or modified payload/response shapes — run:
+>
+> ```bash
+> python scripts/generate_ui_ux_spec.py
+> ```
+>
+> The script preserves the **Design Language**, **Frontend Architecture**, and the introduction above; it only rewrites everything from this line down. Run it whenever a router or schema changes — the doc never has to drift again.
+
 ### 📦 Module: TENANT (File: tenant_routes.py)
 #### Form/Action: Register Tenant
 - **Endpoint**: `POST /tenants/register`
@@ -3906,23 +3914,25 @@ This section contains **every form and page** in the system, mapped to their spe
 
 #### Form/Action: Forgot Password
 - **Endpoint**: `POST /auth/forgot-password`
+- **Description**: Initiates a password reset. Generates a short opaque token, stores its encrypted form on the user's `password_reset_token` column (with `password_reset_token_expires_at`), and emails the raw token inside a reset link. Tenant users require the `X-Tenant-Code` header so the request resolves to the correct tenant DB; SaaS Admins are resolved against the Master DB. Email delivery is tried via the tenant's `TenantEmailConfig` first, falling back to the application's default SMTP. Response is always the same masked message regardless of whether the account exists.
 **Request Payload:**
 ```json
 {
-  "identifier": "string"
+  "identifier": "user@example.com"
 }
 ```
-**Response Body:**
+**Response Body** (`200`):
 ```json
 {
-  "success": false,
-  "message": "string"
+  "success": true,
+  "message": "If the account exists, password reset instructions have been sent."
 }
 ```
 ---
 
 #### Form/Action: Reset Password
 - **Endpoint**: `POST /auth/reset-password`
+- **Description**: Completes the password reset using the token delivered by `forgot-password`. The token is matched by decrypting the stored value (constant-time compare), checked against `password_reset_token_expires_at`, and the column is cleared on success so the link is single-use. The `reset_token` field tolerates being pasted as a full URL or query string — it will be normalized down to the bare token. Tenant requests require the `X-Tenant-Code` header.
 **Request Payload:**
 ```json
 {
@@ -3931,13 +3941,16 @@ This section contains **every form and page** in the system, mapped to their spe
   "confirm_new_password": "string"
 }
 ```
-**Response Body:**
+**Response Body** (`200`):
 ```json
 {
-  "success": false,
-  "message": "string"
+  "success": true,
+  "message": "Password reset successful."
 }
 ```
+**Error Responses:**
+- `400 Bad Request` — token invalid, expired, or already used; new password fails strength / history rules; tenant scope mismatch.
+- `404 Not Found` — user/admin no longer exists.
 ---
 
 #### Form/Action: Verify Otp

@@ -41,6 +41,7 @@ from app.models.all_models import (
     LabResult,
     LabTestCatalog,
     Patient,
+    PatientAllergy,
     Prescription,
     PrescriptionItem,
     ProcedureCatalog,
@@ -90,8 +91,7 @@ class PatientMedicalHistoryService:
             "patient_type": str(patient.patient_type) if patient.patient_type else None,
             "phone_number": patient.phone_number,
             "email": patient.email,
-            # ``chronic_conditions`` is reserved for future extension.
-            "chronic_conditions": None,
+            "chronic_conditions": patient.chronic_conditions,
         }
 
     # ----- per-relationship loaders ----------------------------------------
@@ -284,6 +284,18 @@ class PatientMedicalHistoryService:
                 Admission.is_deleted.is_(False),
             )
             .order_by(Admission.admitted_at.desc())
+            .all()
+        )
+
+    def _structured_allergies(self, patient_id: int) -> list[PatientAllergy]:
+        return list(
+            self.db.query(PatientAllergy)
+            .filter(
+                PatientAllergy.patient_id == patient_id,
+                PatientAllergy.is_deleted.is_(False),
+                PatientAllergy.is_active.is_(True),
+            )
+            .order_by(PatientAllergy.id.desc())
             .all()
         )
 
@@ -586,6 +598,16 @@ class PatientMedicalHistoryService:
                 "vital_signs": len(vitals),
             },
             "allergies": patient.allergies,
+            "structured_allergies": [
+                {
+                    "id": a.id,
+                    "allergen_name": a.allergen_name,
+                    "severity": str(a.severity),
+                    "reaction": a.reaction_description,
+                    "is_active": a.is_active,
+                }
+                for a in self._structured_allergies(patient.id)
+            ],
             "visits": [self._visit_dict(v) for v in visits],
             "consultations": [self._consultation_dict(c) for c in consultations],
             "diagnoses": [self._diagnosis_dict(d) for d in diagnoses],

@@ -59,6 +59,9 @@ from app.schemas.patient_schemas import (
     PatientScannedFormCreateSchema,
     PatientScannedFormReadSchema,
     PatientUpdateSchema,
+    PatientAllergyCreateSchema,
+    PatientAllergyReadSchema,
+    PatientAllergyUpdateSchema,
 )
 from app.services.patient_service import PatientService
 from app.utils.pagination import paginate_response
@@ -577,3 +580,77 @@ def delete_patient(
         "success": True,
         "message": f"Patient '{patient.hospital_number}' deleted successfully.",
     }
+
+
+# ============================================================
+# ALLERGY ROUTES
+# ============================================================
+
+@router.post(
+    "/{patient_id}/allergies",
+    response_model=PatientAllergyReadSchema,
+    status_code=status.HTTP_201_CREATED,
+    summary="Add patient allergy",
+)
+def add_patient_allergy(
+    patient_id: int,
+    payload: PatientAllergyCreateSchema,
+    _: AdminUser,
+    service: Annotated[PatientService, Depends(get_patient_service)],
+):
+    """
+    Add a structured allergy record for a patient.
+    """
+    return service.add_patient_allergy(patient_id, payload)
+
+
+@router.get(
+    "/{patient_id}/allergies",
+    response_model=list[PatientAllergyReadSchema],
+    status_code=status.HTTP_200_OK,
+    summary="List patient allergies",
+)
+def list_patient_allergies(
+    patient_id: int,
+    _: AnyAuthenticatedUser,
+    service: Annotated[PatientService, Depends(get_patient_service)],
+):
+    """
+    Return all structured allergies for a patient.
+    """
+    return service.list_patient_allergies(patient_id)
+
+
+@router.put(
+    "/allergies/{allergy_id}",
+    response_model=PatientAllergyReadSchema,
+    status_code=status.HTTP_200_OK,
+    summary="Update patient allergy",
+)
+def update_patient_allergy(
+    allergy_id: int,
+    payload: PatientAllergyUpdateSchema,
+    _: AdminUser,
+    service: Annotated[PatientService, Depends(get_patient_service)],
+):
+    """
+    Update an existing allergy record.
+    """
+    return service.update_patient_allergy(allergy_id, payload)
+
+
+@router.delete(
+    "/allergies/{allergy_id}",
+    status_code=status.HTTP_200_OK,
+    summary="Delete patient allergy",
+)
+def delete_patient_allergy(
+    allergy_id: int,
+    _: AdminUser,
+    service: Annotated[PatientService, Depends(get_patient_service)],
+):
+    """
+    Soft-delete an allergy record.
+    """
+    service.delete_patient_allergy(allergy_id)
+    return {"success": True, "message": "Allergy record deleted successfully."}

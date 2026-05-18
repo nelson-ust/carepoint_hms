@@ -42,6 +42,7 @@ class TestPatientLifecycle:
             client, auth_header,
             date_of_birth="1990-01-01",
             phone_number="1234567890",
+            chronic_conditions="Asthma",
         )
         assert response.status_code == 201, f"Expected 201, got {response.status_code}: {response.text}"
         data = response.json()
@@ -52,24 +53,31 @@ class TestPatientLifecycle:
 
     def test_get_patient(self, client, auth_header):
         # First create
-        create_res = _create_patient(client, auth_header, gender="FEMALE")
+        create_res = _create_patient(client, auth_header, gender="FEMALE", chronic_conditions="Diabetes")
         assert create_res.status_code == 201
         patient_id = create_res.json()["patient_id"]
 
         # Then fetch
         response = client.get(f"/api/v1/patients/{patient_id}", headers=auth_header)
         assert response.status_code == 200
-        assert response.json()["id"] == patient_id
+        data = response.json()
+        assert data["id"] == patient_id
+        assert data["chronic_conditions"] == "Diabetes"
 
     def test_update_patient(self, client, auth_header):
         create_res = _create_patient(client, auth_header, gender="OTHER")
         assert create_res.status_code == 201
         patient_id = create_res.json()["patient_id"]
 
-        update_payload = {"first_name": _unique("Updated")}
+        update_payload = {
+            "first_name": _unique("Updated"),
+            "chronic_conditions": "Hypertension"
+        }
         response = client.put(f"/api/v1/patients/{patient_id}", json=update_payload, headers=auth_header)
         assert response.status_code == 200
-        assert response.json()["first_name"] == update_payload["first_name"]
+        data = response.json()
+        assert data["first_name"] == update_payload["first_name"]
+        assert data["chronic_conditions"] == "Hypertension"
 
     def test_search_patients(self, client, auth_header):
         unique_name = _unique("SearchTarget")

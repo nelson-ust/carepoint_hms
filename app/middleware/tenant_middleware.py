@@ -65,10 +65,6 @@ IGNORE_PREFIXES: tuple[str, ...] = (
     "/uploads",
     "/api/v1/health",
     "/api/v1/ready",
-    "/api/v1/tenants",          # SaaS tenant onboarding/management (master DB)
-    "/api/v1/saas",             # SaaS admin endpoints
-    "/api/v1/subscription-plans",
-    "/api/v1/auth/saas",        # SaaS admin authentication
     # Edge-node sync uses its own bearer token; tenant context is
     # resolved from the node row, not from the request URL.
     "/api/v1/edge-nodes",

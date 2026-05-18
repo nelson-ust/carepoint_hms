@@ -60,6 +60,7 @@ from app.core.enums import (
     Genotype,
     MaritalStatus,
     PatientType,
+    AllergySeverity,
 )
 
 
@@ -219,6 +220,61 @@ class PatientIdentifierReadSchema(BaseModel):
     is_primary: bool
     is_active: bool
     note: Optional[str] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+
+# ============================================================
+# ALLERGY SCHEMAS
+# ============================================================
+
+class PatientAllergyBaseSchema(BaseModel):
+    """
+    Base schema for patient allergies.
+    """
+    allergen_name: str = Field(..., min_length=1, max_length=255)
+    severity: AllergySeverity = Field(default=AllergySeverity.UNKNOWN)
+    reaction_description: Optional[str] = None
+    is_active: bool = True
+
+    @field_validator("allergen_name")
+    @classmethod
+    def normalize_allergen_name(cls, value: str) -> str:
+        return value.strip()
+
+
+class PatientAllergyCreateSchema(PatientAllergyBaseSchema):
+    """
+    Schema for creating a patient allergy record.
+    """
+    pass
+
+
+class PatientAllergyUpdateSchema(BaseModel):
+    """
+    Schema for updating a patient allergy record.
+    """
+    allergen_name: Optional[str] = Field(None, min_length=1, max_length=255)
+    severity: Optional[AllergySeverity] = None
+    reaction_description: Optional[str] = None
+    is_active: Optional[bool] = None
+
+    @field_validator("allergen_name")
+    @classmethod
+    def normalize_allergen_name(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return value
+        return value.strip()
+
+
+class PatientAllergyReadSchema(PatientAllergyBaseSchema):
+    """
+    Read schema for patient allergies.
+    """
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    patient_id: int
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 
@@ -665,6 +721,7 @@ class PatientBaseSchema(BaseModel):
     blood_group: Optional[BloodGroup] = None
     genotype: Optional[Genotype] = None
     allergies: Optional[str] = None
+    chronic_conditions: Optional[str] = None
 
     emergency_contact_name: Optional[str] = Field(None, max_length=200)
     emergency_contact_phone: Optional[str] = Field(None, max_length=30)
@@ -832,6 +889,7 @@ class PatientUpdateSchema(BaseModel):
     blood_group: Optional[BloodGroup] = None
     genotype: Optional[Genotype] = None
     allergies: Optional[str] = None
+    chronic_conditions: Optional[str] = None
 
     emergency_contact_name: Optional[str] = Field(None, max_length=200)
     emergency_contact_phone: Optional[str] = Field(None, max_length=30)
@@ -903,7 +961,7 @@ class PatientUpdateSchema(BaseModel):
         normalized = value.strip().replace(" ", "")
         return normalized or None
 
-    @field_validator("address", "allergies", "next_of_kin_address")
+    @field_validator("address", "allergies", "chronic_conditions", "next_of_kin_address")
     @classmethod
     def normalize_long_text_fields(cls, value: Optional[str]) -> Optional[str]:
         if value is None:
@@ -973,7 +1031,11 @@ class PatientReadSchema(BaseModel):
 
     blood_group: Optional[BloodGroup] = None
     genotype: Optional[Genotype] = None
-    allergies: Optional[str] = None
+    chronic_conditions: Optional[str] = None
+    
+    # Structure allergies are in structured_allergies; 
+    # we keep this for backward compatibility if the client still expects a string.
+    allergies_summary: Optional[str] = Field(None, alias="allergies")
 
     emergency_contact_name: Optional[str] = None
     emergency_contact_phone: Optional[str] = None
@@ -1009,6 +1071,7 @@ class PatientReadSchema(BaseModel):
 
     registrations: list[PatientRegistrationReadSchema] = Field(default_factory=list)
     identifiers: list[PatientIdentifierReadSchema] = Field(default_factory=list)
+    structured_allergies: list[PatientAllergyReadSchema] = Field(default_factory=list, validation_alias="patient_allergies")
 
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
@@ -1026,6 +1089,14 @@ class PatientExtendedReadSchema(PatientReadSchema):
     consent_records: list[PatientConsentReadSchema] = Field(default_factory=list)
     scanned_forms: list[PatientScannedFormReadSchema] = Field(default_factory=list)
     demographic_audits: list[PatientDemographicAuditReadSchema] = Field(default_factory=list)
+    
+    # Missing critical records added
+    appointments: list[Any] = Field(default_factory=list)
+    visits: list[Any] = Field(default_factory=list)
+    admissions: list[Any] = Field(default_factory=list)
+    surgical_cases: list[Any] = Field(default_factory=list)
+    incident_reports: list[Any] = Field(default_factory=list)
+    # We can also add more detailed clinical history here in the future
 
     @model_validator(mode="before")
     @classmethod

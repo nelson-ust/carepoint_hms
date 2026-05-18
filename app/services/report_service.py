@@ -15,11 +15,17 @@ from app.schemas.report_schemas import (
 )
 from app.repositories.report_repository import ReportRepository
 from app.core.database import get_master_db_context
+from app.services.aws_s3_service import S3Service
+from app.models.all_models import (
+    WarehouseExportJob, WarehouseExportRun, WarehouseTableSnapshot, 
+    WarehouseJobStatus, WarehouseExportType
+)
 
 class ReportService:
     def __init__(self, db: Session):
         self.db = db
         self.repo = ReportRepository(db)
+        self.s3 = S3Service()
 
     def get_tenant_financial_summary(self, start_date: Optional[date] = None, end_date: Optional[date] = None) -> TenantFinancialSummary:
         inv_stats, pay_stats = self.repo.get_financial_stats(start_date, end_date)
@@ -215,3 +221,126 @@ class ReportService:
                 total_api_calls=usage_stats.total_api_calls or 0,
                 system_health_status="HEALTHY"
             )
+
+    def process_warehouse_export(self, run_id: int):
+        """
+        Processes a single warehouse export run.
+        Extracts data based on the job's source_query, generates a snapshot,
+        and uploads it to S3.
+        """
+        run = self.db.query(WarehouseExportRun).filter(WarehouseExportRun.id == run_id).first()
+        if not run:
+            raise ValueError(f"WarehouseExportRun {run_id} not found")
+
+        job = run.job
+        if not job or not job.source_query:
+            run.status = WarehouseJobStatus.FAILED
+            run.error_message = "Job or source_query missing"
+            run.finished_at = datetime.now(timezone.utc)
+            self.db.commit()
+            return
+
+        try:
+            # 1. Execute the source query
+            # We use text() to execute raw SQL from source_query
+            from sqlalchemy import text
+            result = self.db.execute(text(job.source_query))
+            df = pd.DataFrame(result.fetchall(), columns=result.keys())
+            
+            run.rows_extracted = len(df)
+            
+            # 2. Generate the file (CSV or Excel based on job type)
+            buffer = io.BytesIO()
+            file_extension = "csv"
+            content_type = "text/csv"
+            
+            if job.export_type == WarehouseExportType.EXCEL:
+                df.to_excel(buffer, index=False)
+                file_extension = "xlsx"
+                content_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            else:
+                df.to_csv(buffer, index=False)
+            
+            buffer.seek(0)
+            file_size = buffer.getbuffer().nbytes
+            run.bytes_written = file_size
+            
+            # 3. Upload to S3
+            tenant = self.db.query(Tenant).filter(Tenant.id == job.tenant_id).first()
+            tenant_code = tenant.code if tenant else "unknown"
+            
+            # Get bucket name (assumes bucket is provisioned)
+            bucket_name = f"carepoint-hms-{tenant_code.lower()}-reports" 
+            # In production, this might be settings.S3_REPORTS_BUCKET
+            
+            s3_key = f"warehouse/{job.code}/{run.id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.{file_extension}"
+            
+            # Use a mockable upload method
+            file_url = self._upload_buffer_to_s3(buffer, bucket_name, s3_key, content_type)
+            
+            # 4. Create Snapshot record
+            snapshot = WarehouseTableSnapshot(
+                run_id=run.id,
+                source_table="DYNAMIC_QUERY",
+                target_table=job.target_dataset,
+                snapshot_taken_at=datetime.now(timezone.utc),
+                snapshot_uri=file_url,
+                row_count=len(df),
+                column_count=len(df.columns)
+            )
+            self.db.add(snapshot)
+            
+            # 5. Finalize run
+            run.status = WarehouseJobStatus.COMPLETED
+            run.finished_at = datetime.now(timezone.utc)
+            
+        except Exception as e:
+            run.status = WarehouseJobStatus.FAILED
+            run.error_message = str(e)
+            run.finished_at = datetime.now(timezone.utc)
+            raise e
+        finally:
+            self.db.commit()
+
+    def generate_and_upload_report(self, report_type: str, file_type: str = "pdf") -> str:
+        """
+        Generates a report, uploads it to S3, and returns the public URL.
+        Useful for background scheduled reports.
+        """
+        buffer, filename = self.generate_on_the_fly_report(report_type, file_type)
+        
+        # Determine bucket and key
+        # We'd ideally have a way to resolve the current tenant code here.
+        # For now, we'll use a generic reports bucket or extract from DB.
+        tenant_id = getattr(self.db, "tenant_id", "shared") 
+        bucket_name = f"carepoint-hms-reports"
+        s3_key = f"scheduled/{tenant_id}/{filename}"
+        
+        content_type = "application/pdf" if file_type == "pdf" else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        
+        url = self._upload_buffer_to_s3(buffer, bucket_name, s3_key, content_type)
+        return url
+
+    def _upload_buffer_to_s3(self, buffer: io.BytesIO, bucket_name: str, s3_key: str, content_type: str) -> str:
+        """Helper to upload a BytesIO buffer to S3."""
+        if not self.s3.is_enabled:
+            # Fallback for dev/intranet: save to local filesystem or just log
+            logger.warning(f"S3 disabled. Mocking upload for {s3_key}")
+            return f"file://local_storage/{s3_key}"
+
+        try:
+            self.s3.s3_client.upload_fileobj(
+                buffer,
+                bucket_name,
+                s3_key,
+                ExtraArgs={'ContentType': content_type}
+            )
+            
+            if settings.AWS_ENDPOINT_URL:
+                base_url = settings.AWS_ENDPOINT_URL.rstrip('/')
+                return f"{base_url}/{bucket_name}/{s3_key}"
+            else:
+                return f"https://{bucket_name}.s3.{self.s3.region}.amazonaws.com/{s3_key}"
+        except Exception as e:
+            logger.error(f"S3 Upload failed: {e}")
+            raise e

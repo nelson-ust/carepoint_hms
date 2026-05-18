@@ -15,7 +15,8 @@ class S3Service:
             "s3",
             aws_access_key_id=settings.AWS_ACCESS_KEY_ID.get_secret_value() if settings.AWS_ACCESS_KEY_ID else None,
             aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY.get_secret_value() if settings.AWS_SECRET_ACCESS_KEY else None,
-            region_name=settings.AWS_DEFAULT_REGION or "us-east-1"
+            region_name=settings.AWS_DEFAULT_REGION or "us-east-1",
+            endpoint_url=settings.AWS_ENDPOINT_URL
         )
         self.region = settings.AWS_DEFAULT_REGION or "us-east-1"
         self.is_enabled = settings.S3_ENABLED
@@ -71,8 +72,15 @@ class S3Service:
             )
             
             # Construct the public URL
-            url = f"https://{bucket_name}.s3.{self.region}.amazonaws.com/{s3_key}"
-            logger.info(f"Successfully uploaded file to S3: {url}")
+            if settings.AWS_ENDPOINT_URL:
+                # Local/MinIO format
+                base_url = settings.AWS_ENDPOINT_URL.rstrip('/')
+                url = f"{base_url}/{bucket_name}/{s3_key}"
+            else:
+                # Standard AWS S3 format
+                url = f"https://{bucket_name}.s3.{self.region}.amazonaws.com/{s3_key}"
+                
+            logger.info(f"Successfully uploaded file to Storage: {url}")
             return url
         except ClientError as e:
             logger.error(f"Failed to upload file to S3: {e}")

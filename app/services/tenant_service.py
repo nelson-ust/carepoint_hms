@@ -854,6 +854,68 @@ class TenantService:
         self.db.commit()
         return tenant
 
+    def change_subscription_plan(self, tenant_id: int, plan_code: str) -> TenantSubscription:
+        """
+        Transition a tenant to a different subscription plan.
+
+        This method:
+        1. Validates the tenant and the new plan.
+        2. Cancels the currently active subscription.
+        3. Creates a new active subscription for the target plan.
+        4. (Optional) In a real billing system, this would trigger proration
+           calculations and an immediate invoice.
+        """
+        tenant = self.get_tenant(tenant_id)
+
+        # 1. Resolve target plan
+        new_plan = self.db.query(SubscriptionPlan).filter(
+            SubscriptionPlan.code == plan_code.upper().strip(),
+            SubscriptionPlan.is_active == True
+        ).first()
+
+        if not new_plan:
+            raise NotFoundError(message=f"Active subscription plan '{plan_code}' not found.")
+
+        # 2. Find and cancel current active subscription
+        current_sub = self.db.query(TenantSubscription).filter(
+            TenantSubscription.tenant_id == tenant.id,
+            TenantSubscription.status.in_([SubscriptionStatus.ACTIVE, SubscriptionStatus.TRIALING])
+        ).first()
+
+        now = datetime.now(timezone.utc)
+
+        if current_sub:
+            if current_sub.plan_id == new_plan.id:
+                 # Already on this plan
+                 return current_sub
+
+            current_sub.status = SubscriptionStatus.CANCELLED
+            current_sub.end_date = now
+            current_sub.auto_renew = False
+
+        # 3. Create new subscription
+        # New period starts now
+        period_end = _period_end_for_plan(new_plan, now)
+
+        new_sub = TenantSubscription(
+            tenant_id=tenant.id,
+            plan_id=new_plan.id,
+            status=SubscriptionStatus.ACTIVE,
+            start_date=now,
+            current_period_start=now,
+            current_period_end=period_end,
+            next_invoice_at=period_end,  # Next invoice due at end of period
+            auto_renew=True
+        )
+
+        self.db.add(new_sub)
+        self.db.commit()
+        self.db.refresh(new_sub)
+
+        logger.info(f"Tenant {tenant.code} changed plan to {plan_code}")
+
+        return new_sub
+
     def run_migrations_all_tenants(self) -> dict:
         """
         Run database initialization/migrations for every active, provisioned
@@ -908,3 +970,33 @@ class TenantService:
             health["s3_storage"] = "DISABLED"
             
         return health
+
+def provision_tenant_background_task(tenant_id: int) -> None:
+    """
+    Background worker function that physically provisions a tenant database.
+
+    Why a dedicated database context is needed:
+    -------------------------------------------
+    When a background task is triggered by a FastAPI endpoint, the `Session` 
+    dependency injected into the route is closed as soon as the HTTP response 
+    is returned to the client. If this background task attempted to reuse 
+    that session, a "Session is closed" exception would occur.
+
+    To resolve this, we utilize `get_master_db_context()` to spin up an entirely 
+    new, independent connection strictly for the lifespan of this worker process.
+    """
+    logger.info(f"Starting background provisioning for tenant_id {tenant_id}")
+    
+    # 1. Open a new, isolated connection to the master database
+    with get_master_db_context() as db:
+        # 2. Instantiate a fresh TenantService bound to our new background session
+        service = TenantService(db)
+        try:
+            # 3. Execute the heavy lifting: physical database creation, Alembic 
+            # migrations, seeding roles/settings, and sending the confirmation email.
+            service.provision_tenant(tenant_id)
+            logger.info(f"Successfully provisioned tenant_id {tenant_id}")
+        except Exception as e:
+            # 4. Catch and log all exceptions. Unhandled exceptions in background 
+            # tasks are silently swallowed by FastAPI, so explicit logging is critical.
+            logger.exception(f"Background provisioning failed for tenant_id {tenant_id}: {e}")

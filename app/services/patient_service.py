@@ -57,6 +57,8 @@ from app.schemas.patient_schemas import (
     PatientLoyaltyEnrollmentSchema,
     PatientScannedFormCreateSchema,
     PatientUpdateSchema,
+    PatientAllergyCreateSchema,
+    PatientAllergyUpdateSchema,
 )
 
 from app.utils.audit_util import log_entity_change, build_audit_payload
@@ -184,6 +186,7 @@ class PatientService:
             national_identifier=payload.national_identifier,
             national_identifier_type=payload.national_identifier_type,
             identification_details=payload.identification_details,
+            chronic_conditions=payload.chronic_conditions,
         )
 
         registration = self.repository.create_registration_event(
@@ -504,6 +507,8 @@ class PatientService:
             patient.genotype = payload.genotype
         if payload.allergies is not None:
             patient.allergies = payload.allergies
+        if payload.chronic_conditions is not None:
+            patient.chronic_conditions = payload.chronic_conditions
 
         if payload.emergency_contact_name is not None:
             patient.emergency_contact_name = payload.emergency_contact_name
@@ -755,6 +760,61 @@ class PatientService:
         deleted = self.repository.soft_delete_patient(patient)
         self.db.commit()
         return deleted
+
+    # ============================================================
+    # ALLERGIES
+    # ============================================================
+
+    def add_patient_allergy(
+        self,
+        patient_id: int,
+        payload: PatientAllergyCreateSchema,
+    ):
+        self.get_patient(patient_id)
+        allergy = self.repository.create_patient_allergy(
+            patient_id=patient_id,
+            allergen_name=payload.allergen_name,
+            severity=payload.severity,
+            reaction_description=payload.reaction_description,
+            is_active=payload.is_active,
+        )
+        self.db.commit()
+        return allergy
+
+    def list_patient_allergies(self, patient_id: int):
+        self.get_patient(patient_id)
+        return self.repository.list_patient_allergies(patient_id)
+
+    def update_patient_allergy(
+        self,
+        allergy_id: int,
+        payload: PatientAllergyUpdateSchema,
+    ):
+        allergy = self.repository.get_patient_allergy_by_id(allergy_id)
+        if not allergy:
+            raise NotFoundError(message="Patient allergy record not found.")
+
+        if payload.allergen_name is not None:
+            allergy.allergen_name = payload.allergen_name
+        if payload.severity is not None:
+            allergy.severity = payload.severity
+        if payload.reaction_description is not None:
+            allergy.reaction_description = payload.reaction_description
+        if payload.is_active is not None:
+            allergy.is_active = payload.is_active
+
+        updated = self.repository.update_patient_allergy(allergy)
+        self.db.commit()
+        return updated
+
+    def delete_patient_allergy(self, allergy_id: int):
+        allergy = self.repository.get_patient_allergy_by_id(allergy_id)
+        if not allergy:
+            raise NotFoundError(message="Patient allergy record not found.")
+
+        self.repository.soft_delete_patient_allergy(allergy)
+        self.db.commit()
+        return True
 
     # ============================================================
     # HELPERS

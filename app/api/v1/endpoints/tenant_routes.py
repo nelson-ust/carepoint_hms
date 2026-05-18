@@ -1,6 +1,7 @@
 # app/api/v1/endpoints/tenant_routes.py
 from typing import Annotated
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, status, BackgroundTasks
+import threading
 from sqlalchemy.orm import Session
 
 from app.core.database import get_master_db # We need a master db dependency
@@ -9,7 +10,8 @@ from app.schemas.tenant_schemas import (
     TenantRegistrationSchema, 
     TenantReadSchema, 
     TenantListResponseSchema, 
-    TenantUpdateStatusSchema
+    TenantUpdateStatusSchema,
+    TenantChangePlanSchema
 )
 from app.services.tenant_service import TenantService
 from typing import Optional
@@ -76,35 +78,57 @@ def approve_tenant(
     service: Annotated[TenantService, Depends(get_tenant_service)],
 ):
     """
-    Approve a pending tenant application and provision its database.
+    Approve a pending tenant application and provision its database asynchronously.
 
-    This is the **only** entry point that creates a tenant database.
-    Steps performed by the underlying service:
+    This endpoint performs the following workflow:
+      1. Verifies the tenant exists and is not already provisioned.
+      2. Dispatches the heavy database creation and migration logic onto a
+         detached daemon thread. This ensures the API immediately responds
+         and prevents the HTTP database session from timing out.
+      3. Returns a 'PROVISIONING' status to the client, indicating that the 
+         setup is actively running behind the scenes.
 
-      1. Create the physical PostgreSQL database for the tenant.
-      2. Create tables and seed defaults (roles, permissions,
-         departments, service points).
-      3. Create the tenant admin user from the captured registration
-         data.
-      4. Bootstrap default :class:`TenantSetting`.
-      5. Mark the tenant ``ACTIVE`` and the subscription ``ACTIVE``
-         (TRIALING is preserved).
-      6. Provision the tenant's S3 bucket (best-effort).
-      7. Email the applicant that their tenant environment is now live.
-
-    Idempotent: if the tenant is already provisioned the endpoint is a
-    no-op and returns the current record.
+    The actual execution happens in `provision_tenant_background_task` which uses
+    its own dedicated database connection.
     """
-    tenant = service.provision_tenant(tenant_id)
+    # 1. Fetch the tenant from the master database to verify existence
+    tenant = service.get_tenant(tenant_id)
+    
+    # 2. Idempotency Check: Prevent queuing multiple provisioning tasks 
+    # if the tenant is already fully set up.
+    if tenant.is_provisioned:
+        return {
+            "success": True,
+            "message": f"Tenant '{tenant.name}' is already provisioned.",
+            "tenant_id": tenant.id,
+            "status": tenant.status.value if hasattr(tenant.status, 'value') else tenant.status,
+            "is_provisioned": True,
+        }
+
+    # 3. Import the background worker function dynamically to avoid circular dependencies
+    from app.services.tenant_service import provision_tenant_background_task
+    
+    # 4. Schedule the provisioning task in a completely detached thread.
+    # We use threading.Thread instead of FastAPI's BackgroundTasks because 
+    # BackgroundTasks keeps the request's dependencies (including the DB session) 
+    # open until the task completes. A long provisioning process would cause the 
+    # DB connection to time out, resulting in an OperationalError on teardown.
+    threading.Thread(
+        target=provision_tenant_background_task,
+        args=(tenant_id,),
+        daemon=True
+    ).start()
+
+    # 5. Return an immediate acknowledgment so the UI doesn't hang.
     return {
         "success": True,
         "message": (
-            f"Tenant '{tenant.name}' has been approved and provisioned. "
-            f"The applicant has been notified by email."
+            f"Tenant '{tenant.name}' has been approved. Database provisioning "
+            f"is running in the background. The applicant will be notified by email once complete."
         ),
         "tenant_id": tenant.id,
-        "status": "ACTIVE",
-        "is_provisioned": True,
+        "status": "PROVISIONING",
+        "is_provisioned": False,
     }
 
 @router.get(
@@ -158,3 +182,29 @@ def update_tenant_status(
     Requires SaaS Superuser access.
     """
     return service.update_tenant_status(tenant_id, new_status=payload.status)
+
+
+@router.post(
+    "/{tenant_id}/change-plan",
+    response_model=dict,
+    status_code=status.HTTP_200_OK,
+    summary="Change a tenant's subscription plan",
+)
+def change_tenant_plan(
+    tenant_id: int,
+    payload: TenantChangePlanSchema,
+    _: CurrentSaaSSuperuser,
+    service: Annotated[TenantService, Depends(get_tenant_service)],
+):
+    """
+    Switch a tenant to a different subscription plan.
+    Requires SaaS Superuser access.
+    """
+    subscription = service.change_subscription_plan(tenant_id, payload.plan_code)
+    return {
+        "success": True,
+        "message": f"Tenant plan successfully changed to '{payload.plan_code}'.",
+        "subscription_id": subscription.id,
+        "plan_id": subscription.plan_id,
+        "status": subscription.status,
+    }

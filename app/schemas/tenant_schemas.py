@@ -111,6 +111,10 @@ class TenantUpdateStatusSchema(BaseModel):
     status: str
 
 
+class TenantChangePlanSchema(BaseModel):
+    plan_code: str
+
+
 class TenantListResponseSchema(BaseModel):
     total_count: int
     page: int

@@ -89,238 +89,269 @@ def check_production_safety(destructive: bool = False) -> None:
 # =============================================================================
 
 ROLE_SEEDS: list[dict[str, Any]] = [
-    {
-        "name": "TENANT_ADMIN",
-        "code": "TENANT_ADMIN",
-        "description": "System super administrator with full platform access.",
-    },
-    {
-        "name": "ADMIN",
-        "code": "ADMIN",
-        "description": "Hospital administrator with broad operational access.",
-    },
-    {
-        "name": "REGISTRAR",
-        "code": "REGISTRAR",
-        "description": "Registration/front desk officer.",
-    },
-    {
-        "name": "CLINICIAN",
-        "code": "CLINICIAN",
-        "description": "Generic clinical practitioner role.",
-    },
-    {
-        "name": "DOCTOR",
-        "code": "DOCTOR",
-        "description": "Medical doctor role.",
-    },
-    {
-        "name": "NURSE",
-        "code": "NURSE",
-        "description": "Nursing staff role.",
-    },
-    {
-        "name": "LAB_SCIENTIST",
-        "code": "LAB_SCIENTIST",
-        "description": "Laboratory scientist role.",
-    },
-    {
-        "name": "LAB_TECHNICIAN",
-        "code": "LAB_TECHNICIAN",
-        "description": "Laboratory technician role.",
-    },
-    {
-        "name": "PHARMACIST",
-        "code": "PHARMACIST",
-        "description": "Pharmacy role.",
-    },
-    {
-        "name": "BILLING_OFFICER",
-        "code": "BILLING_OFFICER",
-        "description": "Billing and invoice management role.",
-    },
-    {
-        "name": "CASHIER",
-        "code": "CASHIER",
-        "description": "Payment collection role.",
-    },
-    {
-        "name": "HR_MANAGER",
-        "code": "HR_MANAGER",
-        "description": "Human resources manager role.",
-    },
-    {
-        "name": "HR_OFFICER",
-        "code": "HR_OFFICER",
-        "description": "Human resources operations role.",
-    },
+    {"code": "TENANT_ADMIN", "name": "Tenant Administrator", "description": "Full system access."},
+    {"code": "ADMIN", "name": "Administrator", "description": "General administrative access."},
+    {"code": "DOCTOR", "name": "Doctor", "description": "Full clinical access."},
+    {"code": "NURSE", "name": "Nurse", "description": "Nursing and triage access."},
+    {"code": "CLINICIAN", "name": "Clinician", "description": "General clinical access."},
+    {"code": "LAB_SCIENTIST", "name": "Laboratory Scientist", "description": "Lab management and verification."},
+    {"code": "LAB_TECHNICIAN", "name": "Laboratory Technician", "description": "Lab test performance."},
+    {"code": "PHARMACIST", "name": "Pharmacist", "description": "Pharmacy and stock management."},
+    {"code": "BILLING_OFFICER", "name": "Billing Officer", "description": "Billing and invoice management."},
+    {"code": "CASHIER", "name": "Cashier", "description": "Payment collection."},
+    {"code": "RECEPTIONIST", "name": "Receptionist", "description": "Registration and appointments."},
+    {"code": "HR_MANAGER", "name": "HR Manager", "description": "Workforce management."},
+    {"code": "HR_OFFICER", "name": "HR Officer", "description": "HR administrative support."},
+    {"code": "RADIOLOGIST", "name": "Radiologist", "description": "Radiology reporting."},
+    {"code": "RADIOGRAPHER", "name": "Radiographer", "description": "Radiology imaging."},
+    {"code": "SURGEON", "name": "Surgeon", "description": "Surgical procedures."},
+    {"code": "ANAESTHETIST", "name": "Anaesthetist", "description": "Anaesthesia management."},
+    {"code": "THEATRE_NURSE", "name": "Theatre Nurse", "description": "Surgical support."},
+    {"code": "INSURANCE_OFFICER", "name": "Insurance Officer", "description": "Claims management."},
+    {"code": "INSURANCE_REVIEWER", "name": "Insurance Reviewer", "description": "Claims adjudication."},
+    {"code": "PATIENT", "name": "Patient", "description": "Patient portal access."},
 ]
 
 PERMISSION_SEEDS: list[dict[str, Any]] = [
-    # Dashboard
-    {"name": "View Dashboard", "code": "dashboard:view", "module": "DASHBOARD", "description": "View dashboard"},
+    # User & Access Control
+    {"code": "USER_READ", "name": "Read users", "module": "USER"},
+    {"code": "USER_CREATE", "name": "Create users", "module": "USER"},
+    {"code": "USER_UPDATE", "name": "Update users", "module": "USER"},
+    {"code": "USER_DELETE", "name": "Delete users", "module": "USER"},
+    {"code": "USER_MANAGE_STATUS", "name": "Manage user status", "module": "USER"},
+    {"code": "USER_MANAGE_ROLES", "name": "Assign / revoke user roles", "module": "USER"},
+    {"code": "USER_FORCE_PASSWORD_RESET", "name": "Force password reset", "module": "USER"},
+    {"code": "ROLE_READ", "name": "Read roles", "module": "ROLE"},
+    {"code": "ROLE_CREATE", "name": "Create roles", "module": "ROLE"},
+    {"code": "ROLE_UPDATE", "name": "Update roles", "module": "ROLE"},
+    {"code": "ROLE_DELETE", "name": "Delete roles", "module": "ROLE"},
+    {"code": "ROLE_ASSIGN_PERMISSIONS", "name": "Assign permissions to roles", "module": "ROLE"},
+    {"code": "PERMISSION_READ", "name": "Read permissions", "module": "PERMISSION"},
+    {"code": "PERMISSION_MANAGE", "name": "Manage permission catalog", "module": "PERMISSION"},
+    {"code": "TWO_FACTOR_ADMIN", "name": "Administer 2FA challenges", "module": "TWO_FACTOR"},
 
-    # Users (action-level)
-    {"name": "View Users", "code": "users:view", "module": "USERS", "description": "View users"},
-    {"name": "Create Users", "code": "users:create", "module": "USERS", "description": "Create new users"},
-    {"name": "Update Users", "code": "users:update", "module": "USERS", "description": "Update existing users"},
-    {"name": "Delete Users", "code": "users:delete", "module": "USERS", "description": "Soft-delete users"},
-    {"name": "Manage Users", "code": "users:manage", "module": "USERS", "description": "Full user administration"},
-    {"name": "Invite Users", "code": "users:invite", "module": "USERS", "description": "Invite users to the tenant"},
-    {"name": "Lock/Unlock Users", "code": "users:lock", "module": "USERS", "description": "Lock or unlock user accounts"},
+    # Patient
+    {"code": "PATIENT_READ", "name": "Read patients", "module": "PATIENT"},
+    {"code": "PATIENT_CREATE", "name": "Register patients", "module": "PATIENT"},
+    {"code": "PATIENT_UPDATE", "name": "Update patient records", "module": "PATIENT"},
+    {"code": "PATIENT_DELETE", "name": "Deactivate patients", "module": "PATIENT"},
+    {"code": "PATIENT_CARD_VIEW", "name": "View patient membership cards and wallet history", "module": "PATIENT"},
+    {"code": "PATIENT_CARD_CREATE", "name": "Issue new membership cards", "module": "PATIENT"},
+    {"code": "PATIENT_CARD_UPDATE", "name": "Update membership card status", "module": "PATIENT"},
+    {"code": "PATIENT_CARD_FUND", "name": "Credit membership card wallets", "module": "PATIENT"},
+    {"code": "PATIENT_CARD_DEBIT", "name": "Debit membership card wallets", "module": "PATIENT"},
 
-    # RBAC
-    {"name": "View Roles", "code": "roles:view", "module": "RBAC", "description": "View roles"},
-    {"name": "Manage Roles", "code": "roles:manage", "module": "RBAC", "description": "Create, update, and assign roles"},
-    {"name": "View Permissions", "code": "permissions:view", "module": "RBAC", "description": "View permissions"},
-    {"name": "Manage Permissions", "code": "permissions:manage", "module": "RBAC", "description": "Manage permissions"},
+    # Appointment
+    {"code": "APPOINTMENT_READ", "name": "Read appointments", "module": "APPOINTMENT"},
+    {"code": "APPOINTMENT_CREATE", "name": "Create appointments", "module": "APPOINTMENT"},
+    {"code": "APPOINTMENT_UPDATE", "name": "Update appointments", "module": "APPOINTMENT"},
+    {"code": "APPOINTMENT_CANCEL", "name": "Cancel appointments", "module": "APPOINTMENT"},
 
-    # Patients
-    {"name": "Register Patient", "code": "patients:register", "module": "PATIENTS", "description": "Register patients"},
-    {"name": "View Patients", "code": "patients:view", "module": "PATIENTS", "description": "View patient records"},
-    {"name": "Manage Patients", "code": "patients:manage", "module": "PATIENTS", "description": "Manage patient records"},
-
-    # Appointments
-    {"name": "View Appointments", "code": "appointments:view", "module": "APPOINTMENTS", "description": "View appointments"},
-    {"name": "Manage Appointments", "code": "appointments:manage", "module": "APPOINTMENTS", "description": "Manage appointments"},
-
-    # Visits / Queue
-    {"name": "Initiate Visit", "code": "visits:initiate", "module": "VISITS", "description": "Initiate patient visits"},
-    {"name": "Manage Queue", "code": "queue:manage", "module": "QUEUE", "description": "Manage service point queues"},
+    # Visit / Queue
+    {"code": "VISIT_READ", "name": "Read visits", "module": "VISIT"},
+    {"code": "VISIT_INITIATE", "name": "Initiate visits", "module": "VISIT"},
+    {"code": "VISIT_ROUTE", "name": "Route visits", "module": "VISIT"},
+    {"code": "QUEUE_MANAGE", "name": "Manage queue tickets", "module": "QUEUE"},
 
     # Clinical
-    {"name": "Manage Consultation", "code": "consultations:manage", "module": "CLINICAL", "description": "Create and update consultation records"},
-    {"name": "Manage Diagnoses", "code": "diagnoses:manage", "module": "CLINICAL", "description": "Manage clinical diagnoses"},
+    {"code": "TRIAGE_PERFORM", "name": "Perform triage", "module": "CLINICAL"},
+    {"code": "VITAL_SIGN_RECORD", "name": "Record vital signs", "module": "CLINICAL"},
+    {"code": "CONSULTATION_READ", "name": "Read consultations", "module": "CLINICAL"},
+    {"code": "CONSULTATION_WRITE", "name": "Write consultations", "module": "CLINICAL"},
+    {"code": "DIAGNOSIS_WRITE", "name": "Record diagnoses", "module": "CLINICAL"},
+    {"code": "PROCEDURE_ORDER", "name": "Order procedures", "module": "CLINICAL"},
 
     # Lab
-    {"name": "Order Lab Tests", "code": "lab:order", "module": "LAB", "description": "Order lab tests"},
-    {"name": "Manage Lab", "code": "lab:manage", "module": "LAB", "description": "Manage lab orders and results"},
+    {"code": "LAB_ORDER_CREATE", "name": "Create lab orders", "module": "LAB"},
+    {"code": "LAB_RESULT_ENTER", "name": "Enter lab results", "module": "LAB"},
+    {"code": "LAB_RESULT_VERIFY", "name": "Verify lab results", "module": "LAB"},
+    {"code": "LAB_RESULT_RELEASE", "name": "Release lab results", "module": "LAB"},
 
     # Pharmacy
-    {"name": "Prescribe Medication", "code": "pharmacy:prescribe", "module": "PHARMACY", "description": "Prescribe medication"},
-    {"name": "Dispense Medication", "code": "pharmacy:dispense", "module": "PHARMACY", "description": "Dispense medication"},
-    {"name": "Manage Pharmacy", "code": "pharmacy:manage", "module": "PHARMACY", "description": "Manage prescriptions and dispenses"},
+    {"code": "PRESCRIPTION_WRITE", "name": "Write prescriptions", "module": "PHARMACY"},
+    {"code": "PRESCRIPTION_DISPENSE", "name": "Dispense prescriptions", "module": "PHARMACY"},
+    {"code": "PHARMACY_STOCK_MANAGE", "name": "Manage pharmacy stock", "module": "PHARMACY"},
 
-    # Billing
-    {"name": "Manage Billing", "code": "billing:manage", "module": "BILLING", "description": "Manage billing and invoices"},
-    {"name": "Receive Payments", "code": "payments:receive", "module": "BILLING", "description": "Record payments"},
+    # Billing / Finance
+    {"code": "BILLING_READ", "name": "Read billing", "module": "BILLING"},
+    {"code": "BILLING_CREATE", "name": "Create billing", "module": "BILLING"},
+    {"code": "INVOICE_ISSUE", "name": "Issue invoices", "module": "BILLING"},
+    {"code": "INVOICE_VOID", "name": "Void / cancel invoices", "module": "BILLING"},
+    {"code": "PAYMENT_RECEIVE", "name": "Receive payments", "module": "BILLING"},
+    {"code": "PAYMENT_REFUND", "name": "Refund payments", "module": "BILLING"},
 
-    # Inpatient
-    {"name": "Manage Admission", "code": "admission:manage", "module": "ADMISSION", "description": "Manage admissions and discharges"},
+    # Admission / Ward
+    {"code": "ADMISSION_CREATE", "name": "Admit patients", "module": "ADMISSION"},
+    {"code": "ADMISSION_DISCHARGE", "name": "Discharge patients", "module": "ADMISSION"},
+    {"code": "BED_MANAGE", "name": "Manage beds", "module": "ADMISSION"},
+    {"code": "WARD_MANAGE", "name": "Manage wards", "module": "ADMISSION"},
 
     # Inventory
-    {"name": "Manage Inventory", "code": "inventory:manage", "module": "INVENTORY", "description": "Manage inventory and stock"},
-
-    # Ambulance
-    {"name": "Manage Ambulance", "code": "ambulance:manage", "module": "AMBULANCE", "description": "Manage ambulance operations"},
-
-    # HR
-    {"name": "Manage HR", "code": "hr:manage", "module": "HR", "description": "Manage employee HR records"},
+    {"code": "INVENTORY_READ", "name": "Read inventory", "module": "INVENTORY"},
+    {"code": "INVENTORY_MANAGE", "name": "Manage inventory items and stores", "module": "INVENTORY"},
+    {"code": "STOCK_MOVEMENT_POST", "name": "Post stock movements", "module": "INVENTORY"},
 
     # Reports
-    {"name": "View Reports", "code": "reports:view", "module": "REPORTS", "description": "View reports"},
+    {"code": "REPORT_READ", "name": "Read reports", "module": "REPORT"},
+    {"code": "REPORT_GENERATE", "name": "Generate complex reports", "module": "REPORT"},
 
-    # Tenant settings (self-service)
-    {"name": "Manage Tenant Settings", "code": "tenant:settings:manage", "module": "TENANT", "description": "Manage tenant-level settings, branding and modules"},
+    # Audit
+    {"code": "AUDIT_READ", "name": "Read audit trails", "module": "AUDIT"},
+    {"code": "SECURITY_EVENT_READ", "name": "Read security events", "module": "AUDIT"},
+
+    # Ambulance & Dispatch
+    {"code": "AMBULANCE_READ", "name": "Read ambulance fleet", "module": "AMBULANCE"},
+    {"code": "AMBULANCE_MANAGE", "name": "Manage ambulance fleet", "module": "AMBULANCE"},
+    {"code": "DISPATCH_READ", "name": "Read ambulance dispatches", "module": "AMBULANCE"},
+    {"code": "DISPATCH_MANAGE", "name": "Manage ambulance dispatches", "module": "AMBULANCE"},
+
+    # Notifications & Messaging
+    {"code": "NOTIFICATION_READ", "name": "Read notifications", "module": "NOTIFICATION"},
+    {"code": "NOTIFICATION_MANAGE", "name": "Manage notification templates", "module": "NOTIFICATION"},
+    {"code": "NOTIFICATION_DISPATCH", "name": "Send notifications", "module": "NOTIFICATION"},
+    {"code": "MESSAGE_SEND", "name": "Send direct messages", "module": "NOTIFICATION"},
+
+    # Compliance / Governance
+    {"code": "COMPLIANCE_READ", "name": "Read compliance records", "module": "COMPLIANCE"},
+    {"code": "COMPLIANCE_MANAGE", "name": "Manage compliance records", "module": "COMPLIANCE"},
+    {"code": "ACCREDITATION_READ", "name": "Read accreditation records", "module": "COMPLIANCE"},
+    {"code": "ACCREDITATION_MANAGE", "name": "Manage accreditation records", "module": "COMPLIANCE"},
+    {"code": "INCIDENT_READ", "name": "Read incident reports", "module": "COMPLIANCE"},
+    {"code": "INCIDENT_MANAGE", "name": "File incident reports", "module": "COMPLIANCE"},
+    {"code": "INFECTION_LOG_READ", "name": "Read infection control logs", "module": "COMPLIANCE"},
+    {"code": "INFECTION_LOG_MANAGE", "name": "Manage infection control logs", "module": "COMPLIANCE"},
+    {"code": "QUALITY_PROJECT_READ", "name": "Read quality projects", "module": "COMPLIANCE"},
+    {"code": "QUALITY_PROJECT_MANAGE", "name": "Manage quality projects", "module": "COMPLIANCE"},
+    {"code": "GOVERNANCE_DASHBOARD", "name": "Read governance dashboard", "module": "COMPLIANCE"},
+
+    # Procedures
+    {"code": "PROCEDURE_PERFORM", "name": "Perform procedures", "module": "PROCEDURE"},
+    {"code": "PROCEDURE_MANAGE", "name": "Manage procedure catalog", "module": "PROCEDURE"},
+
+    # Radiology
+    {"code": "RADIOLOGY_ORDER", "name": "Order radiology studies", "module": "RADIOLOGY"},
+    {"code": "RADIOLOGY_PERFORM", "name": "Perform radiology exams", "module": "RADIOLOGY"},
+    {"code": "RADIOLOGY_REPORT", "name": "Draft radiology reports", "module": "RADIOLOGY"},
+    {"code": "RADIOLOGY_RELEASE", "name": "Release radiology reports", "module": "RADIOLOGY"},
+    {"code": "RADIOLOGY_MANAGE", "name": "Manage radiology catalog", "module": "RADIOLOGY"},
+
+    # Surgical
+    {"code": "SURGICAL_READ", "name": "Read surgical cases", "module": "SURGICAL"},
+    {"code": "SURGICAL_BOOK", "name": "Book surgical cases", "module": "SURGICAL"},
+    {"code": "SURGICAL_PERFORM", "name": "Drive surgical lifecycle", "module": "SURGICAL"},
+    {"code": "SURGICAL_RECORD", "name": "Record surgical notes", "module": "SURGICAL"},
+    {"code": "SURGICAL_MANAGE", "name": "Manage surgical catalog", "module": "SURGICAL"},
+    {"code": "THEATRE_MANAGE", "name": "Manage operating theatres", "module": "SURGICAL"},
+    {"code": "ANAESTHESIA_RECORD", "name": "Record anaesthesia entries", "module": "SURGICAL"},
+    {"code": "INSTRUMENT_MANAGE", "name": "Manage surgical instruments", "module": "SURGICAL"},
+
+    # Insurance Claims
+    {"code": "CLAIM_READ", "name": "Read insurance claims", "module": "INSURANCE"},
+    {"code": "CLAIM_MANAGE", "name": "Manage insurance claims", "module": "INSURANCE"},
+    {"code": "CLAIM_REVIEW", "name": "Review insurance claims", "module": "INSURANCE"},
+
+    # Facilities
+    {"code": "FACILITY_READ", "name": "Read facility info", "module": "FACILITY"},
+    {"code": "FACILITY_CREATE", "name": "Create facilities", "module": "FACILITY"},
+    {"code": "FACILITY_UPDATE", "name": "Update facility info", "module": "FACILITY"},
+    {"code": "FACILITY_DELETE", "name": "Delete facilities", "module": "FACILITY"},
+
+    # Integrations
+    {"code": "INTEGRATION_READ", "name": "Read integration settings", "module": "INTEGRATION"},
+    {"code": "INTEGRATION_CREATE", "name": "Create integrations", "module": "INTEGRATION"},
+    {"code": "INTEGRATION_UPDATE", "name": "Update integrations", "module": "INTEGRATION"},
+    {"code": "INTEGRATION_DELETE", "name": "Delete integrations", "module": "INTEGRATION"},
+
+    # Meals
+    {"code": "MEAL_READ", "name": "Read meal info", "module": "MEAL"},
+    {"code": "MEAL_MANAGE", "name": "Manage meal catalog", "module": "MEAL"},
+    {"code": "MEAL_ORDER", "name": "Order meals", "module": "MEAL"},
+    {"code": "MEAL_SERVE", "name": "Serve meals", "module": "MEAL"},
+
+    # Referrals
+    {"code": "REFERRAL_READ", "name": "Read referrals", "module": "REFERRAL"},
+    {"code": "REFERRAL_CREATE", "name": "Create referrals", "module": "REFERRAL"},
+    {"code": "REFERRAL_UPDATE", "name": "Update referrals", "module": "REFERRAL"},
+    {"code": "REFERRAL_CANCEL", "name": "Cancel referrals", "module": "REFERRAL"},
+
+    # Templates
+    {"code": "TEMPLATE_READ", "name": "Read templates", "module": "TEMPLATE"},
+    {"code": "TEMPLATE_CREATE", "name": "Create templates", "module": "TEMPLATE"},
+
+    # Backup & SaaS Admin
+    {"code": "BACKUP_READ", "name": "Read backups", "module": "BACKUP"},
+    {"code": "BACKUP_CREATE", "name": "Create backups", "module": "BACKUP"},
+    {"code": "SETTING_UPDATE", "name": "Update system settings", "module": "SETTING"},
+    {"code": "SaaS_ADMIN", "name": "SaaS Administrative Access", "module": "SaaS"},
 ]
 
 ROLE_PERMISSION_MAP: dict[str, list[str]] = {
-    "TENANT_ADMIN": [item["code"] for item in PERMISSION_SEEDS],
+    "TENANT_ADMIN": [p["code"] for p in PERMISSION_SEEDS],
     "ADMIN": [
-        "dashboard:view",
-        "users:manage",
-        "roles:manage",
-        "patients:register",
-        "patients:manage",
-        "appointments:manage",
-        "visits:initiate",
-        "queue:manage",
-        "consultations:manage",
-        "lab:manage",
-        "pharmacy:manage",
-        "billing:manage",
-        "payments:receive",
-        "admission:manage",
-        "inventory:manage",
-        "ambulance:manage",
-        "hr:manage",
-        "reports:view",
-    ],
-    "REGISTRAR": [
-        "dashboard:view",
-        "patients:register",
-        "patients:view",
-        "patients:manage",
-        "appointments:view",
-        "appointments:manage",
-        "visits:initiate",
-        "queue:manage",
+        "USER_READ", "USER_CREATE", "USER_UPDATE", "USER_MANAGE_STATUS", "USER_MANAGE_ROLES",
+        "ROLE_READ", "ROLE_CREATE", "ROLE_UPDATE", "ROLE_ASSIGN_PERMISSIONS",
+        "PERMISSION_READ", "FACILITY_READ", "FACILITY_CREATE", "FACILITY_UPDATE",
+        "BACKUP_READ", "BACKUP_CREATE", "SETTING_UPDATE", "REPORT_READ", "REPORT_GENERATE",
+        "TEMPLATE_READ", "TEMPLATE_CREATE", "INTEGRATION_READ", "INTEGRATION_UPDATE",
     ],
     "DOCTOR": [
-        "dashboard:view",
-        "patients:view",
-        "patients:manage",
-        "visits:initiate",
-        "consultations:manage",
-        "diagnoses:manage",
-        "lab:order",
-        "lab:manage",
-        "pharmacy:prescribe",
-        "pharmacy:manage",
-        "admission:manage",
-        "reports:view",
-    ],
-    "CLINICIAN": [
-        "dashboard:view",
-        "patients:view",
-        "patients:manage",
-        "visits:initiate",
-        "consultations:manage",
-        "diagnoses:manage",
-        "lab:order",
-        "pharmacy:prescribe",
+        "PATIENT_READ", "PATIENT_UPDATE", "VISIT_READ", "VISIT_ROUTE", "CONSULTATION_READ",
+        "CONSULTATION_WRITE", "DIAGNOSIS_WRITE", "PRESCRIPTION_WRITE", "LAB_ORDER_CREATE",
+        "RADIOLOGY_ORDER", "PROCEDURE_ORDER", "PROCEDURE_PERFORM", "ADMISSION_CREATE",
+        "MEAL_READ", "MEAL_ORDER", "REFERRAL_READ", "REFERRAL_CREATE", "REFERRAL_UPDATE",
     ],
     "NURSE": [
-        "dashboard:view",
-        "patients:view",
-        "patients:manage",
-        "queue:manage",
-        "consultations:manage",
-        "admission:manage",
+        "PATIENT_READ", "VISIT_READ", "VISIT_ROUTE", "TRIAGE_PERFORM", "VITAL_SIGN_RECORD",
+        "MEAL_READ", "MEAL_SERVE", "REFERRAL_READ",
+    ],
+    "CLINICIAN": [
+        "PATIENT_READ", "VISIT_READ", "CONSULTATION_READ", "VITAL_SIGN_RECORD", "TRIAGE_PERFORM",
     ],
     "LAB_SCIENTIST": [
-        "dashboard:view",
-        "lab:manage",
-        "reports:view",
+        "PATIENT_READ", "VISIT_READ", "LAB_ORDER_CREATE", "LAB_RESULT_ENTER", "LAB_RESULT_VERIFY", "LAB_RESULT_RELEASE",
     ],
     "LAB_TECHNICIAN": [
-        "dashboard:view",
-        "lab:manage",
+        "PATIENT_READ", "VISIT_READ", "LAB_RESULT_ENTER",
     ],
     "PHARMACIST": [
-        "dashboard:view",
-        "pharmacy:manage",
-        "inventory:manage",
-        "reports:view",
+        "PATIENT_READ", "VISIT_READ", "PRESCRIPTION_DISPENSE", "PHARMACY_STOCK_MANAGE", "INVENTORY_READ",
     ],
     "BILLING_OFFICER": [
-        "dashboard:view",
-        "billing:manage",
-        "payments:receive",
-        "reports:view",
+        "PATIENT_READ", "BILLING_READ", "BILLING_CREATE", "INVOICE_ISSUE", "INVOICE_VOID", "PAYMENT_RECEIVE", "PAYMENT_REFUND",
     ],
     "CASHIER": [
-        "dashboard:view",
-        "payments:receive",
+        "PATIENT_READ", "BILLING_READ", "PAYMENT_RECEIVE",
+    ],
+    "RECEPTIONIST": [
+        "PATIENT_READ", "PATIENT_CREATE", "PATIENT_UPDATE", "APPOINTMENT_READ", "APPOINTMENT_CREATE",
+        "APPOINTMENT_UPDATE", "APPOINTMENT_CANCEL", "VISIT_INITIATE", "QUEUE_MANAGE", "REFERRAL_READ", "REFERRAL_CREATE",
     ],
     "HR_MANAGER": [
-        "dashboard:view",
-        "hr:manage",
-        "reports:view",
+        "USER_READ", "USER_CREATE", "USER_UPDATE", "USER_MANAGE_STATUS", "ROLE_READ",
     ],
     "HR_OFFICER": [
-        "dashboard:view",
-        "hr:manage",
+        "USER_READ", "ROLE_READ",
+    ],
+    "RADIOLOGIST": [
+        "PATIENT_READ", "VISIT_READ", "RADIOLOGY_ORDER", "RADIOLOGY_PERFORM", "RADIOLOGY_REPORT", "RADIOLOGY_RELEASE",
+    ],
+    "RADIOGRAPHER": [
+        "PATIENT_READ", "VISIT_READ", "RADIOLOGY_PERFORM",
+    ],
+    "SURGEON": [
+        "PATIENT_READ", "VISIT_READ", "SURGICAL_READ", "SURGICAL_BOOK", "SURGICAL_PERFORM", "SURGICAL_RECORD",
+    ],
+    "ANAESTHETIST": [
+        "PATIENT_READ", "SURGICAL_READ", "ANAESTHESIA_RECORD",
+    ],
+    "THEATRE_NURSE": [
+        "PATIENT_READ", "SURGICAL_READ", "INSTRUMENT_MANAGE",
+    ],
+    "INSURANCE_OFFICER": [
+        "PATIENT_READ", "CLAIM_READ", "CLAIM_MANAGE",
+    ],
+    "INSURANCE_REVIEWER": [
+        "PATIENT_READ", "CLAIM_READ", "CLAIM_REVIEW",
     ],
 }
 
@@ -747,6 +778,7 @@ def seed_roles(db: Session) -> None:
                 name=item["name"],
                 code=item["code"],
                 description=item["description"],
+                is_system=True
             )
         )
 
@@ -767,7 +799,8 @@ def seed_permissions(db: Session) -> None:
                 name=item["name"],
                 code=item["code"],
                 module=item["module"],
-                description=item["description"],
+                description=item.get("description", item["name"]),
+                is_system=True
             )
         )
 

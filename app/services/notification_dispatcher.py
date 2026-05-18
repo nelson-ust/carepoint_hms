@@ -420,3 +420,61 @@ class NotificationDispatcher:
                 # Soft-disable obviously broken tokens.
                 tok.is_active = False
         return any_ok
+
+    # ------------------------------------------------------------------
+    # Worker Support
+    # ------------------------------------------------------------------
+
+    def process_pending(self, max_batch: int = 50, max_retries: int = 3) -> dict[str, int]:
+        """
+        Scan for PENDING or FAILED (retriable) notifications and process them.
+        Used primarily by the background notification worker.
+        """
+        from sqlalchemy import or_
+
+        pending = (
+            self.db.query(Notification)
+            .filter(
+                or_(
+                    Notification.status == NotificationStatus.PENDING,
+                    Notification.status == NotificationStatus.FAILED,
+                ),
+                Notification.retry_count < max_retries,
+            )
+            .order_by(Notification.date_created.asc())
+            .limit(max_batch)
+            .all()
+        )
+
+        stats = {"total": len(pending), "sent": 0, "failed": 0}
+        for notif in pending:
+            user = self.db.query(User).filter(User.id == notif.user_id).first() if notif.user_id else None
+            channel_code = next((k for k, v in _CODE_TO_ENUM.items() if v == notif.channel), "in_app")
+            
+            try:
+                self._deliver(notif, user=user, channel=channel_code)
+                if notif.status == NotificationStatus.SENT:
+                    stats["sent"] += 1
+                else:
+                    stats["failed"] += 1
+            except Exception as exc:
+                logger.error("Failed to process notification %s: %s", notif.id, exc)
+                stats["failed"] += 1
+        
+        if stats["total"] > 0:
+            self.db.commit()
+            
+        return stats
+
+    def process_single_record(self, notification_id: int) -> bool:
+        """Process a specific notification record by ID."""
+        notif = self.db.query(Notification).filter(Notification.id == notification_id).first()
+        if not notif:
+            return False
+            
+        user = self.db.query(User).filter(User.id == notif.user_id).first() if notif.user_id else None
+        channel_code = next((k for k, v in _CODE_TO_ENUM.items() if v == notif.channel), "in_app")
+        
+        self._deliver(notif, user=user, channel=channel_code)
+        self.db.commit()
+        return notif.status == NotificationStatus.SENT

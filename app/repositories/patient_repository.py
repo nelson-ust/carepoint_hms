@@ -50,6 +50,7 @@ from app.models.all_models import (
     PatientLoyalty,
     PatientRegistration,
     PatientScannedForm,
+    PatientAllergy,
 )
 from app.utils.s3_utils import (
     build_s3_object_key,
@@ -174,6 +175,13 @@ class PatientRepository:
                 selectinload(Patient.billings),
                 selectinload(Patient.invoices),
                 selectinload(Patient.notifications),
+                selectinload(
+                    Patient.patient_allergies.and_(
+                        PatientAllergy.is_deleted.is_(False)
+                    )
+                ),
+                selectinload(Patient.surgical_cases),
+                selectinload(Patient.incident_reports),
             )
             .filter(
                 Patient.id == patient_id,
@@ -220,6 +228,7 @@ class PatientRepository:
         national_identifier: Optional[str] = None,
         national_identifier_type: Optional[str] = None,
         identification_details: Optional[dict] = None,
+        chronic_conditions: Optional[str] = None,
     ) -> Patient:
         patient = Patient(
             global_patient_id=global_patient_id,
@@ -253,6 +262,7 @@ class PatientRepository:
             national_identifier=national_identifier,
             national_identifier_type=national_identifier_type,
             identification_details=identification_details,
+            chronic_conditions=chronic_conditions,
         )
         self.db.add(patient)
         self.db.flush()
@@ -293,6 +303,65 @@ class PatientRepository:
         self.db.flush()
         self.db.refresh(event)
         return event
+
+
+    # ============================================================
+    # PATIENT ALLERGIES
+    # ============================================================
+
+    def create_patient_allergy(
+        self,
+        *,
+        patient_id: int,
+        allergen_name: str,
+        severity=None,
+        reaction_description: Optional[str] = None,
+        is_active: bool = True,
+    ) -> PatientAllergy:
+        allergy = PatientAllergy(
+            patient_id=patient_id,
+            allergen_name=allergen_name,
+            severity=severity or "UNKNOWN",
+            reaction_description=reaction_description,
+            is_active=is_active,
+        )
+        self.db.add(allergy)
+        self.db.flush()
+        self.db.refresh(allergy)
+        return allergy
+
+    def get_patient_allergy_by_id(self, allergy_id: int) -> Optional[PatientAllergy]:
+        return (
+            self.db.query(PatientAllergy)
+            .filter(
+                PatientAllergy.id == allergy_id,
+                PatientAllergy.is_deleted.is_(False),
+            )
+            .first()
+        )
+
+    def list_patient_allergies(self, patient_id: int) -> list[PatientAllergy]:
+        return (
+            self.db.query(PatientAllergy)
+            .filter(
+                PatientAllergy.patient_id == patient_id,
+                PatientAllergy.is_deleted.is_(False),
+            )
+            .order_by(PatientAllergy.date_created.desc())
+            .all()
+        )
+
+    def update_patient_allergy(self, allergy: PatientAllergy) -> PatientAllergy:
+        self.db.add(allergy)
+        self.db.flush()
+        self.db.refresh(allergy)
+        return allergy
+
+    def soft_delete_patient_allergy(self, allergy: PatientAllergy) -> PatientAllergy:
+        allergy.is_deleted = True
+        self.db.add(allergy)
+        self.db.flush()
+        return allergy
 
     def list_registration_events(
         self,

@@ -30,11 +30,24 @@ def test_patient(client, auth_header):
 class TestMedicalHistoryRoutes:
     def test_get_patient_history(self, client, auth_header, test_patient):
         patient_id = test_patient["patient_id"]
+        # Add a structured allergy first
+        client.post(
+            f"/api/v1/patients/{patient_id}/allergies",
+            json={"allergen_name": "Pollen", "severity": "MILD"},
+            headers=auth_header
+        )
+
         response = client.get(f"/api/v1/patients/{patient_id}/medical-history", headers=auth_header)
         assert response.status_code == 200
         data = response.json()
         assert data["success"] is True
         assert "history" in data
+        
+        history = data["history"]
+        assert "chronic_conditions" in history["patient"]
+        assert "structured_allergies" in history
+        assert len(history["structured_allergies"]) >= 1
+        assert history["structured_allergies"][0]["allergen_name"] == "Pollen"
 
     def test_get_history_for_visit(self, client, auth_header, test_patient):
         # Create visit

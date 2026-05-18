@@ -242,6 +242,7 @@ class Settings(BaseSettings):
     AWS_SECRET_ACCESS_KEY: Optional[SecretStr] = None
     AWS_DEFAULT_REGION: Optional[str] = None
     AWS_S3_BUCKET_NAME: Optional[str] = None
+    AWS_ENDPOINT_URL: Optional[str] = None  # Support for MinIO / Local S3 compatible storage
     BACKUP_ALLOW_DOCKER: bool = False
     PG_DUMP_PATH: Optional[str] = None
 
@@ -256,6 +257,12 @@ class Settings(BaseSettings):
     RATE_LIMIT_ENABLED: bool = True
     RATE_LIMIT_MAX_REQUESTS: int = 100
     RATE_LIMIT_WINDOW_SECONDS: int = 60
+
+    # =========================================================
+    # WORKER SETTINGS
+    # =========================================================
+    NOTIFICATION_WORKER_POLL_INTERVAL: int = 10
+    REPORT_WORKER_POLL_INTERVAL: int = 30
 
     # =========================================================
     # VALIDATORS

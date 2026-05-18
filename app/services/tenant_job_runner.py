@@ -370,24 +370,35 @@ def _handler_invoice_generation(db: Session, job: TenantScheduledJob) -> dict:
 @register_handler("report_generation")
 def _handler_report_generation(db: Session, job: TenantScheduledJob) -> dict:
     """
-    Hook for periodic report generation. Concrete report types are looked
-    up from ``job.params['report_code']`` and dispatched lazily so reports
-    can be added without touching this module.
+    Hook for periodic report generation. 
+    Params:
+        report_code: str (financial, clinical, etc.)
+        file_type: str (pdf, excel)
     """
-    code = (job.params or {}).get("report_code")
+    params = job.params or {}
+    code = params.get("report_code")
+    file_type = params.get("file_type", "pdf")
+    
     if not code:
-        return {"status": "noop"}
+        return {"status": "noop", "reason": "Missing report_code in params"}
+    
     try:
         from app.services.report_service import ReportService  # type: ignore
+        service = ReportService(db)
+        
+        # If a specific method exists (e.g. generate_custom_thing), use it
+        method = getattr(service, f"generate_{code}", None)
+        if callable(method):
+            method()
+            return {"status": "ok", "method": f"generate_{code}"}
+            
+        # Otherwise use the generic background generation
+        file_url = service.generate_and_upload_report(code, file_type)
+        return {"status": "ok", "report_type": code, "file_url": file_url}
+        
     except Exception as exc:
-        return {"status": "skipped", "reason": str(exc)}
-
-    service = ReportService(db)
-    method = getattr(service, f"generate_{code}", None)
-    if not callable(method):
-        return {"status": "noop", "reason": f"no method generate_{code}"}
-    method()
-    return {"status": "ok", "code": code}
+        logger.error(f"Report generation failed for job {job.id}: {exc}")
+        return {"status": "failed", "reason": str(exc)}
 
 
 @register_handler("payroll")
