@@ -218,9 +218,9 @@ class VisitRepository:
             self.db.query(VisitFlowTemplate)
             .options(
                 selectinload(
-                    VisitFlowTemplate.steps
-                ).filter(
-                    VisitFlowTemplateStep.is_deleted.is_(False)
+                    VisitFlowTemplate.steps.and_(
+                        VisitFlowTemplateStep.is_deleted.is_(False)
+                    )
                 ).joinedload(
                     VisitFlowTemplateStep.service_delivery_point
                 )
@@ -256,6 +256,34 @@ class VisitRepository:
             )
             .first()
         )
+
+    def get_default_visit_flow_template(self) -> Optional[VisitFlowTemplate]:
+        """
+        Return the tenant's default visit flow template (care pathway).
+
+        Preference order:
+        1. The standard outpatient pathway (code ``STANDARD_OPD``)
+        2. The earliest active template that actually has steps
+
+        Returns ``None`` when no usable template exists. Templates are returned
+        with their ordered, non-deleted steps eagerly loaded so the caller can
+        resolve the first service delivery point immediately.
+        """
+        standard = self.get_visit_flow_template_by_code("STANDARD_OPD")
+        if standard is not None and standard.steps:
+            return standard
+
+        rows = (
+            self.db.query(VisitFlowTemplate)
+            .filter(VisitFlowTemplate.is_deleted.is_(False))
+            .order_by(VisitFlowTemplate.id.asc())
+            .all()
+        )
+        for row in rows:
+            full = self.get_visit_flow_template_by_id(row.id)
+            if full is not None and full.steps:
+                return full
+        return None
 
     # ============================================================
     # LIST / SEARCH
@@ -331,30 +359,47 @@ class VisitRepository:
         use_appointment_service_point: bool = False,
         appointment: Optional[Appointment] = None,
         visit_flow_template: Optional[VisitFlowTemplate] = None,
-    ) -> Optional[ServiceDeliveryPoint]:
+    ) -> "tuple[Optional[ServiceDeliveryPoint], Optional[str]]":
         """
         Resolve the first service delivery point for a visit.
+
+        Returns a ``(service_delivery_point, source)`` tuple where ``source`` is
+        one of ``"explicit"``, ``"appointment"`` or ``"template"`` (or ``None``
+        when nothing resolved). The source lets the caller apply the right
+        validation - e.g. only require appointment-support when the point
+        actually came from the appointment, so a template-driven first stage
+        (Registration/Triage) is never rejected for "not supporting
+        appointments".
 
         Resolution order
         ----------------
         1. Explicit first_service_delivery_point_id
-        2. Appointment service point when requested
-        3. First step from visit flow template
+        2. Appointment service point when requested and present
+        3. First step from the visit flow template (the care pathway)
         """
         if first_service_delivery_point_id is not None:
-            return self.get_service_delivery_point_by_id(first_service_delivery_point_id)
+            return (
+                self.get_service_delivery_point_by_id(first_service_delivery_point_id),
+                "explicit",
+            )
 
         if use_appointment_service_point and appointment is not None:
             if appointment.service_delivery_point_id is not None:
-                return self.get_service_delivery_point_by_id(
-                    appointment.service_delivery_point_id
+                return (
+                    self.get_service_delivery_point_by_id(
+                        appointment.service_delivery_point_id
+                    ),
+                    "appointment",
                 )
 
         if visit_flow_template is not None and visit_flow_template.steps:
             first_step = sorted(visit_flow_template.steps, key=lambda x: x.step_order)[0]
-            return self.get_service_delivery_point_by_id(first_step.service_delivery_point_id)
+            return (
+                self.get_service_delivery_point_by_id(first_step.service_delivery_point_id),
+                "template",
+            )
 
-        return None
+        return None, None
 
     def get_next_visit_flow_step_order(self, visit_id: int) -> int:
         """

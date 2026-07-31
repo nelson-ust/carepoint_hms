@@ -37,8 +37,21 @@ class LeaveRequestReadSchema(LeaveRequestBaseSchema):
     decided_at: Optional[datetime] = None
     decided_by_user_id: Optional[int] = None
     decision_note: Optional[str] = None
+    approval_request_id: Optional[int] = None
 
 class LeaveRequestSubmitSchema(BaseModel):
-    flow_id: int
+    flow_id: Optional[int] = None
     title: str
     submit_now: bool = True
+    assigned_approver_user_id: Optional[int] = None
+
+
+class LeaveRequestSelfCreateSchema(BaseModel):
+    """Self-service create — the staff profile is resolved from the caller."""
+    leave_type_id: int
+    start_date: date
+    end_date: date
+    days_requested: Decimal = Field(default=Decimal("0.00"), max_digits=6, decimal_places=2)
+    reason: Optional[str] = None
+    handover_notes: Optional[str] = None
+    cover_staff_id: Optional[int] = None

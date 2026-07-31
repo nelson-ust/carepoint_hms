@@ -24,6 +24,7 @@ from typing import Iterable, Optional
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
+from app.core.enums import UserStatus
 from app.core.exceptions import AlreadyExistsError, NotFoundError
 from app.models.all_models import (
     Permission,
@@ -387,6 +388,57 @@ class PermissionRepository:
             .all()
         )
         return {row[0].upper() for row in rows if row[0]}
+
+    def get_user_ids_for_permission(self, permission_code: str) -> set[int]:
+        """
+        Return the ids of active users who hold ``permission_code`` via a role,
+        plus every active superuser (who implicitly holds all permissions).
+
+        Used to fan out staff-facing notifications (e.g. "a patient sent a
+        message") to exactly the people allowed to act on them.
+        """
+        normalized = permission_code.strip().upper()
+        user_ids: set[int] = set()
+        if not normalized:
+            return user_ids
+
+        rows = (
+            self.db.query(UserRoleAssociation.user_id)
+            .join(Role, Role.id == UserRoleAssociation.role_id)
+            .join(
+                RolePermissionAssociation,
+                RolePermissionAssociation.role_id == Role.id,
+            )
+            .join(
+                Permission,
+                Permission.id == RolePermissionAssociation.permission_id,
+            )
+            .join(User, User.id == UserRoleAssociation.user_id)
+            .filter(
+                func.upper(Permission.code) == normalized,
+                UserRoleAssociation.is_deleted.is_(False),
+                Role.is_deleted.is_(False),
+                RolePermissionAssociation.is_deleted.is_(False),
+                Permission.is_deleted.is_(False),
+                User.is_deleted.is_(False),
+                User.status == UserStatus.ACTIVE,
+            )
+            .distinct()
+            .all()
+        )
+        user_ids.update(row[0] for row in rows if row[0])
+
+        superusers = (
+            self.db.query(User.id)
+            .filter(
+                User.is_superuser.is_(True),
+                User.is_deleted.is_(False),
+                User.status == UserStatus.ACTIVE,
+            )
+            .all()
+        )
+        user_ids.update(row[0] for row in superusers if row[0])
+        return user_ids
 
     def user_has_permission(self, user_id: int, permission_code: str) -> bool:
         """

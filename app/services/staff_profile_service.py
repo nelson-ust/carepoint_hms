@@ -138,9 +138,8 @@ class StaffProfileService:
         # Validate supporting foreign keys
         # --------------------------------------------------------
         self._validate_department_exists(payload.staff_profile.department_id)
-        self._validate_service_delivery_point_exists(
-            payload.staff_profile.service_delivery_point_id
-        )
+        for sdp_id in payload.staff_profile.service_delivery_point_ids or []:
+            self._validate_service_delivery_point_exists(sdp_id)
 
         # --------------------------------------------------------
         # Validate roles and password policy
@@ -168,7 +167,6 @@ class StaffProfileService:
 
         staff_profile = StaffProfile(
             department_id=payload.staff_profile.department_id,
-            service_delivery_point_id=payload.staff_profile.service_delivery_point_id,
             staff_no=payload.staff_profile.staff_no,
             job_title=payload.staff_profile.job_title,
             professional_license_no=payload.staff_profile.professional_license_no,
@@ -182,6 +180,12 @@ class StaffProfileService:
             user=user,
             staff_profile=staff_profile,
         )
+
+        # Assign service-delivery-point coverage via the association table
+        # (StaffProfile has no direct service_delivery_point_id column).
+        sdp_ids = payload.staff_profile.service_delivery_point_ids or []
+        if sdp_ids and created_user.staff_profile is not None:
+            self.repository.replace_sdp_assignments(created_user.staff_profile.id, sdp_ids)
 
         # --------------------------------------------------------
         # Assign roles if provided
@@ -417,18 +421,27 @@ class StaffProfileService:
             )
         return user
 
-    def list_users(self, *, skip: int = 0, limit: int = 20):
+    def list_users(
+        self,
+        *,
+        skip: int = 0,
+        limit: int = 20,
+        search: Optional[str] = None,
+        status: Optional[str] = None,
+    ):
         """
         Return paginated user summaries.
 
         Args:
             skip: Pagination offset.
             limit: Pagination limit.
+            search: Optional free-text filter (name/username/email/staff no/title).
+            status: Optional exact user-status filter.
 
         Returns:
             tuple[list[dict], int]: User summary rows and total count.
         """
-        return self.repository.list_users(skip=skip, limit=limit)
+        return self.repository.list_users(skip=skip, limit=limit, search=search, status=status)
 
     # ============================================================
     # STAFF PROFILE QUERIES

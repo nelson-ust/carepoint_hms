@@ -3,11 +3,15 @@ from __future__ import annotations
 
 from typing import Annotated, Optional
 
-from fastapi import APIRouter, Depends, Query, status
+from io import BytesIO
+
+from fastapi import APIRouter, Depends, File, Query, UploadFile, status
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.core.dependencies import require_plan_feature
+from app.core.exceptions import BadRequestError
 from app.dependencies.role import require_permission
 from app.models.all_models import User
 from app.schemas.drug_schema import (
@@ -15,7 +19,6 @@ from app.schemas.drug_schema import (
     DrugCategoryActionResponseSchema,
     DrugCategoryCreateSchema,
     DrugCategoryListResponseSchema,
-    DrugCategoryReadSchema,
     DrugCategoryUpdateSchema,
     DrugCreateSchema,
     DrugListResponseSchema,
@@ -23,6 +26,7 @@ from app.schemas.drug_schema import (
     DrugUpdateSchema,
 )
 from app.services.drug_service import DrugCategoryService, DrugService
+from app.utils.drug_import import parse_category_rows, parse_drug_rows
 from app.utils.pagination import paginate_response
 
 router = APIRouter(
@@ -51,7 +55,7 @@ def list_categories(
     _: Annotated[User, Depends(require_permission("PRESCRIPTION_WRITE", "PRESCRIPTION_DISPENSE", "INVENTORY_READ"))],
     service: Annotated[DrugCategoryService, Depends(get_drug_category_service)],
     skip: int = Query(0, ge=0),
-    limit: int = Query(50, ge=1, le=200),
+    limit: int = Query(50, ge=1, le=1000),
     search: Optional[str] = Query(None),
 ):
     items, total = service.list(skip=skip, limit=limit, search=search)
@@ -75,6 +79,56 @@ def create_category(
 ):
     cat = service.create(payload)
     return {"success": True, "message": "Drug category created.", "category": cat}
+
+
+# Static segments declared before "/categories/{cat_id}" so they aren't
+# captured as a category id.
+
+@router.get(
+    "/categories/template",
+    summary="Download the bulk drug-category upload template",
+)
+def download_category_template(
+    _: Annotated[User, Depends(require_permission("PRESCRIPTION_WRITE", "PRESCRIPTION_DISPENSE", "INVENTORY_READ"))],
+    service: Annotated[DrugCategoryService, Depends(get_drug_category_service)],
+):
+    """Return an .xlsx template for bulk-uploading drug categories."""
+    content = service.build_import_template()
+    return StreamingResponse(
+        BytesIO(content),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="drug_categories_template.xlsx"'},
+    )
+
+
+@router.post(
+    "/categories/bulk-upload",
+    summary="Bulk-upload drug categories from a filled template",
+)
+async def bulk_upload_categories(
+    _: Annotated[User, Depends(require_permission("PHARMACY_STOCK_MANAGE", "INVENTORY_MANAGE"))],
+    service: Annotated[DrugCategoryService, Depends(get_drug_category_service)],
+    file: UploadFile = File(..., description="Filled .xlsx template"),
+):
+    """Import many drug categories at once from a filled template."""
+    filename = (file.filename or "").lower()
+    if not filename.endswith((".xlsx", ".xlsm")):
+        raise BadRequestError(message="Please upload the .xlsx template file.")
+
+    content = await file.read()
+    if not content:
+        raise BadRequestError(message="The uploaded file is empty.")
+
+    try:
+        rows = parse_category_rows(content)
+    except ValueError as exc:
+        raise BadRequestError(message=str(exc))
+    except Exception:
+        raise BadRequestError(
+            message="Could not read the spreadsheet. Please upload the provided .xlsx template."
+        )
+
+    return service.bulk_create(rows)
 
 
 @router.put(
@@ -116,7 +170,7 @@ def list_drugs(
     _: Annotated[User, Depends(require_permission("PRESCRIPTION_WRITE", "PRESCRIPTION_DISPENSE", "INVENTORY_READ"))],
     service: Annotated[DrugService, Depends(get_drug_service)],
     skip: int = Query(0, ge=0),
-    limit: int = Query(50, ge=1, le=200),
+    limit: int = Query(50, ge=1, le=1000),
     search: Optional[str] = Query(None),
     category_id: Optional[int] = Query(None),
     is_controlled: Optional[bool] = Query(None),
@@ -145,6 +199,62 @@ def create_drug(
 ):
     drug = service.create(payload)
     return {"success": True, "message": "Drug created.", "drug": drug}
+
+
+# NOTE: these static segments are declared before "/{drug_id}" so they are not
+# captured as a drug id.
+
+@router.get(
+    "/template",
+    summary="Download the bulk drug-upload template",
+)
+def download_drug_template(
+    _: Annotated[User, Depends(require_permission("PRESCRIPTION_WRITE", "PRESCRIPTION_DISPENSE", "INVENTORY_READ"))],
+    service: Annotated[DrugService, Depends(get_drug_service)],
+):
+    """
+    Return an .xlsx template with Dosage Form / Controlled dropdowns and a
+    Category dropdown sourced from this tenant's drug categories.
+    """
+    content = service.build_import_template()
+    return StreamingResponse(
+        BytesIO(content),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="drugs_template.xlsx"'},
+    )
+
+
+@router.post(
+    "/bulk-upload",
+    summary="Bulk-upload drugs from a filled template",
+)
+async def bulk_upload_drugs(
+    _: Annotated[User, Depends(require_permission("PHARMACY_STOCK_MANAGE", "INVENTORY_MANAGE"))],
+    service: Annotated[DrugService, Depends(get_drug_service)],
+    file: UploadFile = File(..., description="Filled .xlsx template"),
+):
+    """
+    Import many drugs at once from a filled template. Each row is validated
+    independently; the response lists any rows that were rejected.
+    """
+    filename = (file.filename or "").lower()
+    if not filename.endswith((".xlsx", ".xlsm")):
+        raise BadRequestError(message="Please upload the .xlsx template file.")
+
+    content = await file.read()
+    if not content:
+        raise BadRequestError(message="The uploaded file is empty.")
+
+    try:
+        rows = parse_drug_rows(content)
+    except ValueError as exc:
+        raise BadRequestError(message=str(exc))
+    except Exception:
+        raise BadRequestError(
+            message="Could not read the spreadsheet. Please upload the provided .xlsx template."
+        )
+
+    return service.bulk_create(rows)
 
 
 @router.get(
@@ -187,15 +297,3 @@ def delete_drug(
     drug = service.soft_delete(drug_id)
     return {"success": True, "message": "Drug deactivated.", "drug_id": drug.id}
 
-
-@router.delete(
-    "/{drug_id}",
-    summary="Soft-delete a drug",
-)
-def delete_drug(
-    drug_id: int,
-    _: Annotated[User, Depends(require_permission("PHARMACY_STOCK_MANAGE", "INVENTORY_MANAGE"))],
-    service: Annotated[DrugService, Depends(get_drug_service)],
-):
-    drug = service.soft_delete(drug_id)
-    return {"success": True, "message": "Drug deactivated.", "drug_id": drug.id}

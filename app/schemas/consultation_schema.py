@@ -14,6 +14,11 @@ class ConsultationCreateSchema(BaseModel):
     objective_note: Optional[str] = Field(None, max_length=8000)
     assessment_note: Optional[str] = Field(None, max_length=8000)
     plan_note: Optional[str] = Field(None, max_length=8000)
+    recommends_admission: bool = Field(
+        default=False,
+        description="Doctor recommends the patient be admitted as an inpatient.",
+    )
+    admission_recommendation_note: Optional[str] = Field(None, max_length=4000)
 
 
 class ConsultationUpdateSchema(BaseModel):
@@ -21,6 +26,8 @@ class ConsultationUpdateSchema(BaseModel):
     objective_note: Optional[str] = Field(None, max_length=8000)
     assessment_note: Optional[str] = Field(None, max_length=8000)
     plan_note: Optional[str] = Field(None, max_length=8000)
+    recommends_admission: Optional[bool] = None
+    admission_recommendation_note: Optional[str] = Field(None, max_length=4000)
 
 
 class ConsultationFinalizeSchema(BaseModel):
@@ -44,6 +51,9 @@ class ConsultationReadSchema(BaseModel):
     objective_note: Optional[str] = None
     assessment_note: Optional[str] = None
     plan_note: Optional[str] = None
+    recommends_admission: bool = False
+    admission_recommended_at: Optional[datetime] = None
+    admission_recommendation_note: Optional[str] = None
     consultation_started_at: Optional[datetime] = None
     consultation_ended_at: Optional[datetime] = None
     created_at: Optional[datetime] = None

@@ -40,7 +40,7 @@ def list_tests(
     _: Annotated[User, Depends(require_permission("LAB_ORDER_CREATE", "LAB_RESULT_ENTER"))],
     service: Annotated[LabCatalogService, Depends(get_lab_service)],
     skip: int = Query(0, ge=0),
-    limit: int = Query(50, ge=1, le=200),
+    limit: int = Query(50, ge=1, le=1000),
     search: Optional[str] = Query(None),
 ):
     items, total = service.list_tests(skip=skip, limit=limit, search=search)

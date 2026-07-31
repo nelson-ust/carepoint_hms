@@ -1,8 +1,10 @@
 from typing import List, Optional, Tuple
+from datetime import date
 
-from sqlalchemy import select, func
-from sqlalchemy.orm import Session
+from sqlalchemy import select
+from sqlalchemy.orm import Session, joinedload
 
+from app.core.enums import ShiftStatus
 from app.models.all_models import ShiftDefinition, StaffShiftAssignment, ShiftSwapRequest
 from app.schemas.shift_schemas import (
     ShiftDefinitionCreateSchema,
@@ -19,19 +21,42 @@ class ShiftDefinitionRepository:
 
     def get_by_id(self, definition_id: int) -> Optional[ShiftDefinition]:
         return self.db.scalars(
-            select(ShiftDefinition).where(ShiftDefinition.id == definition_id)
+            select(ShiftDefinition)
+            .options(
+                joinedload(ShiftDefinition.department),
+                joinedload(ShiftDefinition.service_delivery_point),
+            )
+            .where(ShiftDefinition.id == definition_id)
+        ).first()
+
+    def get_by_code(
+        self, department_id: int, code: str
+    ) -> Optional[ShiftDefinition]:
+        return self.db.scalars(
+            select(ShiftDefinition).where(
+                ShiftDefinition.department_id == department_id,
+                ShiftDefinition.code == code.strip().upper(),
+            )
         ).first()
 
     def list_definitions(
         self,
         department_id: Optional[int] = None,
+        service_delivery_point_id: Optional[int] = None,
         skip: int = 0,
         limit: int = 100,
     ) -> Tuple[List[ShiftDefinition], int]:
-        stmt = select(ShiftDefinition)
+        stmt = select(ShiftDefinition).options(
+            joinedload(ShiftDefinition.department),
+            joinedload(ShiftDefinition.service_delivery_point),
+        )
         if department_id is not None:
             stmt = stmt.where(ShiftDefinition.department_id == department_id)
-        stmt = stmt.order_by(ShiftDefinition.id.desc())
+        if service_delivery_point_id is not None:
+            stmt = stmt.where(
+                ShiftDefinition.service_delivery_point_id == service_delivery_point_id
+            )
+        stmt = stmt.order_by(ShiftDefinition.start_time.asc(), ShiftDefinition.id.asc())
 
         total = len(self.db.scalars(stmt).all())
         items = list(self.db.scalars(stmt.offset(skip).limit(limit)).all())
@@ -40,6 +65,7 @@ class ShiftDefinitionRepository:
     def create(self, data: ShiftDefinitionCreateSchema) -> ShiftDefinition:
         defn = ShiftDefinition(
             department_id=data.department_id,
+            service_delivery_point_id=data.service_delivery_point_id,
             name=data.name,
             code=data.code.strip().upper(),
             shift_type=data.shift_type,
@@ -55,10 +81,12 @@ class ShiftDefinitionRepository:
         return defn
 
     def update(self, defn: ShiftDefinition, data: ShiftDefinitionUpdateSchema) -> ShiftDefinition:
-        for field in ("name", "shift_type", "start_time", "end_time", "break_duration_minutes", "color_hex", "description"):
-            value = getattr(data, field, None)
-            if value is not None:
-                setattr(defn, field, value)
+        # Only touch fields the caller actually sent. This lets
+        # service_delivery_point_id=null explicitly clear the unit scope while
+        # an omitted field is left untouched.
+        changes = data.model_dump(exclude_unset=True)
+        for field, value in changes.items():
+            setattr(defn, field, value)
 
         self.db.commit()
         self.db.refresh(defn)
@@ -78,18 +106,48 @@ class StaffShiftAssignmentRepository:
             select(StaffShiftAssignment).where(StaffShiftAssignment.id == assignment_id)
         ).first()
 
+    def find_conflict(
+        self,
+        staff_profile_id: int,
+        shift_date: date,
+        exclude_id: Optional[int] = None,
+    ) -> Optional[StaffShiftAssignment]:
+        """
+        A staff member should not hold two live duties on the same calendar day.
+        Cancelled assignments are ignored. Returns the clashing row if any.
+        """
+        stmt = select(StaffShiftAssignment).where(
+            StaffShiftAssignment.staff_profile_id == staff_profile_id,
+            StaffShiftAssignment.shift_date == shift_date,
+            StaffShiftAssignment.status != ShiftStatus.CANCELLED,
+        )
+        if exclude_id is not None:
+            stmt = stmt.where(StaffShiftAssignment.id != exclude_id)
+        return self.db.scalars(stmt).first()
+
     def list_assignments(
         self,
         department_id: Optional[int] = None,
         staff_profile_id: Optional[int] = None,
+        service_delivery_point_id: Optional[int] = None,
+        date_from: Optional[date] = None,
+        date_to: Optional[date] = None,
         skip: int = 0,
         limit: int = 100,
     ) -> Tuple[List[StaffShiftAssignment], int]:
         stmt = select(StaffShiftAssignment).join(ShiftDefinition)
         if department_id is not None:
             stmt = stmt.where(ShiftDefinition.department_id == department_id)
+        if service_delivery_point_id is not None:
+            stmt = stmt.where(
+                ShiftDefinition.service_delivery_point_id == service_delivery_point_id
+            )
         if staff_profile_id is not None:
             stmt = stmt.where(StaffShiftAssignment.staff_profile_id == staff_profile_id)
+        if date_from is not None:
+            stmt = stmt.where(StaffShiftAssignment.shift_date >= date_from)
+        if date_to is not None:
+            stmt = stmt.where(StaffShiftAssignment.shift_date <= date_to)
         stmt = stmt.order_by(StaffShiftAssignment.shift_date.desc())
 
         total = len(self.db.scalars(stmt).all())

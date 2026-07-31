@@ -28,7 +28,7 @@ from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.core.dependencies import AdminUser, require_plan_feature
+from app.core.dependencies import AdminUser, CurrentActiveUser, require_plan_feature
 from app.schemas.bed_schemas import (
     BedActionResponseSchema,
     BedCreateSchema,
@@ -94,10 +94,10 @@ def create_bed(
     summary="List beds",
 )
 def list_beds(
-    _: AdminUser,
+    _: CurrentActiveUser,
     service: Annotated[BedService, Depends(get_bed_service)],
     skip: int = Query(0, ge=0, description="Pagination offset."),
-    limit: int = Query(20, ge=1, le=100, description="Pagination size."),
+    limit: int = Query(20, ge=1, le=1000, description="Pagination size."),
 ):
     """
     Return a paginated list of beds with ward context and admission summary fields.
@@ -126,7 +126,7 @@ def list_beds(
 )
 def get_bed(
     bed_id: int,
-    _: AdminUser,
+    _: CurrentActiveUser,
     service: Annotated[BedService, Depends(get_bed_service)],
 ):
     """
@@ -143,7 +143,7 @@ def get_bed(
 )
 def get_detailed_bed(
     bed_id: int,
-    _: AdminUser,
+    _: CurrentActiveUser,
     service: Annotated[BedService, Depends(get_bed_service)],
 ):
     """

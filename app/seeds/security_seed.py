@@ -151,6 +151,9 @@ DEFAULT_PERMISSIONS: list[dict] = [
     {"code": "NOTIFICATION_MANAGE", "name": "Manage notification templates", "module": "NOTIFICATION"},
     {"code": "NOTIFICATION_DISPATCH", "name": "Send notifications and trigger retries", "module": "NOTIFICATION"},
     {"code": "MESSAGE_SEND", "name": "Send and read direct messages", "module": "NOTIFICATION"},
+    {"code": "WHATSAPP_READ", "name": "Read WhatsApp conversations and messages", "module": "WHATSAPP"},
+    {"code": "WHATSAPP_SEND", "name": "Send WhatsApp messages", "module": "WHATSAPP"},
+    {"code": "WHATSAPP_MANAGE", "name": "Manage WhatsApp account configuration", "module": "WHATSAPP"},
 
     # Compliance / Governance (Stage 18)
     {"code": "COMPLIANCE_READ", "name": "Read compliance records", "module": "COMPLIANCE"},
@@ -196,6 +199,18 @@ DEFAULT_PERMISSIONS: list[dict] = [
     {"code": "PATIENT_PORTAL_VIEW_OWN_RECORD", "name": "View own medical record (visits, labs, prescriptions)", "module": "PATIENT_PORTAL"},
     {"code": "PATIENT_PORTAL_VIEW_OWN_BILLS", "name": "View own bills, invoices, and payments", "module": "PATIENT_PORTAL"},
     {"code": "PATIENT_PORTAL_FUND_CARD", "name": "Top up the patient membership card", "module": "PATIENT_PORTAL"},
+
+    # Developer platform — third-party API access governance.
+    {"code": "DEVELOPER_ACCESS_MANAGE", "name": "Review developer accounts and approve / revoke third-party data grants", "module": "DEVELOPER"},
+
+    # Consent-gated medical-record sharing.
+    {"code": "MEDICAL_ACCESS_REQUEST", "name": "Request a patient's medical history from another hospital", "module": "MEDICAL_ACCESS"},
+    {"code": "MEDICAL_ACCESS_REVIEW", "name": "Review / approve / decline incoming medical-record access requests", "module": "MEDICAL_ACCESS"},
+
+    # Accounting / General Ledger.
+    {"code": "ACCOUNTING_READ", "name": "View journals, ledgers and financial reports", "module": "ACCOUNTING"},
+    {"code": "ACCOUNTING_POST", "name": "Create, post and reverse journal entries", "module": "ACCOUNTING"},
+    {"code": "ACCOUNTING_MANAGE", "name": "Manage accounting periods and run auto-posting", "module": "ACCOUNTING"},
 ]
 
 
@@ -290,6 +305,30 @@ DEFAULT_ROLES: list[dict] = [
         "description": "Records insurer authorization, adjudication and payments.",
     },
     {
+        "code": "CLINICIAN",
+        "name": "Clinician",
+        "description": (
+            "General clinical provider (mid-level / non-consultant). Consults, "
+            "diagnoses, orders labs/radiology and prescribes, but does not admit."
+        ),
+    },
+    {
+        "code": "LAB_TECHNICIAN",
+        "name": "Laboratory Technician",
+        "description": (
+            "Performs laboratory tests and enters results. Verification and "
+            "release are reserved for the Laboratory Scientist."
+        ),
+    },
+    {
+        "code": "HR_OFFICER",
+        "name": "HR Officer",
+        "description": (
+            "HR data-entry officer. Maintains staff records without user "
+            "status/role management or approval authority."
+        ),
+    },
+    {
         "code": "PATIENT",
         "name": "Patient",
         "description": (
@@ -336,6 +375,9 @@ DEFAULT_ROLE_PERMISSIONS: dict[str, list[str]] = {
         "INFECTION_LOG_READ", "INFECTION_LOG_MANAGE",
         "QUALITY_PROJECT_READ", "QUALITY_PROJECT_MANAGE",
         "GOVERNANCE_DASHBOARD",
+        "DEVELOPER_ACCESS_MANAGE",
+        "MEDICAL_ACCESS_REQUEST", "MEDICAL_ACCESS_REVIEW",
+        "ACCOUNTING_READ", "ACCOUNTING_POST", "ACCOUNTING_MANAGE",
     ],
     "DOCTOR": [
         "PATIENT_READ", "PATIENT_UPDATE",
@@ -351,6 +393,7 @@ DEFAULT_ROLE_PERMISSIONS: dict[str, list[str]] = {
         # Radiology + procedure ordering, surgical-case booking
         "RADIOLOGY_ORDER", "PROCEDURE_PERFORM",
         "SURGICAL_READ", "SURGICAL_BOOK",
+        "MEDICAL_ACCESS_REQUEST",
     ],
     "NURSE": [
         "PATIENT_READ",
@@ -382,6 +425,7 @@ DEFAULT_ROLE_PERMISSIONS: dict[str, list[str]] = {
         "PAYMENT_RECEIVE", "PAYMENT_REFUND",
         "REPORT_READ", "REPORT_EXPORT",
         "PATIENT_CARD_VIEW", "PATIENT_CARD_FUND", "PATIENT_CARD_DEBIT",
+        "ACCOUNTING_READ", "ACCOUNTING_POST",
     ],
     "CASHIER": [
         "PATIENT_READ", "QUEUE_MANAGE", "VISIT_ROUTE",
@@ -447,7 +491,31 @@ DEFAULT_ROLE_PERMISSIONS: dict[str, list[str]] = {
         "CLAIM_READ", "CLAIM_REVIEW",
         "REPORT_READ",
     ],
-    # PATIENT carries only portal-scoped permissions. Endpoints that act
+    "CLINICIAN": [
+        "PATIENT_READ", "PATIENT_UPDATE",
+        "APPOINTMENT_READ",
+        "VISIT_READ", "VISIT_ROUTE", "QUEUE_MANAGE",
+        "TRIAGE_PERFORM", "VITAL_SIGN_RECORD",
+        "CONSULTATION_READ", "CONSULTATION_WRITE",
+        "DIAGNOSIS_WRITE", "PROCEDURE_ORDER",
+        "LAB_ORDER_CREATE",
+        "RADIOLOGY_ORDER",
+        "PRESCRIPTION_WRITE",
+        "REPORT_READ",
+    ],
+    "LAB_TECHNICIAN": [
+        "PATIENT_READ",
+        "VISIT_READ", "QUEUE_MANAGE", "VISIT_ROUTE",
+        "LAB_ORDER_CREATE", "LAB_RESULT_ENTER",
+        "REPORT_READ",
+    ],
+    "HR_OFFICER": [
+        "USER_READ", "USER_UPDATE",
+        "ROLE_READ",
+        "REPORT_READ",
+        "MESSAGE_SEND",
+    ],
+        # PATIENT carries only portal-scoped permissions. Endpoints that act
     # on a specific patient still need to verify ownership at the route
     # layer — having ``PATIENT_PORTAL_VIEW_OWN_RECORD`` is necessary but
     # not sufficient to read someone *else's* record.
@@ -458,6 +526,10 @@ DEFAULT_ROLE_PERMISSIONS: dict[str, list[str]] = {
         "PATIENT_PORTAL_FUND_CARD",
     ],
 }
+
+# Back-compat alias used by _seed_fresh_baseline().
+ROLE_PERMISSIONS_BASELINE = DEFAULT_ROLE_PERMISSIONS
+
 
 
 # ============================================================

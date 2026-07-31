@@ -384,11 +384,19 @@ def build_error_response(exc: AppException) -> JSONResponse:
     )
 
 
-async def app_exception_handler(_: Request, exc: AppException) -> JSONResponse:
+async def app_exception_handler(request: Request, exc: AppException) -> JSONResponse:
     """
     Handle any custom application exception.
+
+    CORS headers are attached explicitly so business-error responses are
+    never blocked by the browser (which would surface to the SPA as an
+    opaque "Network Error" instead of the real message).
     """
-    return build_error_response(exc)
+    return JSONResponse(
+        status_code=exc.status_code,
+        content=exc.to_dict(),
+        headers=_cors_headers_for(request),
+    )
 
 
 async def database_operational_error_handler(_: Request, exc: SQLAlchemyOperationalError) -> JSONResponse:
@@ -453,13 +461,68 @@ async def database_operational_error_handler(_: Request, exc: SQLAlchemyOperatio
     )
 
 
-async def generic_exception_handler(_: Request, exc: Exception) -> JSONResponse:
+def _cors_headers_for(request: Request) -> dict:
+    """
+    Compute CORS headers for error responses.
+
+    Starlette installs the ``Exception`` handler on the OUTERMOST
+    ServerErrorMiddleware — outside CORSMiddleware — so unhandled-500
+    responses would otherwise ship without CORS headers. Browsers then block
+    the response entirely and frontends see a bare "Network Error" instead of
+    the actual failure. We echo the request Origin when it is allowed.
+    """
+    origin = request.headers.get("origin")
+    if not origin:
+        return {}
+
+    allowed = False
+    try:
+        # Mirror the EFFECTIVE policy the CORSMiddleware runs with — main.py
+        # computes exact origins + a regex (wildcard entries and, in dev, the
+        # private-LAN pattern). Checking only the raw settings list here made
+        # error responses invisible to browsers on any regex-allowed origin.
+        from app import main as _main
+
+        exact = getattr(_main, "ALLOW_ORIGINS", []) or []
+        pattern = getattr(_main, "ALLOW_ORIGIN_REGEX", None)
+        if "*" in exact or origin in exact:
+            allowed = True
+        elif pattern:
+            import re as _re
+
+            if _re.fullmatch(pattern, origin):
+                allowed = True
+    except Exception:
+        try:
+            from app.core.config import settings
+
+            raw = getattr(settings, "normalized_cors_origins", None) or getattr(
+                settings, "BACKEND_CORS_ORIGINS", []
+            )
+            allowed = "*" in raw or origin in raw
+        except Exception:
+            allowed = False
+
+    if allowed:
+        return {
+            "Access-Control-Allow-Origin": origin,
+            "Access-Control-Allow-Credentials": "true",
+            "Vary": "Origin",
+        }
+    return {}
+
+
+async def generic_exception_handler(request: Request, exc: Exception) -> JSONResponse:
     """
     Fallback handler for unexpected exceptions.
 
     This keeps API error responses consistent while avoiding exposure of
-    internal implementation details.
+    internal implementation details. CORS headers are attached manually —
+    this handler runs outside CORSMiddleware (see ``_cors_headers_for``).
     """
+    _exc_logger.exception(
+        "Unhandled exception on %s %s", request.method, request.url.path
+    )
     return JSONResponse(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         content={
@@ -470,6 +533,7 @@ async def generic_exception_handler(_: Request, exc: Exception) -> JSONResponse:
                 "exception_type": exc.__class__.__name__,
             },
         },
+        headers=_cors_headers_for(request),
     )
 
 

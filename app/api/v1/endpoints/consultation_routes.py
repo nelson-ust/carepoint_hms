@@ -74,7 +74,7 @@ def list_for_visit(
     _: Annotated[User, Depends(require_permission("CONSULTATION_READ", "VISIT_READ"))],
     service: Annotated[ConsultationService, Depends(get_consultation_service)],
     skip: int = Query(0, ge=0),
-    limit: int = Query(20, ge=1, le=100),
+    limit: int = Query(20, ge=1, le=1000),
 ):
     """
     Retrieve clinical notes recorded during a patient visit.

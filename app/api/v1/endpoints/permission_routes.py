@@ -70,7 +70,7 @@ def list_permissions(
     _: AdminUser,
     service: Annotated[PermissionService, Depends(get_permission_service)],
     skip: int = Query(0, ge=0, description="Pagination offset."),
-    limit: int = Query(20, ge=1, le=100, description="Pagination size."),
+    limit: int = Query(20, ge=1, le=1000, description="Pagination size."),
     module: Optional[str] = Query(None, description="Filter by module label."),
     search: Optional[str] = Query(None, description="Substring search across name/code/description."),
 ):

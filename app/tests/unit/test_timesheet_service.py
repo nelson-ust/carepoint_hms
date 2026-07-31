@@ -135,4 +135,7 @@ class TestTimesheetSubmit:
         svc.submit_timesheet(3, payload, user_id=20)
 
         svc.approval_service.submit.assert_called_once()
-        db.refresh.assert_called_once_with(ts)
+        # The row is refreshed twice now: once after the approval engine may have
+        # auto-finalized a zero-step flow, and again after the final commit.
+        assert db.refresh.call_count == 2
+        db.refresh.assert_called_with(ts)

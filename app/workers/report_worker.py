@@ -21,7 +21,7 @@ from sqlalchemy import create_engine, or_
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
-from app.core.database import MASTER_DATABASE_URL, get_engine_for_url
+from app.core.database import MASTER_DATABASE_URL, get_engine_for_url, get_master_engine
 from app.core.cryptography import decrypt_string
 from app.models.all_models import Tenant, WarehouseExportRun, WarehouseJobStatus
 from app.services.report_service import ReportService
@@ -51,7 +51,7 @@ def get_active_tenants() -> List[Tuple[str, str]]:
         logger.error("MASTER_DATABASE_URL not set")
         return []
         
-    master_engine = create_engine(MASTER_DATABASE_URL)
+    master_engine = get_master_engine()  # cached, shared pool
     tenants_data = []
     try:
         with Session(master_engine) as session:
@@ -74,7 +74,7 @@ def get_active_tenants() -> List[Tuple[str, str]]:
     except Exception as e:
         logger.error(f"Error fetching tenants from master: {e}")
     finally:
-        master_engine.dispose()
+        pass  # cached master engine — never dispose per cycle
     return tenants_data
 
 def process_tenant_reports(tenant_code: str, db_url: str):
@@ -111,17 +111,9 @@ def process_tenant_reports(tenant_code: str, db_url: str):
                 tenant_db.commit()
                 
                 try:
-                    # In a real implementation, ReportService would have a method to process this.
-                    # For now, we simulate or call a future service method.
-                    # We'll use a generic handler if it exists.
-                    if hasattr(service, "process_warehouse_export"):
-                        service.process_warehouse_export(run.id)
-                    else:
-                        # Placeholder for manual processing if service isn't updated yet
-                        logger.warning(f"ReportService.process_warehouse_export not implemented for tenant {tenant_code}")
-                        run.status = WarehouseJobStatus.FAILED
-                        run.error_message = "ReportService.process_warehouse_export not implemented"
-                        run.finished_at = datetime.now(timezone.utc)
+                    # The worker runs outside a request context, so the tenant
+                    # code is passed explicitly for storage-path resolution.
+                    service.process_warehouse_export(run.id, tenant_code=tenant_code)
                 except Exception as e:
                     logger.error(f"Failed to process run {run.id} for tenant {tenant_code}: {e}")
                     run.status = WarehouseJobStatus.FAILED

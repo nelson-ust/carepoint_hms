@@ -69,8 +69,11 @@ def _get_active_tenant_engines():
         return []
 
     from app.core.cryptography import decrypt_string
+    from app.core.database import get_master_engine
 
-    master_engine = create_engine(MASTER_DATABASE_URL, future=True)
+    # Reuse the cached master engine — creating (and even disposing) a fresh
+    # engine on every scheduled run churns pools and leaks memory over time.
+    master_engine = get_master_engine()
     try:
         with Session(master_engine) as master_db:
             tenants = (
@@ -99,7 +102,8 @@ def _get_active_tenant_engines():
 
             return engines
     finally:
-        master_engine.dispose()
+        # Cached engine — do NOT dispose; its pool is shared process-wide.
+        pass
 
 
 def _run_daily_bed_day_rollover():
@@ -138,6 +142,36 @@ def _run_leave_reminders():
                 logger.info(f"Completed leave reminders for tenant: {tenant_code}")
         except Exception as e:
             logger.error(f"Error during leave reminders for tenant {tenant_code}: {e}")
+
+
+def _run_appointment_reminders():
+    """
+    Dispatch due appointment reminders (a day before and 3 hours before) for
+    every active tenant. Each tenant's PENDING AppointmentReminderJob rows whose
+    fire time has passed are delivered via email / in-app / SMS.
+    """
+    logger.info("Starting appointment-reminder dispatch across all tenants.")
+    for tenant_code, engine in _get_active_tenant_engines():
+        try:
+            with Session(engine) as tenant_db:
+                from app.services.appointment_extension_service import (
+                    AppointmentExtensionService,
+                )
+
+                summary = AppointmentExtensionService(tenant_db).dispatch_due_reminders()
+                if summary.get("dispatched") or summary.get("failed"):
+                    logger.info(
+                        "Appointment reminders for %s: due=%s sent=%s skipped=%s failed=%s",
+                        tenant_code,
+                        summary.get("due"),
+                        summary.get("dispatched"),
+                        summary.get("skipped"),
+                        summary.get("failed"),
+                    )
+        except Exception as e:
+            logger.error(
+                f"Error dispatching appointment reminders for tenant {tenant_code}: {e}"
+            )
 
 
 def _run_otp_cleanup():
@@ -217,6 +251,18 @@ def start_scheduler() -> None:
         hours=1,
         id="hourly_otp_cleanup",
         replace_existing=True,
+    )
+
+    # Dispatch due appointment reminders every 5 minutes. Each tick delivers
+    # the day-before and 3-hours-before reminders whose fire time has passed.
+    _scheduler.add_job(
+        _run_appointment_reminders,
+        trigger="interval",
+        minutes=5,
+        id="appointment_reminders_dispatch",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
     )
     
     # Schedule Daily Backups at 01:00 AM

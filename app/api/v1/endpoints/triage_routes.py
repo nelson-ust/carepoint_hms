@@ -46,7 +46,7 @@ def list_for_visit(
     _: Annotated[User, Depends(require_permission("TRIAGE_PERFORM", "VISIT_READ"))],
     service: Annotated[TriageService, Depends(get_triage_service)],
     skip: int = Query(0, ge=0),
-    limit: int = Query(20, ge=1, le=100),
+    limit: int = Query(20, ge=1, le=1000),
 ):
     items, total = service.list_for_visit(visit_id, skip=skip, limit=limit)
     return paginate_response(

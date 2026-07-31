@@ -10,7 +10,11 @@ from app.models.all_models import (
     RequestForQuotationItem,
     RequestForQuotationVendor,
     PurchaseOrder,
-    PurchaseOrderItem
+    PurchaseOrderItem,
+    Department,
+    StaffProfile,
+    User,
+    InventoryStockItem,
 )
 from app.schemas.procurement_schemas import (
     PurchaseRequisitionCreateSchema, 
@@ -98,6 +102,12 @@ class ProcurementRepository:
         self.db.flush()
         return po
 
+    def get_rfq_by_id(self, rfq_id: int) -> Optional[RequestForQuotation]:
+        return self.db.scalars(
+            select(RequestForQuotation)
+            .where(RequestForQuotation.id == rfq_id)
+        ).first()
+
     def get_requisition_by_id(self, requisition_id: int) -> Optional[PurchaseRequisition]:
         return self.db.scalars(
             select(PurchaseRequisition)
@@ -119,6 +129,43 @@ class ProcurementRepository:
         
         items = list(self.db.scalars(stmt.offset(skip).limit(limit)).all())
         return items, total
+
+    def count_requisitions_by_statuses(self, statuses: list) -> int:
+        stmt = select(func.count()).select_from(PurchaseRequisition).where(
+            PurchaseRequisition.status.in_(statuses)
+        )
+        return int(self.db.scalar(stmt) or 0)
+
+    def count_all_requisitions(self) -> int:
+        return int(self.db.scalar(select(func.count()).select_from(PurchaseRequisition)) or 0)
+
+    def sum_estimated_total(self, statuses: Optional[list] = None) -> float:
+        stmt = select(func.coalesce(func.sum(PurchaseRequisition.estimated_total), 0))
+        if statuses:
+            stmt = stmt.where(PurchaseRequisition.status.in_(statuses))
+        return float(self.db.scalar(stmt) or 0)
+
+    def count_low_stock_items(self) -> int:
+        stmt = select(func.count()).select_from(InventoryStockItem).where(
+            InventoryStockItem.is_deleted.is_(False),
+            InventoryStockItem.reorder_level.isnot(None),
+            InventoryStockItem.quantity_on_hand <= InventoryStockItem.reorder_level,
+        )
+        return int(self.db.scalar(stmt) or 0)
+
+    def department_name_map(self) -> dict:
+        return {d.id: d.name for d in self.db.query(Department).all()}
+
+    def staff_name_map(self) -> dict:
+        rows = (
+            self.db.query(StaffProfile.id, User.first_name, User.last_name)
+            .join(User, User.id == StaffProfile.user_id)
+            .all()
+        )
+        return {
+            sid: (f"{fn or ''} {ln or ''}".strip() or f"Staff #{sid}")
+            for sid, fn, ln in rows
+        }
 
     def create_requisition(self, data: PurchaseRequisitionCreateSchema) -> PurchaseRequisition:
         # Generate a unique requisition number if not provided

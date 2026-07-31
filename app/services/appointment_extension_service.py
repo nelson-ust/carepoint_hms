@@ -113,12 +113,131 @@ class AppointmentExtensionService:
         self.db.commit()
         return out
 
+    # Appointment statuses for which a reminder should no longer fire.
+    _CLOSED_STATUSES = {"CANCELLED", "COMPLETED", "MISSED"}
+
+    def schedule_patient_reminders(
+        self,
+        appointment: Appointment,
+        *,
+        channels: Optional[list[str]] = None,
+    ) -> list[AppointmentReminderJob]:
+        """
+        Schedule the two standard patient reminders for an appointment:
+        one a **day before** and one **3 hours before** the start time.
+
+        The 3-hour reminder uses the CUSTOM rule (offset 180 min) rather than a
+        dedicated enum value, so no database enum migration is required for it
+        to work. Reminders whose fire time is already in the past (e.g. a
+        booking made under 3 hours out) are silently skipped.
+        """
+        return self.schedule_reminders(
+            appointment,
+            rules=(
+                AppointmentReminderRule.H24_BEFORE,
+                AppointmentReminderRule.CUSTOM,
+            ),
+            custom_offset_minutes=180,
+            channels=channels,
+        )
+
+    def reschedule_reminders(
+        self,
+        appointment: Appointment,
+        *,
+        channels: Optional[list[str]] = None,
+    ) -> list[AppointmentReminderJob]:
+        """
+        Void any still-pending reminder jobs for an appointment and schedule a
+        fresh day-before + 3-hours-before pair against its (new) start time.
+        Called after a reschedule so reminders track the moved slot.
+        """
+        pending = (
+            self.db.query(AppointmentReminderJob)
+            .filter(
+                AppointmentReminderJob.appointment_id == appointment.id,
+                AppointmentReminderJob.status == "PENDING",
+                AppointmentReminderJob.is_deleted.is_(False),
+            )
+            .all()
+        )
+        for job in pending:
+            job.status = "SKIPPED"
+            job.last_error = "superseded by reschedule"
+            job.is_deleted = True
+        if pending:
+            self.db.commit()
+        return self.schedule_patient_reminders(appointment, channels=channels)
+
+    @staticmethod
+    def _friendly_lead(minutes: int) -> str:
+        """Human phrase for how far ahead a reminder is (from the offset)."""
+        if minutes >= 23 * 60:
+            return "tomorrow"
+        if minutes >= 60:
+            hours = round(minutes / 60)
+            return f"in about {hours} hour{'s' if hours != 1 else ''}"
+        return f"in about {max(1, minutes)} minutes"
+
+    def _build_reminder_message(self, appt: Appointment, job: AppointmentReminderJob):
+        """Return (subject, body) for a patient appointment reminder."""
+        start = appt.scheduled_start_at
+        # Offset in minutes between the appointment and when this reminder fires.
+        try:
+            offset_min = int(round((start - job.fire_at).total_seconds() / 60.0))
+        except Exception:
+            offset_min = 0
+        lead = self._friendly_lead(offset_min)
+
+        patient = getattr(appt, "patient", None)
+        first_name = (getattr(patient, "first_name", None) or "there").strip() or "there"
+
+        when_date = f"{start:%A, %d %B %Y}"
+        when_time = f"{start:%I:%M %p}".lstrip("0")
+
+        # Optional context lines.
+        clinician = None
+        sp = getattr(appt, "staff_profile", None)
+        if sp is not None:
+            u = getattr(sp, "user", None)
+            if u is not None:
+                clinician = f"{getattr(u, 'first_name', '')} {getattr(u, 'last_name', '')}".strip()
+        sdp = getattr(getattr(appt, "service_delivery_point", None), "name", None)
+        facility = getattr(getattr(appt, "facility", None), "name", None)
+
+        details = [f"Date: {when_date}", f"Time: {when_time}"]
+        if clinician:
+            details.append(f"With: {clinician}")
+        if sdp:
+            details.append(f"Location: {sdp}")
+        if facility:
+            details.append(f"Facility: {facility}")
+
+        subject = f"Appointment reminder — {when_date} at {when_time}"
+        body = (
+            f"Dear {first_name},\n\n"
+            f"This is a friendly reminder that you have an appointment {lead}.\n\n"
+            + "\n".join(details)
+            + "\n\nPlease arrive a few minutes early. If you need to reschedule or "
+            "cancel, kindly contact the hospital ahead of time.\n\n"
+            "We look forward to seeing you."
+        )
+        return subject, body
+
     def dispatch_due_reminders(self) -> dict:
         """
-        Walk PENDING reminder jobs whose ``fire_at`` has passed and
-        dispatch them through the unified NotificationDispatcher. Run
-        from the scheduler every minute.
+        Walk PENDING reminder jobs whose ``fire_at`` has passed and dispatch
+        them through the unified NotificationDispatcher. Run from the scheduler
+        on a short interval.
+
+        Delivery reaches the patient even when they have no portal user account:
+        the recipient carries the patient's own email and phone so email/SMS go
+        out regardless, while in-app/push are used when a linked user exists.
+        Reminders for appointments that are no longer open (cancelled/completed/
+        missed) are skipped rather than sent.
         """
+        from sqlalchemy.orm import joinedload
+
         now = datetime.now(timezone.utc)
         due = (
             self.db.query(AppointmentReminderJob)
@@ -133,8 +252,8 @@ class AppointmentExtensionService:
 
         dispatched = 0
         failed = 0
+        skipped = 0
         try:
-            from app.models.all_models import Patient, User
             from app.services.notification_dispatcher import NotificationDispatcher
 
             dispatcher = NotificationDispatcher(self.db)
@@ -145,47 +264,74 @@ class AppointmentExtensionService:
             try:
                 appt = (
                     self.db.query(Appointment)
+                    .options(
+                        joinedload(Appointment.patient),
+                        joinedload(Appointment.staff_profile),
+                        joinedload(Appointment.service_delivery_point),
+                    )
                     .filter(Appointment.id == job.appointment_id)
                     .first()
                 )
                 if appt is None:
                     job.status = "SKIPPED"
                     job.last_error = "appointment missing"
+                    skipped += 1
                     continue
+
+                # Don't remind for appointments that are no longer open.
+                if str(getattr(appt, "status", "")).upper() in self._CLOSED_STATUSES:
+                    job.status = "SKIPPED"
+                    job.last_error = f"appointment {appt.status}"
+                    skipped += 1
+                    continue
+
                 if dispatcher is None:
                     job.status = "FAILED"
                     job.last_error = "notification dispatcher unavailable"
                     failed += 1
                     continue
 
-                # Resolve recipient — patient.user when present.
-                user = None
-                patient = (
-                    self.db.query(Patient)
-                    .filter(Patient.id == appt.patient_id)
-                    .first()
-                )
-                if patient and getattr(patient, "user_id", None):
-                    user = (
-                        self.db.query(User)
-                        .filter(User.id == patient.user_id, User.is_deleted.is_(False))
-                        .first()
-                    )
-                if user is None:
+                patient = getattr(appt, "patient", None)
+                email = getattr(patient, "email", None) if patient else None
+                phone = getattr(patient, "phone_number", None) if patient else None
+                user_id = getattr(patient, "user_id", None) if patient else None
+
+                if not email and not phone and not user_id:
                     job.status = "SKIPPED"
-                    job.last_error = "no recipient resolvable"
+                    job.last_error = "patient has no contact details"
+                    skipped += 1
                     continue
 
+                # A dict recipient lets the dispatcher deliver via the patient's
+                # own email/phone; user_id (when present) enables in-app/push,
+                # and patient_id lets any in-app row surface in the portal feed.
+                recipient = {
+                    "user_id": user_id,
+                    "patient_id": getattr(patient, "id", None),
+                    "email_address": email,
+                    "sms_address": phone,
+                    "whatsapp_address": phone,
+                }
+
+                subject, body = self._build_reminder_message(appt, job)
                 dispatcher.dispatch(
                     event=NotificationEvent.APPOINTMENT_REMINDER,
-                    recipients=[user],
-                    subject=f"Reminder: appointment at {appt.scheduled_start_at:%Y-%m-%d %H:%M}",
-                    body=(
-                        f"This is a reminder of your appointment at "
-                        f"{appt.scheduled_start_at:%Y-%m-%d %H:%M}."
-                    ),
-                    context={"appointment_id": appt.id, "rule": job.rule.value},
-                    force_channels=job.channels or None,
+                    recipients=[recipient],
+                    subject=subject,
+                    body=body,
+                    context={
+                        "appointment_id": appt.id,
+                        "appointment_code": appt.appointment_code,
+                        "rule": job.rule.value if job.rule else None,
+                        "scheduled_start_at": appt.scheduled_start_at.isoformat()
+                        if appt.scheduled_start_at
+                        else None,
+                    },
+                    force_channels=(job.channels or None),
+                    # The portal's own on-load generator owns the in-app reminder
+                    # row, so exclude in_app here to avoid a duplicate in the
+                    # patient's portal feed; the scheduler still sends email/SMS.
+                    exclude_channels=["in_app"],
                 )
                 job.status = "SENT"
                 job.fired_at = datetime.now(timezone.utc)
@@ -197,7 +343,12 @@ class AppointmentExtensionService:
 
         if due:
             self.db.commit()
-        return {"due": len(due), "dispatched": dispatched, "failed": failed}
+        return {
+            "due": len(due),
+            "dispatched": dispatched,
+            "skipped": skipped,
+            "failed": failed,
+        }
 
     # ------------------------------------------------------------------
     # CANCELLATION LOG

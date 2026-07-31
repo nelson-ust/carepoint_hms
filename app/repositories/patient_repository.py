@@ -622,11 +622,34 @@ class PatientRepository:
         patient_type=None,
         payer_type: Optional[str] = None,
         national_identifier: Optional[str] = None,
+        search: Optional[str] = None,
         skip: int = 0,
         limit: int = 20,
     ) -> tuple[list[Patient], int]:
         # Define base filters to reuse
         base_filters = [Patient.is_deleted.is_(False)]
+
+        # Unified quick-search across the identifiers a user is likely to type:
+        # patient name, hospital number (MRN), phone number, or the numeric id.
+        if search and search.strip():
+            term = search.strip()
+            like_term = f"%{term}%"
+            or_clauses = [
+                func.concat(Patient.first_name, " ", Patient.last_name).ilike(like_term),
+                func.concat(
+                    Patient.first_name, " ", Patient.middle_name, " ", Patient.last_name
+                ).ilike(like_term),
+                Patient.first_name.ilike(like_term),
+                Patient.last_name.ilike(like_term),
+                Patient.middle_name.ilike(like_term),
+                Patient.hospital_number.ilike(like_term),
+                Patient.phone_number.ilike(like_term),
+                Patient.alternate_phone_number.ilike(like_term),
+            ]
+            # Allow locating a patient by their numeric primary key.
+            if term.isdigit():
+                or_clauses.append(Patient.id == int(term))
+            base_filters.append(or_(*or_clauses))
 
         if hospital_number:
             base_filters.append(Patient.hospital_number == hospital_number)

@@ -13,7 +13,7 @@ from __future__ import annotations
     CALLED   -> CANCELLED
 """
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from sqlalchemy.orm import Session
@@ -504,3 +504,165 @@ class QueueService:
             step.is_current = False
         self.db.add(step)
         self.db.flush()
+
+    # ============================================================
+    # ANALYTICS & DISPLAY BOARD
+    # ============================================================
+
+    def get_queue_stats(
+        self,
+        date_from: Optional[datetime] = None,
+        date_to: Optional[datetime] = None,
+    ) -> dict:
+        """
+        Aggregate queue throughput and wait-time statistics per service
+        delivery point for the given window (defaults to today, UTC).
+        """
+        now = datetime.now(timezone.utc)
+        if date_from is None:
+            date_from = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        if date_to is None:
+            date_to = date_from.replace(hour=0, minute=0, second=0, microsecond=0)
+            date_to = date_to + timedelta(days=1)
+
+        sdps = {sdp.id: sdp for sdp in self.repository.list_service_points()}
+        live = self.repository.get_live_status_counts()
+        rows = self.repository.get_stats_rows(date_from, date_to)
+
+        per_sdp: dict[int, dict] = {}
+
+        def bucket(sdp_id: int) -> dict:
+            if sdp_id not in per_sdp:
+                sdp = sdps.get(sdp_id)
+                per_sdp[sdp_id] = {
+                    "service_delivery_point_id": sdp_id,
+                    "service_delivery_point_name": sdp.name if sdp else f"SDP #{sdp_id}",
+                    "service_delivery_point_code": getattr(sdp, "code", None) if sdp else None,
+                    "waiting_now": live.get((sdp_id, QueueStatus.WAITING), 0),
+                    "called_now": live.get((sdp_id, QueueStatus.CALLED), 0),
+                    "serving_now": live.get((sdp_id, QueueStatus.SERVING), 0),
+                    "issued": 0,
+                    "served": 0,
+                    "missed": 0,
+                    "cancelled": 0,
+                    "transferred": 0,
+                    "_wait_seconds": [],
+                    "_service_seconds": [],
+                }
+            return per_sdp[sdp_id]
+
+        # ensure SDPs with live queues but no tickets in-window still appear
+        for (sdp_id, _status) in live.keys():
+            bucket(sdp_id)
+
+        for sdp_id, status, created, called_at, started_at, ended_at in rows:
+            b = bucket(sdp_id)
+            b["issued"] += 1
+            if status == QueueStatus.SERVED:
+                b["served"] += 1
+            elif status == QueueStatus.MISSED:
+                b["missed"] += 1
+            elif status == QueueStatus.CANCELLED:
+                b["cancelled"] += 1
+            elif status == QueueStatus.TRANSFERRED:
+                b["transferred"] += 1
+
+            anchor = started_at or called_at
+            if created and anchor:
+                delta = (anchor - created).total_seconds()
+                if delta >= 0:
+                    b["_wait_seconds"].append(delta)
+            if started_at and ended_at:
+                delta = (ended_at - started_at).total_seconds()
+                if delta >= 0:
+                    b["_service_seconds"].append(delta)
+
+        def finalize(b: dict) -> dict:
+            waits = b.pop("_wait_seconds")
+            services = b.pop("_service_seconds")
+            b["avg_wait_minutes"] = round(sum(waits) / len(waits) / 60.0, 1) if waits else None
+            b["avg_service_minutes"] = (
+                round(sum(services) / len(services) / 60.0, 1) if services else None
+            )
+            decided = b["served"] + b["missed"]
+            b["no_show_rate"] = round(b["missed"] / decided, 3) if decided else None
+            return b
+
+        service_points = [finalize(b) for b in per_sdp.values()]
+        service_points.sort(key=lambda b: b["service_delivery_point_name"].lower())
+
+        totals = {
+            "waiting_now": sum(b["waiting_now"] for b in service_points),
+            "called_now": sum(b["called_now"] for b in service_points),
+            "serving_now": sum(b["serving_now"] for b in service_points),
+            "issued": sum(b["issued"] for b in service_points),
+            "served": sum(b["served"] for b in service_points),
+            "missed": sum(b["missed"] for b in service_points),
+            "cancelled": sum(b["cancelled"] for b in service_points),
+            "transferred": sum(b["transferred"] for b in service_points),
+        }
+        all_waits = [
+            b["avg_wait_minutes"] for b in service_points if b["avg_wait_minutes"] is not None
+        ]
+        all_services = [
+            b["avg_service_minutes"]
+            for b in service_points
+            if b["avg_service_minutes"] is not None
+        ]
+        totals["avg_wait_minutes"] = round(sum(all_waits) / len(all_waits), 1) if all_waits else None
+        totals["avg_service_minutes"] = (
+            round(sum(all_services) / len(all_services), 1) if all_services else None
+        )
+        decided = totals["served"] + totals["missed"]
+        totals["no_show_rate"] = round(totals["missed"] / decided, 3) if decided else None
+
+        return {
+            "date_from": date_from,
+            "date_to": date_to,
+            "totals": totals,
+            "service_points": service_points,
+        }
+
+    def get_display_board(self, *, waiting_limit: int = 5) -> dict:
+        """
+        Privacy-safe "now serving" snapshot across all service delivery
+        points, for waiting-room displays. Only queue numbers are exposed.
+        """
+        tickets = self.repository.get_display_tickets()
+
+        entries: dict[int, dict] = {}
+        for t in tickets:
+            entry = entries.get(t.service_delivery_point_id)
+            if entry is None:
+                sdp = t.service_delivery_point
+                entry = entries[t.service_delivery_point_id] = {
+                    "service_delivery_point_id": t.service_delivery_point_id,
+                    "service_delivery_point_name": sdp.name if sdp else f"SDP #{t.service_delivery_point_id}",
+                    "service_delivery_point_code": getattr(sdp, "code", None) if sdp else None,
+                    "now_serving": [],
+                    "now_called": [],
+                    "next_waiting": [],
+                    "waiting_count": 0,
+                }
+
+            projection = {
+                "queue_number": t.queue_number,
+                "status": str(t.status.value if hasattr(t.status, "value") else t.status),
+                "called_at": t.called_at,
+            }
+            if t.status == QueueStatus.SERVING:
+                entry["now_serving"].append(projection)
+            elif t.status == QueueStatus.CALLED:
+                entry["now_called"].append(projection)
+            else:
+                entry["waiting_count"] += 1
+                if len(entry["next_waiting"]) < waiting_limit:
+                    entry["next_waiting"].append(projection)
+
+        service_points = sorted(
+            entries.values(), key=lambda e: e["service_delivery_point_name"].lower()
+        )
+        return {
+            "generated_at": datetime.now(timezone.utc),
+            "service_points": service_points,
+        }

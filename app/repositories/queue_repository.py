@@ -272,3 +272,87 @@ class QueueRepository:
             .order_by(QueueTicket.id.asc())
             .all()
         )
+
+    # ============================================================
+    # ANALYTICS & DISPLAY BOARD
+    # ============================================================
+
+    def list_service_points(self) -> list[ServiceDeliveryPoint]:
+        """All non-deleted service delivery points, name-ordered."""
+        return (
+            self.db.query(ServiceDeliveryPoint)
+            .filter(ServiceDeliveryPoint.is_deleted.is_(False))
+            .order_by(ServiceDeliveryPoint.name.asc())
+            .all()
+        )
+
+    def get_stats_rows(
+        self, date_from: datetime, date_to: datetime
+    ) -> list[tuple]:
+        """
+        Raw per-ticket rows for the stats window. Aggregation happens in the
+        service layer so the computation stays portable across DB backends.
+
+        Returns tuples of:
+        (sdp_id, status, date_created, called_at, service_started_at, service_ended_at)
+        """
+        return (
+            self.db.query(
+                QueueTicket.service_delivery_point_id,
+                QueueTicket.status,
+                QueueTicket.date_created,
+                QueueTicket.called_at,
+                QueueTicket.service_started_at,
+                QueueTicket.service_ended_at,
+            )
+            .filter(
+                QueueTicket.is_deleted.is_(False),
+                QueueTicket.date_created >= date_from,
+                QueueTicket.date_created < date_to,
+            )
+            .all()
+        )
+
+    def get_live_status_counts(self) -> dict[tuple[int, QueueStatus], int]:
+        """
+        Current WAITING / CALLED / SERVING counts per service delivery point,
+        regardless of when the ticket was created.
+        """
+        rows = (
+            self.db.query(
+                QueueTicket.service_delivery_point_id,
+                QueueTicket.status,
+                func.count(QueueTicket.id),
+            )
+            .filter(
+                QueueTicket.is_deleted.is_(False),
+                QueueTicket.status.in_(
+                    [QueueStatus.WAITING, QueueStatus.CALLED, QueueStatus.SERVING]
+                ),
+            )
+            .group_by(QueueTicket.service_delivery_point_id, QueueTicket.status)
+            .all()
+        )
+        return {(sdp_id, status): int(count) for sdp_id, status, count in rows}
+
+    def get_display_tickets(self) -> list[QueueTicket]:
+        """
+        Active tickets (WAITING / CALLED / SERVING) across every service
+        delivery point, ordered for the waiting-room display board.
+        """
+        return (
+            self.db.query(QueueTicket)
+            .options(joinedload(QueueTicket.service_delivery_point))
+            .filter(
+                QueueTicket.is_deleted.is_(False),
+                QueueTicket.status.in_(
+                    [QueueStatus.WAITING, QueueStatus.CALLED, QueueStatus.SERVING]
+                ),
+            )
+            .order_by(
+                QueueTicket.service_delivery_point_id.asc(),
+                QueueTicket.queue_position.asc().nullslast(),
+                QueueTicket.id.asc(),
+            )
+            .all()
+        )

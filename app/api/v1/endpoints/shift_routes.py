@@ -1,3 +1,5 @@
+from datetime import date
+
 from fastapi import APIRouter, Depends, status
 from sqlalchemy.orm import Session
 
@@ -13,6 +15,7 @@ from app.schemas.shift_schemas import (
     ShiftDefinitionCreateSchema,
     ShiftDefinitionUpdateSchema,
     ShiftDefinitionReadSchema,
+    ShiftQuickSetupSchema,
     StaffShiftAssignmentCreateSchema,
     StaffShiftAssignmentUpdateSchema,
     StaffShiftAssignmentReadSchema,
@@ -44,16 +47,37 @@ def create_shift_definition(
     }
 
 
+@router.post("/definitions/quick-setup", response_model=dict, status_code=status.HTTP_201_CREATED)
+def quick_setup_shift_definitions(
+    payload: ShiftQuickSetupSchema,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    service = ShiftDefinitionService(db)
+    created = service.quick_setup(payload)
+    return {
+        "success": True,
+        "message": f"{len(created)} shift(s) created",
+        "items": [
+            ShiftDefinitionReadSchema.model_validate(d).model_dump() for d in created
+        ],
+        "count": len(created),
+    }
+
+
 @router.get("/definitions", response_model=dict)
 def list_shift_definitions(
     department_id: int = None,
+    service_delivery_point_id: int = None,
     skip: int = 0,
     limit: int = 100,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     service = ShiftDefinitionService(db)
-    items, total = service.list_definitions(department_id, skip, limit)
+    items, total = service.list_definitions(
+        department_id, service_delivery_point_id, skip, limit
+    )
     return {
         "success": True,
         "items": [ShiftDefinitionReadSchema.model_validate(i).model_dump() for i in items],
@@ -123,13 +147,24 @@ def create_shift_assignment(
 def list_shift_assignments(
     department_id: int = None,
     staff_profile_id: int = None,
+    service_delivery_point_id: int = None,
+    date_from: date = None,
+    date_to: date = None,
     skip: int = 0,
     limit: int = 100,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     service = StaffShiftAssignmentService(db)
-    items, total = service.list_assignments(department_id, staff_profile_id, skip, limit)
+    items, total = service.list_assignments(
+        department_id,
+        staff_profile_id,
+        service_delivery_point_id,
+        date_from,
+        date_to,
+        skip,
+        limit,
+    )
     return {
         "success": True,
         "items": [StaffShiftAssignmentReadSchema.model_validate(i).model_dump() for i in items],

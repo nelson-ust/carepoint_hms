@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.core.dependencies import require_permission
+from app.core.exceptions import BadRequestError
 from app.core.multitenancy import get_current_tenant
 from app.schemas.database_backup_schemas import BackupListResponseSchema
 from app.services.tenant_backup_service import TenantBackupService
@@ -23,7 +24,11 @@ router = APIRouter(tags=["Clinical - Tenant Backups"])
 def get_tenant_backup_service(db: Annotated[Session, Depends(get_db)]) -> TenantBackupService:
     tenant = get_current_tenant()
     if not tenant:
-        raise RuntimeError("Tenant context required.")
+        # A clean 400 (with CORS headers) instead of an unhandled RuntimeError
+        # 500 that the browser would surface as an opaque network failure.
+        raise BadRequestError(
+            message="No hospital context resolved for this request. Sign in to a tenant workspace and retry."
+        )
     return TenantBackupService(db, tenant.code)
 
 
@@ -65,3 +70,16 @@ def sweep_backups(
     """Manually trigger the retention policy sweep for this tenant."""
     # Logic is implemented in TenantBackupService
     return service.apply_retention()
+
+
+@router.get(
+    "/{backup_id}/download",
+    summary="Get a presigned download link for a backup artifact",
+)
+def download_backup(
+    backup_id: int,
+    _: Annotated[bool, Depends(require_permission("BACKUP_READ"))],
+    service: Annotated[TenantBackupService, Depends(get_tenant_backup_service)],
+):
+    """Return a short-lived S3 download URL for a completed recovery point."""
+    return service.get_download_link(backup_id)

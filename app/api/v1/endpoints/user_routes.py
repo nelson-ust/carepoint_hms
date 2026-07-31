@@ -72,7 +72,7 @@ def list_users(
     actor: AdminUser,
     service: Annotated[UserService, Depends(get_user_service)],
     skip: int = Query(0, ge=0),
-    limit: int = Query(20, ge=1, le=100),
+    limit: int = Query(20, ge=1, le=1000),
     search: Optional[str] = Query(None, min_length=1, max_length=100),
     status: Optional[str] = Query(None, description="ACTIVE, INACTIVE, LOCKED, SUSPENDED, INVITED."),
     role_code: Optional[str] = Query(None),

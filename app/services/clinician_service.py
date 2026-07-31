@@ -31,11 +31,15 @@ class ClinicianService:
         skip: int = 0,
         limit: int = 20,
         specialty: str | None = None,
+        search: str | None = None,
     ) -> tuple[list[StaffProfile], int]:
         """
-        Return paginated clinicians.
+        Return paginated clinicians, optionally filtered by specialty or a
+        free-text search over name/username/specialty.
         """
-        return self.repository.list_clinicians(skip=skip, limit=limit, specialty=specialty)
+        return self.repository.list_clinicians(
+            skip=skip, limit=limit, specialty=specialty, search=search
+        )
 
     def get_clinician(self, clinician_id: int) -> StaffProfile:
         """

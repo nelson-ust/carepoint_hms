@@ -46,6 +46,7 @@ from app.api.v1.endpoints.role_routes import router as role_router
 from app.api.v1.endpoints.permission_routes import router as permission_router
 from app.api.v1.endpoints.user_routes import router as user_router
 from app.api.v1.endpoints.staff_routes import router as staff_router
+from app.api.v1.endpoints.staff_profile_routes import router as staff_profile_router
 from app.api.v1.endpoints.two_factor_routes import router as two_factor_router
 from app.api.v1.endpoints.tenant_routes import router as tenant_router
 from app.api.v1.endpoints.tenant_settings_routes import router as tenant_settings_router
@@ -96,6 +97,7 @@ from app.api.v1.endpoints.patient_identity_routes import router as patient_ident
 from app.api.v1.endpoints.portal_routes import router as portal_self_service_router
 from app.api.v1.endpoints.hr_payroll_routes import router as hr_payroll_router
 from app.api.v1.endpoints.loyalty_routes import router as loyalty_router
+from app.api.v1.endpoints.patient_loyalty_routes import router as patient_loyalty_router
 
 from app.api.v1.endpoints.tenant_backup_routes import router as tenant_backup_router
 from app.api.v1.endpoints.master_backup_routes import router as master_backup_router
@@ -106,7 +108,17 @@ from app.api.v1.endpoints.saas_subscription_status_routes import router as saas_
 from app.api.v1.endpoints.saas_usage_routes import router as saas_usage_router
 from app.api.v1.endpoints.saas_admin_routes import router as saas_admin_router
 from app.api.v1.endpoints.integration_routes import router as integration_router
+from app.api.v1.endpoints.integration_public_routes import router as integration_public_router
+from app.api.v1.endpoints.developer_public_routes import router as developer_public_router
+from app.api.v1.endpoints.developer_portal_routes import router as developer_portal_router
+from app.api.v1.endpoints.developer_data_routes import router as developer_data_router
+from app.api.v1.endpoints.developer_admin_routes import router as developer_admin_router
+from app.api.v1.endpoints.medical_access_routes import router as medical_access_router
+from app.api.v1.endpoints.medical_access_public_routes import router as medical_access_public_router
+from app.api.v1.endpoints.membership_card_public_routes import router as membership_card_public_router
+from app.api.v1.endpoints.accounting_routes import router as accounting_router
 from app.api.v1.endpoints.template_routes import router as template_router
+from app.api.v1.endpoints.clinical_template_routes import router as clinical_template_router
 
 # Organization / setup
 from app.api.v1.endpoints.department_routes import router as department_router
@@ -126,6 +138,9 @@ from app.api.v1.endpoints.queue_routes import router as queue_router
 from app.api.v1.endpoints.membership_card_routes import router as membership_card_router
 from app.api.v1.endpoints.patient_portal_routes import router as patient_portal_router
 from app.api.v1.endpoints.paystack_webhook_routes import router as paystack_webhook_router
+from app.api.v1.endpoints.flutterwave_webhook_routes import router as flutterwave_webhook_router
+from app.api.v1.endpoints.whatsapp_webhook_routes import router as whatsapp_webhook_router
+from app.api.v1.endpoints.whatsapp_routes import router as whatsapp_router
 
 # Clinical
 from app.api.v1.endpoints.clinician_routes import router as clinician_router
@@ -134,6 +149,7 @@ from app.api.v1.endpoints.vital_sign_routes import router as vital_sign_router
 from app.api.v1.endpoints.consultation_routes import router as consultation_router
 from app.api.v1.endpoints.diagnosis_routes import router as diagnosis_router
 from app.api.v1.endpoints.referral_routes import router as referral_router
+from app.api.v1.endpoints.interoperability_routes import router as interoperability_router
 from app.api.v1.endpoints.meal_routes import router as meal_router
 
 # Laboratory
@@ -165,6 +181,8 @@ from app.api.v1.endpoints.ambulance_routes import (
     dispatch_router as ambulance_dispatch_router,
 )
 from app.api.v1.endpoints.notification_routes import router as notification_router
+from app.api.v1.endpoints.staff_portal_message_routes import router as staff_portal_message_router
+from app.api.v1.endpoints.patient_broadcast_routes import router as patient_broadcast_router
 from app.api.v1.endpoints.push_device_routes import router as push_device_router
 from app.api.v1.endpoints.compliance_routes import router as compliance_router
 
@@ -207,9 +225,8 @@ from app.api.v1.endpoints.insurance_claim_routes import (
 
 # Aggregated patient medical history (read-only)
 from app.api.v1.endpoints.medical_history_routes import router as medical_history_router
-
-# Reports
-# from app.api.v1.endpoints.report_routes import router as report_router
+from app.api.v1.endpoints.baseline_profile_routes import router as baseline_profile_router
+from app.api.v1.endpoints.medical_exam_routes import router as medical_exam_router
 
 
 # ---------------------------------------------------------------------
@@ -257,6 +274,7 @@ api_router.include_router(patient_identity_router)
 api_router.include_router(portal_self_service_router)
 api_router.include_router(hr_payroll_router)
 api_router.include_router(loyalty_router)
+api_router.include_router(patient_loyalty_router)
 api_router.include_router(tenant_dashboard_router)
 # Self-service profile endpoints (must be registered BEFORE the generic
 # /users admin router so /users/me does not collide with /users/{id}).
@@ -276,11 +294,22 @@ api_router.include_router(tenant_settings_router)
 api_router.include_router(tenant_backup_router, prefix="/backups")
 api_router.include_router(master_backup_router, prefix="/backups/master")
 api_router.include_router(integration_router)
+api_router.include_router(integration_public_router)
+api_router.include_router(developer_public_router)
+api_router.include_router(developer_portal_router)
+api_router.include_router(developer_data_router)
+api_router.include_router(developer_admin_router)
+api_router.include_router(medical_access_router)
+api_router.include_router(medical_access_public_router)
+api_router.include_router(membership_card_public_router)
+api_router.include_router(accounting_router)
 api_router.include_router(template_router)
+api_router.include_router(clinical_template_router)
 api_router.include_router(report_router)
 api_router.include_router(saas_admin_portal_router)
 api_router.include_router(user_router)
 api_router.include_router(staff_router)
+api_router.include_router(staff_profile_router)
 api_router.include_router(two_factor_router)
 
 # Organization / setup
@@ -299,6 +328,9 @@ api_router.include_router(queue_router)
 api_router.include_router(membership_card_router, prefix="/membership-cards", tags=["Membership Cards"])
 api_router.include_router(patient_portal_router)
 api_router.include_router(paystack_webhook_router)
+api_router.include_router(flutterwave_webhook_router)
+api_router.include_router(whatsapp_webhook_router)
+api_router.include_router(whatsapp_router)
 
 # Clinical
 api_router.include_router(clinician_router)
@@ -307,6 +339,7 @@ api_router.include_router(vital_sign_router)
 api_router.include_router(consultation_router)
 api_router.include_router(diagnosis_router)
 api_router.include_router(referral_router)
+api_router.include_router(interoperability_router)
 api_router.include_router(meal_router)
 
 # Laboratory
@@ -339,6 +372,8 @@ api_router.include_router(ambulance_router)
 api_router.include_router(ambulance_dispatch_router)
 # Notifications + direct messages — Stage 17
 api_router.include_router(notification_router)
+api_router.include_router(staff_portal_message_router)
+api_router.include_router(patient_broadcast_router)
 api_router.include_router(push_device_router)
 
 # Compliance / governance — Stage 18
@@ -378,6 +413,5 @@ api_router.include_router(insurance_appeal_router)
 # patient (visits, consults, diagnoses, lab + radiology, prescriptions,
 # surgeries, admissions, vitals).
 api_router.include_router(medical_history_router)
-
-# Reports
-# api_router.include_router(report_router)
+api_router.include_router(baseline_profile_router)
+api_router.include_router(medical_exam_router)

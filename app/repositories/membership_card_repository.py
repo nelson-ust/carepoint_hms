@@ -2,10 +2,10 @@
 from __future__ import annotations
 
 from typing import Optional, List
-from sqlalchemy.orm import Session, joinedload
-from sqlalchemy import select
+from sqlalchemy.orm import Session, joinedload, selectinload
+from sqlalchemy import func, or_, select
 
-from app.models.all_models import MembershipCard, MembershipCardTransaction
+from app.models.all_models import MembershipCard, MembershipCardTransaction, Patient
 from app.core.enums import MembershipCardStatus
 
 
@@ -40,14 +40,31 @@ class MembershipCardRepository:
         )
         return list(self.db.execute(stmt).scalars().all())
 
-    def list_cards(self, skip: int = 0, limit: int = 100) -> List[MembershipCard]:
+    def list_cards(
+        self,
+        skip: int = 0,
+        limit: int = 100,
+        *,
+        search: Optional[str] = None,
+        status: Optional[str] = None,
+    ) -> List[MembershipCard]:
         stmt = (
             select(MembershipCard)
             .options(joinedload(MembershipCard.patient))
-            .order_by(MembershipCard.date_issued.desc())
-            .offset(skip)
-            .limit(limit)
+            .filter(MembershipCard.is_deleted.is_(False))
         )
+        if status:
+            stmt = stmt.filter(MembershipCard.status == status)
+        if search:
+            like = f"%{search.strip().lower()}%"
+            stmt = stmt.outerjoin(Patient, Patient.id == MembershipCard.patient_id).filter(
+                or_(
+                    func.lower(MembershipCard.card_number).like(like),
+                    func.lower(Patient.first_name).like(like),
+                    func.lower(Patient.last_name).like(like),
+                )
+            )
+        stmt = stmt.order_by(MembershipCard.date_issued.desc()).offset(skip).limit(limit)
         return list(self.db.execute(stmt).scalars().all())
 
     def create_card(self, card: MembershipCard) -> MembershipCard:
@@ -61,8 +78,8 @@ class MembershipCardRepository:
 
     def update_card(self, card: MembershipCard) -> MembershipCard:
         self.db.add(card)
-        self.db.flush()
-        # self.db.refresh(card) # Avoid extra select if not needed
+        self.db.commit()
+        self.db.refresh(card)
         return card
 
     def create_transaction(self, transaction: MembershipCardTransaction) -> MembershipCardTransaction:

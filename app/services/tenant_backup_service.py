@@ -46,11 +46,13 @@ class TenantBackupService:
             
             db_url = decrypt_string(tenant.db_connection_string) if tenant.db_connection_string else ""
             
-            # Resolve bucket: 1. Tenant specific, 2. Global fallback, 3. Error
-            bucket_name = tenant.aws_s3_bucket_name or getattr(settings, "AWS_S3_BUCKET_NAME", "")
+            # Central policy: backups live in the TENANT's own bucket —
+            # provision it on demand; never fall back to the platform bucket.
+            from app.services.aws_s3_service import S3Service
+            bucket_name = S3Service().ensure_tenant_bucket(master_db, tenant)
             if not bucket_name:
                 logger.error(f"No S3 bucket resolved for tenant {self.tenant_code}. Backup cannot proceed.")
-                raise BadRequestError(message="S3 storage is mandatory for backups but no bucket is configured.")
+                raise BadRequestError(message="S3 storage is mandatory for backups but no tenant bucket could be provisioned.")
 
             logger.info(f"Starting backup for tenant {self.tenant_code} (Bucket: {bucket_name})")
 
@@ -79,7 +81,7 @@ class TenantBackupService:
                 return {
                     "success": True,
                     "backup_id": record.id,
-                    "filename": record.filename,
+                    "filename": record.file_name,
                     "status": record.status,
                     "storage": record.storage_location
                 }
@@ -90,26 +92,92 @@ class TenantBackupService:
     def get_backup_dashboard_data(self) -> dict:
         """Dashboard statistics for the tenant, pulled from its own Database."""
         repo = DatabaseBackupRepository(self.tenant_db)
-        backups = repo.get_all(limit=50)
+        try:
+            backups = repo.get_all(limit=50)
+        except Exception as exc:  # e.g. tenant DB missing the backup table
+            logger.exception(
+                "Backup dashboard query failed for tenant %s: %s", self.tenant_code, exc
+            )
+            self.tenant_db.rollback()
+            retention_days = int(getattr(settings, "BACKUP_RETENTION_DAYS", 30))
+            return {
+                "summary": {
+                    "health_status": "Unknown",
+                    "health_description": (
+                        "Backup history is unavailable for this hospital. If this "
+                        "persists, run a tenant schema sync (init_db --sync-tenants)."
+                    ),
+                    "retention_policy": f"{retention_days} Days (Rolling)",
+                    "storage_usage_gb": 0.0,
+                    "last_backup_at": None,
+                    "recovery_points_count": 0,
+                },
+                "backups": [],
+            }
         
-        total_size = sum(b.size_bytes or 0 for b in backups if b.status == "COMPLETED")
+        # The repository writes "SUCCESS"; older/manual rows may say "COMPLETED".
+        done = {"SUCCESS", "COMPLETED"}
+        total_size = sum(b.size_bytes or 0 for b in backups if b.status in done)
         storage_gb = round(total_size / (1024**3), 4)
-        
-        last_backup = next((b for b in backups if b.status == "COMPLETED"), None)
-        
+
+        last_backup = next((b for b in backups if b.status in done), None)
+
         failed_count = len([b for b in backups[:5] if b.status == "FAILED"])
         health = "Healthy"
         if failed_count > 0: health = "Degraded"
         if failed_count >= 3: health = "Unhealthy"
 
+        if health == "Healthy":
+            health_description = "Recent backups completed without failures."
+        else:
+            health_description = f"{failed_count} of the last 5 backup attempts failed."
+
+        retention_days = int(getattr(settings, "BACKUP_RETENTION_DAYS", 30))
+
         return {
             "summary": {
                 "health_status": health,
+                "health_description": health_description,
+                "retention_policy": f"{retention_days} Days (Rolling)",
                 "storage_usage_gb": storage_gb,
-                "last_backup_at": last_backup.backup_finished_at if last_backup else None,
-                "recovery_points_count": len([b for b in backups if b.status == "COMPLETED"])
+                "last_backup_at": last_backup.completed_at if last_backup else None,
+                "recovery_points_count": len([b for b in backups if b.status in done])
             },
             "backups": backups
+        }
+
+    def get_download_link(self, backup_id: int, *, expires_in: int = 3600) -> dict:
+        """
+        Produce a short-lived presigned URL for a completed backup artifact.
+        """
+        repo = DatabaseBackupRepository(self.tenant_db)
+        record = self.tenant_db.query(DatabaseBackup).filter(DatabaseBackup.id == backup_id).first()
+        if record is None:
+            raise NotFoundError(message="Backup record not found.")
+        if record.status not in ("SUCCESS", "COMPLETED"):
+            raise BadRequestError(message=f"This backup is not downloadable (status: {record.status}).")
+        if not record.s3_key:
+            raise BadRequestError(message="No storage artifact is attached to this backup.")
+
+        with get_master_db_context() as master_db:
+            tenant = master_db.query(Tenant).filter(Tenant.code == self.tenant_code).first()
+            from app.services.aws_s3_service import S3Service
+            bucket_name = S3Service().ensure_tenant_bucket(master_db, tenant) or ""
+
+        from app.services.aws_s3_service import S3Service
+
+        url = S3Service().generate_presigned_url(bucket_name, record.s3_key, expires_in=expires_in)
+        if not url:
+            raise BadRequestError(
+                message="Could not generate a download link — S3 storage is not configured."
+            )
+        return {
+            "success": True,
+            "download_url": url,
+            "s3_url": url,
+            "filename": record.file_name,
+            "size_bytes": record.size_bytes,
+            "expires_in": expires_in,
         }
 
     def apply_retention(self) -> dict:
@@ -119,8 +187,9 @@ class TenantBackupService:
             if not tenant:
                 raise NotFoundError(message="Tenant not found.")
                 
-            bucket_name = tenant.aws_s3_bucket_name or getattr(settings, "AWS_S3_BUCKET_NAME", "")
-            
+            from app.services.aws_s3_service import S3Service
+            bucket_name = S3Service().ensure_tenant_bucket(master_db, tenant) or ""
+
             repo = DatabaseBackupRepository(self.tenant_db)
             result = repo.purge_expired_backups(bucket_name)
             self.tenant_db.commit()

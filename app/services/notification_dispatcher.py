@@ -94,11 +94,34 @@ def _send_email_safe(
         logger.warning("send_email helper unavailable")
         return False
     try:
-        send_email(subject=subject, recipients=list(recipients), body_text=body_text)
+        send_email(
+            subject=subject,
+            recipients=list(recipients),
+            body_text=body_text,
+            body_html=body_html,
+        )
         return True
     except Exception as exc:
         logger.exception("send_email failed: %s", exc)
         return False
+
+
+def _wrap_notification_html(subject: str, body: str) -> Optional[str]:
+    """
+    Render a plain notification body into the shared branded HTML shell so
+    patient/staff notification emails match the platform's styled look. Falls
+    back to None (plain-text only) if the template helper is unavailable.
+    """
+    try:
+        from app.utils.email_utils import render_branded_email  # type: ignore
+    except Exception:
+        return None
+    paragraphs = [p.strip() for p in (body or "").split("\n\n") if p.strip()]
+    return render_branded_email(
+        title=subject,
+        body_paragraphs=paragraphs or [body or ""],
+        preheader=(body or subject)[:140],
+    )
 
 
 def _send_sms_safe(to: str, body: str) -> bool:
@@ -194,10 +217,12 @@ class NotificationDispatcher:
         recipients: Iterable[Union[User, dict, int]],
         subject: Optional[str] = None,
         body: str = "",
+        body_html: Optional[str] = None,
         body_template: Optional[str] = None,
         subject_template: Optional[str] = None,
         context: Optional[dict[str, Any]] = None,
         force_channels: Optional[Sequence[str]] = None,
+        exclude_channels: Optional[Sequence[str]] = None,
         suppress_quiet_hours: bool = True,
     ) -> list[Notification]:
         """
@@ -236,6 +261,10 @@ class NotificationDispatcher:
         if suppress_quiet_hours and self.settings.is_in_quiet_hours():
             channels = [c for c in channels if c not in QUIET_HOUR_CHANNELS]
 
+        if exclude_channels:
+            excluded = {c for c in exclude_channels}
+            channels = [c for c in channels if c not in excluded]
+
         if not channels:
             logger.info(
                 "NotificationDispatcher: no channels resolved for event %s; nothing sent.",
@@ -254,6 +283,7 @@ class NotificationDispatcher:
                     channel=channel,
                     subject=rendered_subject,
                     body=rendered_body,
+                    body_html=body_html,
                     payload_metadata={"event": event_code, "context": ctx},
                 )
                 self._deliver(notif, user=user, channel=channel)
@@ -314,16 +344,26 @@ class NotificationDispatcher:
         subject: Optional[str],
         body: str,
         payload_metadata: dict[str, Any],
+        body_html: Optional[str] = None,
     ) -> Notification:
         address = self._resolve_address(user=user, raw=raw_recipient, channel=channel)
+        # Tag the patient on IN_APP rows so patient-directed notifications are
+        # visible in the patient portal (which scopes its feed by patient_id).
+        # Only IN_APP is tagged, so a multi-channel dispatch never surfaces the
+        # same notification several times in the portal feed.
+        patient_id = None
+        if channel == "in_app" and isinstance(raw_recipient, dict):
+            patient_id = raw_recipient.get("patient_id")
         notif = Notification(
             user_id=user.id if user else None,
+            patient_id=patient_id,
             event_code=event_code,
             channel=_CODE_TO_ENUM[channel],
             status=NotificationStatus.PENDING,
             recipient_address=address,
             subject=subject,
             body=body,
+            body_html=body_html if channel == "email" else None,
             payload_metadata=payload_metadata,
         )
         self.db.add(notif)
@@ -350,11 +390,18 @@ class NotificationDispatcher:
             elif channel == "email":
                 if not notif.recipient_address:
                     raise RuntimeError("missing email address")
+                subject = notif.subject or "Notification"
+                # Prefer the styled HTML the caller composed (persisted on the
+                # row); only synthesize a wrapper when none was stored.
+                html_body = getattr(notif, "body_html", None) or _wrap_notification_html(
+                    subject, notif.body
+                )
                 ok = _send_email_safe(
                     self.db,
-                    subject=notif.subject or "Notification",
+                    subject=subject,
                     recipients=[notif.recipient_address],
                     body_text=notif.body,
+                    body_html=html_body,
                 )
 
             elif channel == "sms":

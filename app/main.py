@@ -139,9 +139,34 @@ APP_VERSION = getattr(settings, "APP_VERSION", "1.0.0")
 APP_ENV = getattr(settings, "APP_ENV", None) or getattr(settings, "ENVIRONMENT", "development")
 APP_DEBUG = bool(getattr(settings, "APP_DEBUG", None) or getattr(settings, "DEBUG", False))
 
-UVICORN_HOST = getattr(settings, "UVICORN_HOST", None) or getattr(settings, "HOST", "127.0.0.1")
-UVICORN_PORT = int(getattr(settings, "UVICORN_PORT", None) or getattr(settings, "PORT", 8000))
-UVICORN_RELOAD = bool(getattr(settings, "UVICORN_RELOAD", False))
+# Host / port / reload can be overridden with plain environment variables
+# (UVICORN_HOST, UVICORN_PORT, UVICORN_RELOAD) so they work even when they are
+# not declared as fields on the Settings model. This makes
+# ``UVICORN_RELOAD=true python -m app.main`` enable autoreload in development.
+def _env_flag(name: str):
+    """Return True/False from an env var, or None when the var is unset."""
+    raw = os.getenv(name)
+    if raw is None:
+        return None
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+UVICORN_HOST = (
+    os.getenv("UVICORN_HOST")
+    or getattr(settings, "UVICORN_HOST", None)
+    or getattr(settings, "HOST", "127.0.0.1")
+)
+UVICORN_PORT = int(
+    os.getenv("UVICORN_PORT")
+    or getattr(settings, "UVICORN_PORT", None)
+    or getattr(settings, "PORT", 8000)
+)
+_reload_override = _env_flag("UVICORN_RELOAD")
+UVICORN_RELOAD = (
+    _reload_override
+    if _reload_override is not None
+    else bool(getattr(settings, "UVICORN_RELOAD", False))
+)
 
 # Database / static toggles.
 AUTO_CREATE_TABLES = bool(getattr(settings, "AUTO_CREATE_TABLES", True))
@@ -493,16 +518,18 @@ register_exception_handlers(app)
 # Static files
 # =============================================================================
 
-# Mount the uploads directory only if it exists; otherwise log a warning so
-# operators see something missing without the API failing to start.
-if UPLOADS_DIR and os.path.isdir(UPLOADS_DIR):
-    app.mount("/uploads", StaticFiles(directory=UPLOADS_DIR), name="uploads")
-    logger.info("Mounted uploads directory at '/uploads' from '%s'.", UPLOADS_DIR)
-else:
-    logger.warning(
-        "Uploads directory '%s' not found or not configured. Skipping StaticFiles mount.",
-        UPLOADS_DIR,
-    )
+# Mount the uploads directory. We resolve (and create) a stable base dir —
+# settings.UPLOADS_DIR, or <cwd>/uploads by default — so publicly served
+# assets like tenant branding logos and card-funding proofs are always
+# reachable at '/uploads/...', even when UPLOADS_DIR isn't explicitly set.
+try:
+    from app.utils.storage import uploads_base_dir
+
+    _uploads_dir = uploads_base_dir()
+    app.mount("/uploads", StaticFiles(directory=_uploads_dir), name="uploads")
+    logger.info("Mounted uploads directory at '/uploads' from '%s'.", _uploads_dir)
+except Exception as exc:  # never block startup on a static mount
+    logger.warning("Could not mount uploads directory at '/uploads': %s", exc)
 
 
 # =============================================================================
@@ -525,6 +552,30 @@ if APP_ENV.lower() in {"production", "staging"} and (
         APP_ENV,
     )
     _CORS_ALLOW_CREDENTIALS = False
+
+# In non-production environments, also allow any private-LAN origin so the app
+# can be opened from another device on the same network via the host's LAN IP
+# (e.g. http://192.168.x.x:3000) without enumerating every address in
+# BACKEND_CORS_ORIGINS. Intentionally disabled in production/staging, where
+# origins must be listed explicitly.
+if APP_ENV.lower() not in {"production", "staging"}:
+    _LAN_ORIGIN_REGEX = (
+        r"^https?://("
+        r"localhost|127\.0\.0\.1|\[::1\]|"
+        r"10\.\d{1,3}\.\d{1,3}\.\d{1,3}|"
+        r"192\.168\.\d{1,3}\.\d{1,3}|"
+        r"172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}"
+        r")(?::\d+)?$"
+    )
+    ALLOW_ORIGIN_REGEX = (
+        f"{ALLOW_ORIGIN_REGEX}|{_LAN_ORIGIN_REGEX}"
+        if ALLOW_ORIGIN_REGEX
+        else _LAN_ORIGIN_REGEX
+    )
+    logger.info(
+        "Development CORS: private-LAN origins are allowed via regex (%s).",
+        APP_ENV,
+    )
 
 app.add_middleware(
     CORSMiddleware,

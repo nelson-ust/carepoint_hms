@@ -199,7 +199,7 @@ def list_procedures(
     _: Annotated[User, Depends(require_permission("RADIOLOGY_ORDER", "RADIOLOGY_PERFORM"))],
     service: Annotated[RadiologyCatalogService, Depends(get_catalog_service)],
     skip: int = Query(0, ge=0),
-    limit: int = Query(50, ge=1, le=200),
+    limit: int = Query(50, ge=1, le=1000),
     modality: Optional[str] = Query(None),
     search: Optional[str] = Query(None),
 ):
@@ -282,7 +282,7 @@ def list_for_visit(
     _: Annotated[User, Depends(require_permission("RADIOLOGY_ORDER", "RADIOLOGY_PERFORM", "VISIT_READ"))],
     service: Annotated[RadiologyOrderService, Depends(get_order_service)],
     skip: int = Query(0, ge=0),
-    limit: int = Query(50, ge=1, le=200),
+    limit: int = Query(50, ge=1, le=1000),
 ):
     items, total = service.list_for_visit(visit_id, skip=skip, limit=limit)
     return paginate_response(
@@ -301,7 +301,7 @@ def list_worklist(
     _: Annotated[User, Depends(require_permission("RADIOLOGY_PERFORM"))],
     service: Annotated[RadiologyOrderService, Depends(get_order_service)],
     skip: int = Query(0, ge=0),
-    limit: int = Query(50, ge=1, le=200),
+    limit: int = Query(50, ge=1, le=1000),
     statuses: Optional[list[str]] = Query(None),
 ):
     items, total = service.list_worklist(skip=skip, limit=limit, statuses=statuses)

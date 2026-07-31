@@ -69,7 +69,7 @@ def list_for_visit(
     _: Annotated[User, Depends(require_permission("LAB_ORDER_CREATE", "LAB_RESULT_ENTER", "VISIT_READ"))],
     service: Annotated[LabOrderService, Depends(get_lab_order_service)],
     skip: int = Query(0, ge=0),
-    limit: int = Query(50, ge=1, le=200),
+    limit: int = Query(50, ge=1, le=1000),
 ):
     """
     Retrieve all laboratory orders associated with a specific visit ID.
@@ -93,7 +93,7 @@ def list_worklist(
     _: Annotated[User, Depends(require_permission("LAB_RESULT_ENTER"))],
     service: Annotated[LabOrderService, Depends(get_lab_order_service)],
     skip: int = Query(0, ge=0),
-    limit: int = Query(50, ge=1, le=200),
+    limit: int = Query(50, ge=1, le=1000),
     statuses: Optional[list[str]] = Query(
         None, description="Filter by: ORDERED, SAMPLE_COLLECTED, IN_PROGRESS, RESULT_READY, COMPLETED, CANCELLED."
     ),

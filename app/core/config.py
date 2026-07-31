@@ -73,6 +73,14 @@ class Settings(BaseSettings):
     API_V1_PREFIX: str = "/api/v1"
     DEBUG: bool = False
     ENVIRONMENT: str = "development"
+
+    # Public base URL of the frontend used to build invitation-accept links
+    # (e.g. https://app.carepointhms.com). When unset, invite responses still
+    # include the raw token and the UI builds a link from its own origin.
+    INVITATION_ACCEPT_BASE_URL: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices("INVITATION_ACCEPT_BASE_URL", "CAREPOINT_HMS_INVITATION_ACCEPT_BASE_URL"),
+    )
     ENABLE_SCHEDULER: bool = Field(
         False,
         validation_alias=AliasChoices("ENABLE_SCHEDULER", "CAREPOINT_HMS_ENABLE_SCHEDULER"),
@@ -97,6 +105,15 @@ class Settings(BaseSettings):
         description="Frontend path that handles password reset. The reset token is appended as a query parameter.",
     )
 
+    MEDICAL_ACCESS_LINK_EXPIRY_HOURS: int = Field(
+        24,
+        validation_alias=AliasChoices(
+            "MEDICAL_ACCESS_LINK_EXPIRY_HOURS",
+            "CAREPOINT_HMS_MEDICAL_ACCESS_LINK_EXPIRY_HOURS",
+        ),
+        description="Default lifetime (hours) of a one-time medical-record access link before it auto-expires.",
+    )
+
     # =========================================================
     # DATABASE SETTINGS
     # =========================================================
@@ -114,6 +131,14 @@ class Settings(BaseSettings):
     SQLALCHEMY_ECHO: bool = False
     DB_POOL_SIZE: int = 20
     DB_MAX_OVERFLOW: int = 40
+    #: Tenant engines get a LEAN pool — with one engine per tenant database,
+    #: a large pool multiplies across every tenant and inflates memory and
+    #: Postgres connection counts. 3+5 per tenant is ample for per-request use.
+    TENANT_DB_POOL_SIZE: int = 3
+    TENANT_DB_MAX_OVERFLOW: int = 5
+    #: Max tenant engines kept alive at once (LRU-evicted beyond this; the
+    #: default and master engines are never evicted).
+    TENANT_ENGINE_CACHE_SIZE: int = 24
     DB_POOL_TIMEOUT: int = 30
     DB_POOL_RECYCLE: int = 1800
     DB_POOL_PRE_PING: bool = True
@@ -193,7 +218,56 @@ class Settings(BaseSettings):
     TWILIO_WHATSAPP_FROM: Optional[str] = None
     TWILIO_WHATSAPP_MESSAGING_SERVICE_SID: Optional[str] = None
     TWILIO_STATUS_CALLBACK_URL: Optional[str] = None
-    
+
+    # =========================================================
+    # META WHATSAPP CLOUD API (webhooks + outbound messaging)
+    # =========================================================
+    # Master switch. When False the webhook still verifies + logs raw events
+    # but outbound send is disabled.
+    WHATSAPP_ENABLED: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("WHATSAPP_ENABLED", "CAREPOINT_HMS_WHATSAPP_ENABLED"),
+    )
+    # Token you enter in the Meta App Dashboard used for the GET verification
+    # handshake (hub.verify_token).
+    WHATSAPP_VERIFY_TOKEN: Optional[SecretStr] = Field(
+        default=None,
+        validation_alias=AliasChoices("WHATSAPP_VERIFY_TOKEN", "CAREPOINT_HMS_WHATSAPP_VERIFY_TOKEN"),
+    )
+    # The Meta *App Secret* — used to validate the X-Hub-Signature-256 header on
+    # POST webhook deliveries. This is app-level (one per Meta app), not per WABA.
+    WHATSAPP_APP_SECRET: Optional[SecretStr] = Field(
+        default=None,
+        validation_alias=AliasChoices("WHATSAPP_APP_SECRET", "CAREPOINT_HMS_WHATSAPP_APP_SECRET"),
+    )
+    # When True (default) POST deliveries missing/failing signature validation
+    # are rejected. Disable only for local testing.
+    WHATSAPP_VERIFY_SIGNATURE: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("WHATSAPP_VERIFY_SIGNATURE", "CAREPOINT_HMS_WHATSAPP_VERIFY_SIGNATURE"),
+    )
+    # Optional global fallbacks used when a tenant has no per-number config row.
+    WHATSAPP_ACCESS_TOKEN: Optional[SecretStr] = Field(
+        default=None,
+        validation_alias=AliasChoices("WHATSAPP_ACCESS_TOKEN", "CAREPOINT_HMS_WHATSAPP_ACCESS_TOKEN"),
+    )
+    WHATSAPP_PHONE_NUMBER_ID: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices("WHATSAPP_PHONE_NUMBER_ID", "CAREPOINT_HMS_WHATSAPP_PHONE_NUMBER_ID"),
+    )
+    WHATSAPP_WABA_ID: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices("WHATSAPP_WABA_ID", "CAREPOINT_HMS_WHATSAPP_WABA_ID"),
+    )
+    WHATSAPP_API_BASE_URL: str = Field(
+        default="https://graph.facebook.com",
+        validation_alias=AliasChoices("WHATSAPP_API_BASE_URL", "CAREPOINT_HMS_WHATSAPP_API_BASE_URL"),
+    )
+    WHATSAPP_API_VERSION: str = Field(
+        default="v21.0",
+        validation_alias=AliasChoices("WHATSAPP_API_VERSION", "CAREPOINT_HMS_WHATSAPP_API_VERSION"),
+    )
+
     # =========================================================
     # PAYSTACK SETTINGS
     # =========================================================
@@ -202,15 +276,59 @@ class Settings(BaseSettings):
     PAYSTACK_WEBHOOK_SECRET: Optional[SecretStr] = None
 
     # =========================================================
+    # SUBSCRIPTION PAYMENT / GATEWAY SETTINGS
+    # =========================================================
+    # Active gateway used for tenant subscription checkout.
+    PAYMENT_GATEWAY: str = Field(
+        default="flutterwave",
+        validation_alias=AliasChoices("PAYMENT_GATEWAY", "CAREPOINT_HMS_PAYMENT_GATEWAY"),
+    )
+    # Frontend URL the gateway redirects back to after checkout.
+    PAYMENT_CALLBACK_URL: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices("PAYMENT_CALLBACK_URL", "CAREPOINT_HMS_PAYMENT_CALLBACK_URL"),
+    )
+    FLUTTERWAVE_SECRET_KEY: Optional[SecretStr] = Field(
+        default=None,
+        validation_alias=AliasChoices("FLUTTERWAVE_SECRET_KEY", "CAREPOINT_HMS_FLUTTERWAVE_SECRET_KEY"),
+    )
+    FLUTTERWAVE_PUBLIC_KEY: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices("FLUTTERWAVE_PUBLIC_KEY", "CAREPOINT_HMS_FLUTTERWAVE_PUBLIC_KEY"),
+    )
+    FLUTTERWAVE_ENCRYPTION_KEY: Optional[SecretStr] = Field(
+        default=None,
+        validation_alias=AliasChoices("FLUTTERWAVE_ENCRYPTION_KEY", "CAREPOINT_HMS_FLUTTERWAVE_ENCRYPTION_KEY"),
+    )
+    FLUTTERWAVE_BASE_URL: str = Field(
+        default="https://api.flutterwave.com/v3",
+        validation_alias=AliasChoices("FLUTTERWAVE_BASE_URL", "CAREPOINT_HMS_FLUTTERWAVE_BASE_URL"),
+    )
+    # The "secret hash" configured in the Flutterwave dashboard, echoed back in
+    # the `verif-hash` header on webhook calls.
+    FLUTTERWAVE_WEBHOOK_HASH: Optional[SecretStr] = Field(
+        default=None,
+        validation_alias=AliasChoices("FLUTTERWAVE_WEBHOOK_HASH", "CAREPOINT_HMS_FLUTTERWAVE_WEBHOOK_HASH"),
+    )
+    # Free-trial length (days) offered on any plan at selection time.
+    SUBSCRIPTION_TRIAL_DAYS: int = Field(
+        default=14,
+        validation_alias=AliasChoices("SUBSCRIPTION_TRIAL_DAYS", "CAREPOINT_HMS_SUBSCRIPTION_TRIAL_DAYS"),
+    )
+
+    # =========================================================
     # CORS SETTINGS
     # =========================================================
     # Annotated with NoDecode so pydantic-settings hands the raw env string to
     # the `assemble_cors_origins` validator below instead of trying to JSON-
     # decode a comma-separated value like
-    # `http://localhost:3000,http://127.0.0.1:3000`.
+    # `http://localhost:3000,http://127.0.0.1:3000`. CAREPOINT_HMS_BACKEND_CORS_ORIGINS
     BACKEND_CORS_ORIGINS: Annotated[List[str], NoDecode] = Field(
         default_factory=lambda: ["*"]
     )
+    # CAREPOINT_HMS_BACKEND_CORS_ORIGINS: Annotated[List[str], NoDecode] = Field(
+    #     default_factory=lambda: ["*"]
+    # )
 
     # =========================================================
     # FILE / MEDIA SETTINGS
@@ -236,6 +354,16 @@ class Settings(BaseSettings):
 
     # =========================================================
     # OPTIONAL S3 / OBJECT STORAGE
+    #
+    # Central storage policy:
+    #   * Credentials (+ region / endpoint) live ONLY in these env settings —
+    #     one S3 principal for the whole platform.
+    #   * Every TENANT stores its uploads in its OWN bucket, recorded on
+    #     Tenant.aws_s3_bucket_name (provisioned at tenant creation, or
+    #     on demand via S3Service.ensure_tenant_bucket).
+    #   * AWS_S3_BUCKET_NAME below is the PLATFORM (SaaS) bucket, used only
+    #     for master-level artifacts (e.g. master DB backups) — never for
+    #     tenant uploads.
     # =========================================================
     S3_ENABLED: bool = False
     AWS_ACCESS_KEY_ID: Optional[SecretStr] = None

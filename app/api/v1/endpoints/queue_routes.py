@@ -1,6 +1,7 @@
 # app/api/v1/endpoints/queue_routes.py
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Annotated, Optional
 
 from fastapi import APIRouter, Depends, Query, status
@@ -20,9 +21,13 @@ from app.dependencies.service_delivery_point import (
 )
 from app.models.all_models import User
 from app.schemas.queue_schema import (
+    QueueDisplayBoardResponseSchema,
+    QueueStatsResponseSchema,
     QueueTicketActionResponseSchema,
     QueueTicketCallSchema,
     QueueTicketCancelSchema,
+    QueueTicketCompleteAndEndVisitSchema,
+    QueueTicketCompleteAndRouteSchema,
     QueueTicketCompleteSchema,
     QueueTicketListResponseSchema,
     QueueTicketReadSchema,
@@ -39,23 +44,6 @@ router = APIRouter(
     dependencies=[Depends(require_plan_feature("clinical"))]
 )
 
-
-
-# Pydantic schemas for the new "complete-and-route" / "complete-and-end-visit"
-# actions are kept inline because they're tiny and used only here.
-from pydantic import BaseModel, Field
-from typing import Optional as _Optional
-
-
-class QueueTicketCompleteAndRouteSchema(BaseModel):
-    target_service_delivery_point_id: int = Field(
-        ..., description="SDP the patient should be queued at next."
-    )
-    notes: _Optional[str] = Field(None, max_length=500)
-
-
-class QueueTicketCompleteAndEndVisitSchema(BaseModel):
-    note: _Optional[str] = Field(None, max_length=2000)
 
 
 def get_queue_service(db: Annotated[Session, Depends(get_db)]) -> QueueService:
@@ -84,6 +72,45 @@ def get_my_worklist(
 
 
 @router.get(
+    "/stats",
+    response_model=QueueStatsResponseSchema,
+    summary="Queue throughput and wait-time statistics per service point",
+)
+def get_queue_stats(
+    _: AnyAuthenticatedUser,
+    service: Annotated[QueueService, Depends(get_queue_service)],
+    date_from: Optional[datetime] = Query(None, description="Window start (ISO 8601). Defaults to start of today UTC."),
+    date_to: Optional[datetime] = Query(None, description="Window end (ISO 8601, exclusive). Defaults to end of today UTC."),
+):
+    """
+    Per-service-point aggregates for the requested window: tickets issued,
+    served / missed / cancelled / transferred, live queue depth, average
+    wait, average service time and no-show rate.
+    """
+    data = service.get_queue_stats(date_from=date_from, date_to=date_to)
+    return {"success": True, "message": "Queue statistics computed successfully.", **data}
+
+
+@router.get(
+    "/display-board",
+    response_model=QueueDisplayBoardResponseSchema,
+    summary="Waiting-room display board (now serving / up next)",
+)
+def get_display_board(
+    _: AnyAuthenticatedUser,
+    service: Annotated[QueueService, Depends(get_queue_service)],
+    waiting_limit: int = Query(5, ge=1, le=20, description="How many upcoming tickets to show per service point."),
+):
+    """
+    Privacy-safe snapshot for waiting-room screens: per service point, the
+    tickets now being served, just called, and the next few waiting numbers.
+    Only queue numbers are exposed — no patient identifiers.
+    """
+    data = service.get_display_board(waiting_limit=waiting_limit)
+    return {"success": True, "message": "Display board fetched successfully.", **data}
+
+
+@router.get(
     "/service-points/{service_delivery_point_id}/worklist",
     response_model=ServicePointWorklistResponseSchema,
     summary="Get worklist for a service-point workstation",
@@ -106,7 +133,7 @@ def list_service_point_tickets(
     _: Annotated[User, Depends(require_assigned_to_sdp(sdp_param_name="service_delivery_point_id"))],
     service: Annotated[QueueService, Depends(get_queue_service)],
     skip: int = Query(0, ge=0),
-    limit: int = Query(50, ge=1, le=200),
+    limit: int = Query(50, ge=1, le=1000),
     statuses: Optional[list[str]] = Query(
         None, description="Filter by status: WAITING, CALLED, SERVING, SERVED, MISSED, CANCELLED, TRANSFERRED."
     ),

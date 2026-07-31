@@ -41,7 +41,7 @@ to `User.id` in the current data model.
 from datetime import datetime, timezone
 from typing import Optional
 
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session, joinedload
 
 from app.models.all_models import (
@@ -146,22 +146,71 @@ class StaffProfileRepository:
             .first()
         )
 
-    def list_users(self, *, skip: int = 0, limit: int = 20) -> tuple[list[dict], int]:
+    def list_users(
+        self,
+        *,
+        skip: int = 0,
+        limit: int = 20,
+        search: Optional[str] = None,
+        status: Optional[str] = None,
+    ) -> tuple[list[dict], int]:
         """
         Return paginated user summaries including role count and staff profile data.
 
         Args:
             skip: Pagination offset.
             limit: Pagination limit.
+            search: Optional free-text filter over name, username, email and staff no.
+            status: Optional exact user-status filter (e.g. ACTIVE, SUSPENDED).
 
         Returns:
             tuple[list[dict], int]:
                 - list of user summary dictionaries
-                - total count
+                - total count (after filters)
         """
+        filters = [User.is_deleted.is_(False)]
+
+        # The staff directory must not surface patient-portal accounts.
+        # Portal sign-in provisions a User carrying the PATIENT role, so
+        # anyone holding that role is excluded UNLESS they are real
+        # personnel — i.e. they have a staff profile (onboarded staff) or
+        # are a superuser/admin account. A staff member who is also a
+        # patient keeps appearing because their staff profile wins.
+        patient_user_ids = (
+            self.db.query(UserRoleAssociation.user_id)
+            .join(Role, Role.id == UserRoleAssociation.role_id)
+            .filter(
+                Role.code == "PATIENT",
+                UserRoleAssociation.is_deleted.is_(False),
+            )
+        )
+        filters.append(
+            or_(
+                StaffProfile.id.isnot(None),
+                User.is_superuser.is_(True),
+                ~User.id.in_(patient_user_ids),
+            )
+        )
+
+        if status:
+            filters.append(User.status == status.strip().upper())
+        if search:
+            term = f"%{search.strip()}%"
+            filters.append(
+                or_(
+                    User.first_name.ilike(term),
+                    User.last_name.ilike(term),
+                    User.username.ilike(term),
+                    User.email.ilike(term),
+                    StaffProfile.staff_no.ilike(term),
+                    StaffProfile.job_title.ilike(term),
+                )
+            )
+
         total = (
-            self.db.query(func.count(User.id))
-            .filter(User.is_deleted.is_(False))
+            self.db.query(func.count(func.distinct(User.id)))
+            .outerjoin(StaffProfile, StaffProfile.user_id == User.id)
+            .filter(*filters)
             .scalar()
             or 0
         )
@@ -174,7 +223,7 @@ class StaffProfileRepository:
             )
             .outerjoin(StaffProfile, StaffProfile.user_id == User.id)
             .outerjoin(UserRoleAssociation, UserRoleAssociation.user_id == User.id)
-            .filter(User.is_deleted.is_(False))
+            .filter(*filters)
             .group_by(User.id, StaffProfile.id)
             .order_by(User.first_name.asc(), User.last_name.asc(), User.username.asc())
             .offset(skip)
@@ -198,7 +247,13 @@ class StaffProfileRepository:
                     "personal_phone": getattr(user, "personal_phone", None),
                     "role_count": int(role_count or 0),
                     "staff_no": staff_profile.staff_no if staff_profile else None,
+                    "job_title": staff_profile.job_title if staff_profile else None,
                     "department_id": staff_profile.department_id if staff_profile else None,
+                    "department_name": (
+                        staff_profile.department.name
+                        if staff_profile is not None and staff_profile.department is not None
+                        else None
+                    ),
                     "service_delivery_point_ids": [
                         link.service_delivery_point_id 
                         for link in (staff_profile.service_delivery_points or [])
@@ -941,7 +996,10 @@ class StaffProfileRepository:
                 UserRoleAssociation.user_id == user_id,
                 Permission.is_deleted.is_(False),
             )
-            .distinct(Permission.id)
+            # Plain DISTINCT (not DISTINCT ON): PostgreSQL requires DISTINCT ON
+            # expressions to lead the ORDER BY, which conflicts with the
+            # module/code sort — full-row DISTINCT dedupes just as well here.
+            .distinct()
             .order_by(Permission.module.asc(), Permission.code.asc())
             .all()
         )

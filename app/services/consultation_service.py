@@ -26,7 +26,9 @@ Business Rules
 - Finalization can trigger automatic visit termination or routing to ancillary services (Lab, Pharmacy, etc.).
 """
 
+import logging
 from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Optional
 
 from sqlalchemy.orm import Session
@@ -40,7 +42,14 @@ from app.schemas.consultation_schema import (
     ConsultationFinalizeSchema,
     ConsultationUpdateSchema,
 )
+from app.utils.charge_capture import (
+    add_charge,
+    resolve_billable_service,
+    get_or_create_open_billing,
+)
 from app.utils.visit_routing import end_visit, route_visit_to_next_sdp, validate_visit_sdp_activity
+
+logger = logging.getLogger(__name__)
 
 
 _TERMINAL_VISIT = {VisitStatus.COMPLETED, VisitStatus.CANCELLED}
@@ -127,8 +136,53 @@ class ConsultationService:
             assessment_note=payload.assessment_note,
             plan_note=payload.plan_note,
         )
+
+        # Doctor's admission recommendation (gates inpatient admission).
+        if payload.recommends_admission:
+            consultation.recommends_admission = True
+            consultation.admission_recommended_at = datetime.now(timezone.utc)
+        consultation.admission_recommendation_note = payload.admission_recommendation_note
+
+        # 5. Capture the consultation fee onto the visit's running charge sheet
+        #    (idempotent per consultation). Priced from the CONSULTATION billable
+        #    service, which is auto-created on first use and re-priceable by admins.
+        self._capture_consultation_fee(visit, consultation.id)
+
         self.db.commit()
         return self.repository.get_required_by_id(consultation.id)
+
+    # Default price used only when the CONSULTATION billable service is first
+    # auto-created; admins can edit it afterwards in the billable services catalog.
+    _DEFAULT_CONSULTATION_FEE = Decimal("5000.00")
+
+    def _capture_consultation_fee(self, visit, consultation_id: int) -> None:
+        """Best-effort: add the consultation fee to the visit's OPEN billing."""
+        try:
+            service = resolve_billable_service(
+                self.db,
+                code="CONSULTATION",
+                name="Consultation Fee",
+                default_price=self._DEFAULT_CONSULTATION_FEE,
+                category="CONSULTATION",
+                domain="CONSULTATION",
+            )
+            unit_price = Decimal(str(service.default_price or 0))
+            if unit_price <= 0:
+                # Nothing to charge (fee not configured) — skip silently.
+                return
+            billing = get_or_create_open_billing(self.db, visit=visit)
+            add_charge(
+                self.db,
+                billing=billing,
+                service_name="Consultation Fee",
+                service_code="CONSULTATION",
+                unit_price=unit_price,
+                quantity=Decimal("1"),
+                billable_service_id=service.id,
+                source_reference=f"CONSULTATION:{consultation_id}",
+            )
+        except Exception as exc:  # pragma: no cover - charge capture must not block care
+            logger.warning("Failed to capture consultation fee for visit %s: %s", visit.id, exc)
 
 
     def update(
@@ -151,6 +205,15 @@ class ConsultationService:
         # Apply updates
         for field, value in payload.model_dump(exclude_unset=True).items():
             setattr(consultation, field, value)
+
+        # Stamp / clear the recommendation timestamp when the flag changes.
+        _changed = payload.model_dump(exclude_unset=True)
+        if "recommends_admission" in _changed:
+            if _changed["recommends_admission"]:
+                if consultation.admission_recommended_at is None:
+                    consultation.admission_recommended_at = datetime.now(timezone.utc)
+            else:
+                consultation.admission_recommended_at = None
 
         # Maintain state integrity
         if was_closed:

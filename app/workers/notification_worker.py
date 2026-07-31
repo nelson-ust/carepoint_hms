@@ -19,7 +19,7 @@ from sqlalchemy import create_engine, or_
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
-from app.core.database import MASTER_DATABASE_URL, get_engine_for_url
+from app.core.database import MASTER_DATABASE_URL, get_engine_for_url, get_master_engine
 from app.core.cryptography import decrypt_string
 from app.models.all_models import Tenant, NotificationStatus, SaaSNotification
 from app.services.notification_dispatcher import NotificationDispatcher
@@ -49,7 +49,7 @@ def get_active_tenants() -> List[Tuple[str, str]]:
         logger.error("MASTER_DATABASE_URL not set")
         return []
         
-    master_engine = create_engine(MASTER_DATABASE_URL)
+    master_engine = get_master_engine()  # cached, shared pool
     tenants_data = []
     try:
         with Session(master_engine) as session:
@@ -72,7 +72,7 @@ def get_active_tenants() -> List[Tuple[str, str]]:
     except Exception as e:
         logger.error(f"Error fetching tenants from master: {e}")
     finally:
-        master_engine.dispose()
+        pass  # cached master engine — never dispose per cycle
     return tenants_data
 
 def process_saas_notifications():
@@ -80,7 +80,7 @@ def process_saas_notifications():
     if not MASTER_DATABASE_URL:
         return
         
-    master_engine = create_engine(MASTER_DATABASE_URL)
+    master_engine = get_master_engine()  # cached, shared pool
     try:
         with Session(master_engine) as session:
             pending = (
@@ -104,7 +104,7 @@ def process_saas_notifications():
     except Exception as e:
         logger.error(f"Error processing SaaS notifications: {e}")
     finally:
-        master_engine.dispose()
+        pass  # cached master engine — never dispose per cycle
 
 def run_worker_loop():
     """Main worker loop."""

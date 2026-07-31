@@ -35,7 +35,7 @@ from app.schemas.procedure_schema import (
 )
 from app.utils.charge_capture import (
     add_charge,
-    find_billable_service,
+    resolve_billable_service,
     get_or_create_open_billing,
 )
 from app.utils.security_event_util import record_security_event
@@ -134,7 +134,14 @@ class ProcedureOrderService:
         if payload.auto_capture_charge:
             billing = get_or_create_open_billing(self.db, visit=visit)
             unit_price = Decimal(catalog.default_price or 0)
-            billable = find_billable_service(self.db, code=f"PROC-{catalog.code}")
+            billable = resolve_billable_service(
+                self.db,
+                code=f"PROC-{catalog.code}",
+                name=f"Procedure: {catalog.name}",
+                default_price=unit_price,
+                category="PROCEDURE",
+                domain="PROCEDURE",
+            )
             add_charge(
                 self.db,
                 billing=billing,
@@ -142,7 +149,7 @@ class ProcedureOrderService:
                 service_code=f"PROC-{catalog.code}",
                 unit_price=unit_price,
                 quantity=Decimal("1"),
-                billable_service_id=billable.id if billable else None,
+                billable_service_id=billable.id,
                 source_reference=f"PROCEDURE_ORDER:{order.id}",
             )
 

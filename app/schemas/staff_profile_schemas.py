@@ -500,7 +500,10 @@ class UserListItemSchema(BaseModel):
     last_login_at: Optional[datetime] = None
     role_count: int = 0
     staff_no: Optional[str] = None
+    job_title: Optional[str] = None
     department_id: Optional[int] = None
+    department_name: Optional[str] = None
+    service_delivery_point_ids: list[int] = []
 
 
 class UserListResponseSchema(BaseModel):

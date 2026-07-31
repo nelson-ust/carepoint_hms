@@ -56,6 +56,22 @@ from sqlalchemy.ext.associationproxy import association_proxy, AssociationProxy
 
 from app.models.base import MasterTable, TenantTable, utc_now
 from app.core.enums import (
+    VendorBillStatus,
+    FixedAssetStatus,
+    DepreciationMethod,
+    JournalEntryStatus,
+    JournalSourceType,
+    AccountingPeriodStatus,
+    MedicalAccessRequesterType,
+    MedicalAccessStatus,
+    MedicalAccessDecision,
+    MedicalAccessActorType,
+    MedicalAccessAuditEvent,
+    DeveloperAccountStatus,
+    DeveloperAppEnvironment,
+    DeveloperAppStatus,
+    DeveloperGrantStatus,
+    AccountType,
     AccreditationStatus,
     AdjudicationOutcome,
     AdmissionStatus,
@@ -64,13 +80,13 @@ from app.core.enums import (
     AnaesthesiaType,
     AppointmentStatus,
     ApprovalApproverKind,
-    ApprovalDecisionAction,
     ApprovalDynamicApprover,
+    ApprovalLogAction,
     ApprovalRequestStatus,
-    ApprovalRequestStepStatus,
     ApprovalStatus,
     ApprovalStepDecisionRule,
-    ApprovalSubjectType,
+    ApprovalStepStatus,
+    RequestTypeCode,
     ASAClass,
     AuthorizationStatus,
     BedStatus,
@@ -109,8 +125,11 @@ from app.core.enums import (
     MealRecipient,
     MealStatus,
     MessageStatus,
+    PatientBroadcastAudience,
+    PatientBroadcastStatus,
     MembershipCardStatus,
     MembershipCardTransactionType,
+    CardFundingRequestStatus,
     NotificationChannel,
     NotificationStatus,
     OfflineDeviceStatus,
@@ -137,6 +156,7 @@ from app.core.enums import (
     RadiologyOrderStatus,
     RadiologyReportStatus,
     ReferralPriority,
+    DataExchangeStatus,
     ReferralStatus,
     RFQStatus,
     ServicePointType,
@@ -199,6 +219,8 @@ from app.core.enums import (
     TimesheetStatus,
     PayrollRunStatus,
     PayrollLineStatus,
+    PayrollComponentType,
+    PayrollCalcMethod,
     OvertimeStatus,
     StaffLoanStatus,
     SalaryAdvanceStatus,
@@ -333,6 +355,8 @@ class User(TenantTable):
     # These mirror common StaffProfile fields at the user level so they're
     # available even for users without a staff profile (e.g. patient users).
     profile_photo_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    #: Handwritten-signature image (stored in the tenant's S3 bucket).
+    signature_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
     job_title: Mapped[Optional[str]] = mapped_column(String(150), nullable=True)
     department_id: Mapped[Optional[int]] = mapped_column(
         ForeignKey("department.id"), nullable=True, index=True
@@ -344,6 +368,10 @@ class User(TenantTable):
     bio: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     date_of_birth: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
     gender: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+
+    # UI appearance preference, persisted on the profile so it follows the
+    # user across devices. Only "light" or "dark".
+    theme_preference: Mapped[str] = mapped_column(String(10), default="light", server_default="light", nullable=False)
 
     @property
     def profile_completion(self) -> int:
@@ -704,6 +732,9 @@ class StaffProfile(TenantTable):
     # ----- Statutory / tax IDs -----------------------------------------
     tax_id: Mapped[Optional[str]] = mapped_column(String(80), nullable=True)
     pension_pin: Mapped[Optional[str]] = mapped_column(String(80), nullable=True)
+    pension_provider_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("pension_provider.id"), nullable=True, index=True
+    )
     nhf_no: Mapped[Optional[str]] = mapped_column(String(80), nullable=True)
     bank_name: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
     bank_account_no: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
@@ -1408,6 +1439,17 @@ class Consultation(TenantTable):
     assessment_note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     plan_note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
+    # Inpatient-admission gate: a patient may only be admitted on a doctor's
+    # recommendation (recorded here) or on emergency. Set by the clinician
+    # during / at the end of the consultation.
+    recommends_admission: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False, index=True
+    )
+    admission_recommended_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    admission_recommendation_note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
     consultation_started_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     consultation_ended_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
@@ -1440,6 +1482,11 @@ class Referral(TenantTable):
 
     referral_no: Mapped[str] = mapped_column(String(100), unique=True, nullable=False, index=True)
     destination_facility: Mapped[str] = mapped_column(String(255), nullable=False)
+    # Facility routing WITHIN the tenant (same database). When both facilities
+    # belong to this tenant the referral is "internal" and the receiving
+    # facility can open the patient's record directly — no export needed.
+    source_facility_id: Mapped[Optional[int]] = mapped_column(ForeignKey("facility.id"), nullable=True, index=True)
+    destination_facility_id: Mapped[Optional[int]] = mapped_column(ForeignKey("facility.id"), nullable=True, index=True)
     reason_for_referral: Mapped[str] = mapped_column(Text, nullable=False)
     clinical_summary: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     referral_date: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
@@ -1530,6 +1577,307 @@ class PatientRecordTransferRequest(MasterTable):
     
     approved_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class DataExchangeRequest(MasterTable):
+    """
+    A request by one hospital (``requesting_tenant``) to obtain a patient's
+    records held by another hospital (``holding_tenant``), coordinated in the
+    master database so both sides can see it.
+
+    Data only flows once the holding hospital confirms patient consent AND a
+    staff member approves the request, at which point a point-in-time export is
+    generated from the holding tenant's database and attached here for the
+    requester to retrieve (until it expires).
+    """
+
+    request_no: Mapped[str] = mapped_column(String(100), unique=True, nullable=False, index=True)
+
+    requesting_tenant_id: Mapped[int] = mapped_column(ForeignKey("tenant.id"), nullable=False, index=True)
+    requesting_facility_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    holding_tenant_id: Mapped[int] = mapped_column(ForeignKey("tenant.id"), nullable=False, index=True)
+
+    patient_global_id: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    patient_display_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+
+    purpose: Mapped[str] = mapped_column(Text, nullable=False)
+    scope: Mapped[str] = mapped_column(String(50), default="FULL_RECORD", nullable=False)
+
+    status: Mapped[DataExchangeStatus] = mapped_column(
+        Enum(DataExchangeStatus), default=DataExchangeStatus.PENDING, nullable=False, index=True
+    )
+
+    requested_by_user_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+    # Consent + approval (both required before any data is shared)
+    consent_confirmed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    consent_reference: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    approved_by_user_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    approved_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    denied_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    # Exported record payload (JSON) + lifecycle
+    payload_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    payload_generated_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    retrieved_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class IntegrationPartner(MasterTable):
+    """
+    A registered third-party Hospital Management application connected to a
+    tenant for two-way data exchange.
+
+    - Inbound (partner -> CarePoint): the partner authenticates with an API key.
+      We store only the key *prefix* (for lookup) and a SHA-256 *hash* of the
+      full key; the plaintext is shown once at creation.
+    - Outbound (CarePoint -> partner): we call the partner's ``base_url`` using
+      the stored (encrypted) ``auth_secret`` in the ``auth_header``.
+    """
+
+    tenant_id: Mapped[int] = mapped_column(ForeignKey("tenant.id"), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, index=True)
+
+    # Inbound credential (they call us)
+    key_prefix: Mapped[str] = mapped_column(String(40), unique=True, nullable=False, index=True)
+    key_hash: Mapped[str] = mapped_column(String(128), nullable=False)
+    scopes: Mapped[str] = mapped_column(String(100), default="READ", nullable=False)
+    expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_used_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_used_ip: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+
+    # Outbound endpoint (we call them)
+    base_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    auth_header: Mapped[str] = mapped_column(String(64), default="X-API-Key", nullable=False)
+    auth_secret_encrypted: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    created_by_user_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+
+
+class ExternalDataRecord(TenantTable):
+    """
+    A record pushed INTO this tenant by a connected third-party application.
+    Serves as an auditable ingestion sink for arbitrary partner payloads.
+    """
+
+    source_partner_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
+    source_partner_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    resource_type: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+    external_id: Mapped[Optional[str]] = mapped_column(String(120), nullable=True, index=True)
+    patient_global_id: Mapped[Optional[str]] = mapped_column(String(100), nullable=True, index=True)
+    payload_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
+
+
+# ============================================================
+# DEVELOPER PLATFORM  (self-service third-party API access)
+# ============================================================
+
+
+class DeveloperAccount(MasterTable):
+    """
+    A self-registered third-party developer / organization that wants
+    programmatic access to the platform's data-exchange APIs (e.g. a partner
+    hospital app, an analytics vendor, a personal-health-record product).
+
+    Registration is self-service and email-verified. Verified accounts may
+    create :class:`DeveloperApp` credentials, but no app can read real patient
+    data until the *holding tenant* approves a :class:`DeveloperDataGrant`.
+    """
+
+    organization_name: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    contact_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    email: Mapped[str] = mapped_column(String(255), unique=True, nullable=False, index=True)
+    website: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    status: Mapped[DeveloperAccountStatus] = mapped_column(
+        Enum(DeveloperAccountStatus), default=DeveloperAccountStatus.PENDING,
+        nullable=False, index=True,
+    )
+    email_verified: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+
+    # Email verification (token hash stored; plaintext emailed / returned once).
+    verification_token_hash: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    verification_expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    verified_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    # Dashboard / management token: authenticates the developer's self-service
+    # portal calls (create/list/revoke apps). Prefix stored for lookup, hash for
+    # verification; issued once at verification and on explicit re-issue.
+    dashboard_token_prefix: Mapped[Optional[str]] = mapped_column(String(40), unique=True, nullable=True, index=True)
+    dashboard_token_hash: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+
+    # Platform-admin oversight
+    suspended_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    reviewed_by_user_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    reviewed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    apps: Mapped[list["DeveloperApp"]] = relationship(
+        back_populates="account", cascade="all, delete-orphan",
+    )
+
+
+class DeveloperApp(MasterTable):
+    """
+    An application belonging to a :class:`DeveloperAccount`, carrying one API
+    key. A developer may run several apps (e.g. sandbox vs live).
+
+    Only the key *prefix* (lookup) and a SHA-256 *hash* are stored; the
+    plaintext key is shown once at creation / rotation.
+    """
+
+    developer_account_id: Mapped[int] = mapped_column(
+        ForeignKey("developer_account.id"), nullable=False, index=True,
+    )
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    environment: Mapped[DeveloperAppEnvironment] = mapped_column(
+        Enum(DeveloperAppEnvironment), default=DeveloperAppEnvironment.SANDBOX, nullable=False,
+    )
+    status: Mapped[DeveloperAppStatus] = mapped_column(
+        Enum(DeveloperAppStatus), default=DeveloperAppStatus.ACTIVE, nullable=False, index=True,
+    )
+
+    key_prefix: Mapped[str] = mapped_column(String(40), unique=True, nullable=False, index=True)
+    key_hash: Mapped[str] = mapped_column(String(128), nullable=False)
+
+    # Requested capabilities (csv of DEVELOPER_SCOPES codes). Effective access is
+    # the intersection of these with a tenant's approved grant scopes.
+    scopes: Mapped[str] = mapped_column(String(255), default="", nullable=False)
+
+    expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_used_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_used_ip: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+
+    account: Mapped["DeveloperAccount"] = relationship(back_populates="apps")
+
+
+class DeveloperDataGrant(MasterTable):
+    """
+    A tenant's authorization for a developer app to access that tenant's data.
+
+    This is the consent gate: a developer app can read a hospital's patient
+    history / diagnostics only while an APPROVED grant exists, and only for the
+    scopes the tenant approved (which may be a subset of what the app requested).
+    """
+
+    developer_app_id: Mapped[int] = mapped_column(
+        ForeignKey("developer_app.id"), nullable=False, index=True,
+    )
+    developer_account_id: Mapped[int] = mapped_column(
+        ForeignKey("developer_account.id"), nullable=False, index=True,
+    )
+    tenant_id: Mapped[int] = mapped_column(ForeignKey("tenant.id"), nullable=False, index=True)
+
+    status: Mapped[DeveloperGrantStatus] = mapped_column(
+        Enum(DeveloperGrantStatus), default=DeveloperGrantStatus.PENDING, nullable=False, index=True,
+    )
+    requested_scopes: Mapped[str] = mapped_column(String(255), default="", nullable=False)
+    approved_scopes: Mapped[str] = mapped_column(String(255), default="", nullable=False)
+    justification: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
+    decided_by_user_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    decided_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    decision_note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+
+# ============================================================
+# MEDICAL RECORD ACCESS REQUESTS  (consent-gated, one-time links)
+# ============================================================
+
+
+class MedicalRecordAccessRequest(MasterTable):
+    """
+    A request by a healthcare provider (another hospital) OR a registered
+    developer app to access a patient's medical history held by the patient's
+    primary hospital.
+
+    Access requires explicit authorization: by default BOTH the patient and the
+    holding (primary) hospital must approve. Only when every required approval
+    is satisfied does the system mint a secure, one-time, read-only access link
+    that expires after a configurable window and becomes invalid once used.
+
+    Lives in the master DB so requester, holding hospital and patient can all be
+    coordinated across tenant boundaries.
+    """
+
+    request_no: Mapped[str] = mapped_column(String(100), unique=True, nullable=False, index=True)
+
+    requester_type: Mapped[MedicalAccessRequesterType] = mapped_column(
+        Enum(MedicalAccessRequesterType), nullable=False, index=True
+    )
+    requesting_tenant_id: Mapped[Optional[int]] = mapped_column(ForeignKey("tenant.id"), nullable=True, index=True)
+    requesting_facility_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    requesting_developer_app_id: Mapped[Optional[int]] = mapped_column(ForeignKey("developer_app.id"), nullable=True, index=True)
+    requester_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    requester_contact_email: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+
+    holding_tenant_id: Mapped[int] = mapped_column(ForeignKey("tenant.id"), nullable=False, index=True)
+
+    patient_global_id: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    patient_display_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    patient_email: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    scope: Mapped[str] = mapped_column(String(50), default="MEDICAL_HISTORY", nullable=False)
+
+    status: Mapped[MedicalAccessStatus] = mapped_column(
+        Enum(MedicalAccessStatus), default=MedicalAccessStatus.PENDING, nullable=False, index=True
+    )
+
+    # ----- Dual authorization -----
+    requires_patient_approval: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    requires_hospital_approval: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+
+    patient_decision: Mapped[MedicalAccessDecision] = mapped_column(
+        Enum(MedicalAccessDecision), default=MedicalAccessDecision.PENDING, nullable=False
+    )
+    patient_decided_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Secure token emailed to the patient so they can decide without an account.
+    patient_decision_token_prefix: Mapped[Optional[str]] = mapped_column(String(40), unique=True, nullable=True, index=True)
+    patient_decision_token_hash: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+
+    hospital_decision: Mapped[MedicalAccessDecision] = mapped_column(
+        Enum(MedicalAccessDecision), default=MedicalAccessDecision.PENDING, nullable=False
+    )
+    hospital_decided_by_user_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    hospital_decided_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    decline_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    # ----- One-time access link -----
+    access_token_prefix: Mapped[Optional[str]] = mapped_column(String(40), unique=True, nullable=True, index=True)
+    access_token_hash: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    link_expiry_hours: Mapped[int] = mapped_column(Integer, default=24, nullable=False)
+    link_generated_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    link_expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    link_used_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    # Point-in-time read-only snapshot served by the one-time link.
+    payload_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+
+    requested_by_user_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
+
+
+class MedicalRecordAccessAudit(MasterTable):
+    """Append-only audit trail for a :class:`MedicalRecordAccessRequest`."""
+
+    request_id: Mapped[int] = mapped_column(ForeignKey("medical_record_access_request.id"), nullable=False, index=True)
+    request_no: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+
+    event: Mapped[MedicalAccessAuditEvent] = mapped_column(Enum(MedicalAccessAuditEvent), nullable=False, index=True)
+    actor_type: Mapped[MedicalAccessActorType] = mapped_column(Enum(MedicalAccessActorType), nullable=False)
+    actor_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    actor_display: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+
+    detail: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    ip_address: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False, index=True)
 
 
 class ProcedureCatalog(TenantTable):
@@ -1879,6 +2227,168 @@ class Payer(TenantTable):
     address: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
 
+class Account(TenantTable):
+    """Chart-of-accounts entry. Every billable service points at one account
+    so each captured charge can be posted to the correct ledger code."""
+
+    __tablename__ = "account"
+
+    code: Mapped[str] = mapped_column(String(50), unique=True, nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(150), nullable=False, index=True)
+    account_type: Mapped[AccountType] = mapped_column(
+        Enum(AccountType), default=AccountType.REVENUE, nullable=False, index=True
+    )
+    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+
+class AccountingPeriod(TenantTable):
+    """Fiscal accounting period (normally one calendar month). Journal entries
+    always belong to a period; a CLOSED period rejects new postings."""
+
+    code: Mapped[str] = mapped_column(String(20), unique=True, nullable=False, index=True)  # e.g. 2026-07
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    start_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    end_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    status: Mapped[AccountingPeriodStatus] = mapped_column(
+        Enum(AccountingPeriodStatus), default=AccountingPeriodStatus.OPEN, nullable=False, index=True
+    )
+    closed_by_user_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    closed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class JournalEntry(TenantTable):
+    """Double-entry journal header. Total debits must equal total credits;
+    only POSTED entries contribute to ledgers and financial statements."""
+
+    entry_no: Mapped[str] = mapped_column(String(50), unique=True, nullable=False, index=True)
+    entry_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    period_id: Mapped[Optional[int]] = mapped_column(ForeignKey("accounting_period.id"), nullable=True, index=True)
+    memo: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    status: Mapped[JournalEntryStatus] = mapped_column(
+        Enum(JournalEntryStatus), default=JournalEntryStatus.DRAFT, nullable=False, index=True
+    )
+    source_type: Mapped[JournalSourceType] = mapped_column(
+        Enum(JournalSourceType), default=JournalSourceType.MANUAL, nullable=False, index=True
+    )
+    #: Idempotency key linking back to the operational record
+    #: (e.g. "billing_payment:123") so auto-posting never double-books.
+    source_ref: Mapped[Optional[str]] = mapped_column(String(120), nullable=True, unique=True, index=True)
+
+    total_debit: Mapped[Decimal] = mapped_column(Numeric(14, 2), default=0, nullable=False)
+    total_credit: Mapped[Decimal] = mapped_column(Numeric(14, 2), default=0, nullable=False)
+
+    created_by_user_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    posted_by_user_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    posted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    #: When this entry reverses another, points at the original (and vice versa).
+    reversal_of_id: Mapped[Optional[int]] = mapped_column(ForeignKey("journal_entry.id"), nullable=True, index=True)
+
+    lines: Mapped[list["JournalEntryLine"]] = relationship(
+        back_populates="entry", cascade="all, delete-orphan"
+    )
+    period: Mapped[Optional["AccountingPeriod"]] = relationship()
+
+
+class JournalEntryLine(TenantTable):
+    """A single debit or credit against one ledger account."""
+
+    journal_entry_id: Mapped[int] = mapped_column(ForeignKey("journal_entry.id"), nullable=False, index=True)
+    account_id: Mapped[int] = mapped_column(ForeignKey("account.id"), nullable=False, index=True)
+    account_code: Mapped[Optional[str]] = mapped_column(String(50), nullable=True, index=True)
+    account_name: Mapped[Optional[str]] = mapped_column(String(150), nullable=True)
+    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    debit: Mapped[Decimal] = mapped_column(Numeric(14, 2), default=0, nullable=False)
+    credit: Mapped[Decimal] = mapped_column(Numeric(14, 2), default=0, nullable=False)
+
+    entry: Mapped["JournalEntry"] = relationship(back_populates="lines")
+    account: Mapped["Account"] = relationship()
+
+
+class Vendor(TenantTable):
+    """Supplier / vendor for accounts payable."""
+
+    name: Mapped[str] = mapped_column(String(255), unique=True, nullable=False, index=True)
+    contact_person: Mapped[Optional[str]] = mapped_column(String(150), nullable=True)
+    email: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    phone: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)
+    tax_id: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    address: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+
+
+class VendorBill(TenantTable):
+    """A supplier bill (accounts payable). Booking it posts
+    Dr expense / Cr Accounts Payable; each payment posts Dr AP / Cr cash."""
+
+    vendor_id: Mapped[int] = mapped_column(ForeignKey("vendor.id"), nullable=False, index=True)
+    bill_no: Mapped[str] = mapped_column(String(100), unique=True, nullable=False, index=True)
+    bill_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    due_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True, index=True)
+    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    #: Expense (or asset) account the bill is charged to.
+    expense_account_id: Mapped[int] = mapped_column(ForeignKey("account.id"), nullable=False, index=True)
+    total_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)
+    amount_paid: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)
+    status: Mapped[VendorBillStatus] = mapped_column(
+        Enum(VendorBillStatus), default=VendorBillStatus.OPEN, nullable=False, index=True
+    )
+
+    vendor: Mapped["Vendor"] = relationship()
+    expense_account: Mapped["Account"] = relationship()
+    payments: Mapped[list["VendorBillPayment"]] = relationship(
+        back_populates="bill", cascade="all, delete-orphan")
+
+
+class VendorBillPayment(TenantTable):
+    """A (partial) payment against a vendor bill."""
+
+    vendor_bill_id: Mapped[int] = mapped_column(ForeignKey("vendor_bill.id"), nullable=False, index=True)
+    amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    paid_at: Mapped[date] = mapped_column(Date, nullable=False)
+    payment_method: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    reference: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
+
+    bill: Mapped["VendorBill"] = relationship(back_populates="payments")
+
+
+class FixedAsset(TenantTable):
+    """Fixed-asset register entry with straight-line depreciation."""
+
+    code: Mapped[str] = mapped_column(String(60), unique=True, nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    category: Mapped[Optional[str]] = mapped_column(String(100), nullable=True, index=True)
+    acquisition_date: Mapped[date] = mapped_column(Date, nullable=False)
+    cost: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    salvage_value: Mapped[Decimal] = mapped_column(Numeric(14, 2), default=0, nullable=False)
+    useful_life_months: Mapped[int] = mapped_column(Integer, nullable=False)
+    method: Mapped[DepreciationMethod] = mapped_column(
+        Enum(DepreciationMethod), default=DepreciationMethod.STRAIGHT_LINE, nullable=False)
+
+    asset_account_id: Mapped[Optional[int]] = mapped_column(ForeignKey("account.id"), nullable=True)
+    depreciation_expense_account_id: Mapped[Optional[int]] = mapped_column(ForeignKey("account.id"), nullable=True)
+    accumulated_depreciation_account_id: Mapped[Optional[int]] = mapped_column(ForeignKey("account.id"), nullable=True)
+
+    accumulated_depreciation: Mapped[Decimal] = mapped_column(Numeric(14, 2), default=0, nullable=False)
+    #: Last period code (YYYY-MM) already depreciated, to keep runs idempotent.
+    last_depreciated_period: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)
+    status: Mapped[FixedAssetStatus] = mapped_column(
+        Enum(FixedAssetStatus), default=FixedAssetStatus.ACTIVE, nullable=False, index=True)
+
+
+class BudgetLine(TenantTable):
+    """Budgeted amount for one account in one period (YYYY-MM)."""
+
+    account_id: Mapped[int] = mapped_column(ForeignKey("account.id"), nullable=False, index=True)
+    period_code: Mapped[str] = mapped_column(String(10), nullable=False, index=True)
+    amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)
+
+    account: Mapped["Account"] = relationship()
+
+    __table_args__ = (UniqueConstraint("account_id", "period_code", name="uq_budget_account_period"),)
+
+
 class BillableService(TenantTable):
     """Master catalog of billable services."""
 
@@ -1888,6 +2398,11 @@ class BillableService(TenantTable):
 
     default_price: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)
     description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    account_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("account.id"), nullable=True, index=True
+    )
+
+    account: Mapped[Optional["Account"]] = relationship()
 
 
 class Billing(TenantTable):
@@ -1923,6 +2438,9 @@ class Billing(TenantTable):
         cascade="all, delete-orphan",
     )
     invoices: Mapped[list["Invoice"]] = relationship(back_populates="billing")
+    billing_payments: Mapped[list["BillingPayment"]] = relationship(
+        back_populates="billing", cascade="all, delete-orphan"
+    )
 
 
 class BillingItem(TenantTable):
@@ -1938,6 +2456,13 @@ class BillingItem(TenantTable):
     discount_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)
     line_total: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)
     source_reference: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    account_code: Mapped[Optional[str]] = mapped_column(String(50), nullable=True, index=True)
+    account_name: Mapped[Optional[str]] = mapped_column(String(150), nullable=True)
+    # Provenance: where the service was rendered and by whom (e.g. captured from
+    # the Patient Queue at the current service delivery point).
+    service_delivery_point_id: Mapped[Optional[int]] = mapped_column(
+        Integer, nullable=True, index=True)
+    rendered_by_user_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
 
     billing: Mapped["Billing"] = relationship(back_populates="items")
     billable_service: Mapped[Optional["BillableService"]] = relationship()
@@ -2032,6 +2557,39 @@ class Payment(TenantTable):
     visit_flow_step: Mapped[Optional["VisitFlowStep"]] = relationship()
     received_by_staff: Mapped[Optional["StaffProfile"]] = relationship()
     membership_card_transaction: Mapped[Optional["MembershipCardTransaction"]] = relationship(back_populates="payment")
+
+
+class BillingPayment(TenantTable):
+    """
+    A payment taken against a visit's running ``Billing`` charge sheet before a
+    formal invoice is issued (i.e. incremental / partial payments made while the
+    patient is still receiving services). At visit completion these are carried
+    forward onto the final :class:`Invoice`.
+    """
+
+    billing_id: Mapped[int] = mapped_column(ForeignKey("billing.id"), nullable=False, index=True)
+    received_by_staff_id: Mapped[Optional[int]] = mapped_column(ForeignKey("staff_profile.id"), nullable=True)
+    payment_reference: Mapped[str] = mapped_column(String(100), nullable=False, unique=True, index=True)
+    payment_method: Mapped[Optional[str]] = mapped_column(String(100), nullable=True, index=True)
+    payment_status: Mapped[PaymentStatus] = mapped_column(
+        Enum(PaymentStatus),
+        default=PaymentStatus.SUCCESSFUL,
+        nullable=False,
+        index=True,
+    )
+    amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    currency: Mapped[str] = mapped_column(String(10), nullable=False, default="NGN")
+    paid_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    invoice_id: Mapped[Optional[int]] = mapped_column(ForeignKey("invoice.id"), nullable=True, index=True)
+    transaction_metadata: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # Ledger (cash/bank asset) account this receipt posts to, resolved from the
+    # payment method so every monetary movement carries an account code.
+    account_code: Mapped[Optional[str]] = mapped_column(String(50), nullable=True, index=True)
+    account_name: Mapped[Optional[str]] = mapped_column(String(150), nullable=True)
+
+    billing: Mapped["Billing"] = relationship(back_populates="billing_payments")
+    received_by_staff: Mapped[Optional["StaffProfile"]] = relationship()
 
 
 class LoyaltyProgram(TenantTable):
@@ -2209,6 +2767,64 @@ class PaystackTransaction(TenantTable):
 
     patient: Mapped["Patient"] = relationship(back_populates="paystack_transactions")
     membership_card: Mapped["MembershipCard"] = relationship()
+
+
+class MembershipCardFundingRequest(TenantTable):
+    """
+    A patient-submitted **manual** card-funding request with uploaded evidence
+    of payment (bank transfer receipt, POS slip, etc.).
+
+    Flow
+    ----
+    1. From the patient portal, the patient chooses "Manual payment", enters the
+       amount, an optional reference, and uploads proof. A row is created here
+       with ``status = PENDING``.
+    2. A staff member reviews the evidence on the Membership Cards screen and
+       either **approves** (which credits the card wallet and links the created
+       :class:`MembershipCardTransaction`) or **rejects** it with a reason.
+
+    This is the manual counterpart to the online :class:`PaystackTransaction`
+    funding path.
+    """
+
+    patient_id: Mapped[int] = mapped_column(ForeignKey("patient.id"), nullable=False, index=True)
+    membership_card_id: Mapped[int] = mapped_column(
+        ForeignKey("membership_card.id"), nullable=False, index=True
+    )
+
+    amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    # BANK_TRANSFER, POS, CASH_DEPOSIT, USSD, OTHER — free-form to stay flexible.
+    payment_method: Mapped[str] = mapped_column(String(40), nullable=False, default="BANK_TRANSFER")
+    payment_reference: Mapped[Optional[str]] = mapped_column(String(150), nullable=True, index=True)
+    depositor_name: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    # Evidence file — stored on disk under UPLOADS_DIR and served via /uploads.
+    evidence_file_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    evidence_file_path: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    evidence_file_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    evidence_content_type: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+
+    status: Mapped[CardFundingRequestStatus] = mapped_column(
+        Enum(CardFundingRequestStatus),
+        default=CardFundingRequestStatus.PENDING,
+        nullable=False,
+        index=True,
+    )
+
+    reviewed_by_id: Mapped[Optional[int]] = mapped_column(ForeignKey("user.id"), nullable=True, index=True)
+    reviewed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    review_note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    # The wallet credit produced when the request is approved.
+    transaction_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("membership_card_transaction.id"), nullable=True, index=True
+    )
+
+    patient: Mapped["Patient"] = relationship()
+    membership_card: Mapped["MembershipCard"] = relationship()
+    reviewed_by: Mapped[Optional["User"]] = relationship()
+    transaction: Mapped[Optional["MembershipCardTransaction"]] = relationship()
 
 
 # ============================================================
@@ -2815,6 +3431,80 @@ class Message(TenantTable):
     recipient_user: Mapped[Optional["User"]] = relationship(foreign_keys=[recipient_user_id])
 
 
+class PatientBroadcast(TenantTable):
+    """
+    A hospital→patient outbound message ("announcement").
+
+    One broadcast is addressed to a single patient, an explicitly selected
+    group of patients, or every registered patient. The message body lives
+    here once; a lightweight :class:`PatientBroadcastRecipient` row is created
+    per targeted patient to drive the patient portal inbox and per-patient
+    read state. Optional EMAIL / SMS fan-out is delivered via the notification
+    service and recorded in the ``*_sent_count`` tallies.
+    """
+
+    subject: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+
+    audience_type: Mapped[PatientBroadcastAudience] = mapped_column(
+        Enum(PatientBroadcastAudience),
+        nullable=False,
+        index=True,
+    )
+    # Channels the sender chose, e.g. ["IN_APP", "EMAIL", "SMS"]. IN_APP is
+    # always implied (the portal inbox); the others trigger external delivery.
+    channels: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
+
+    recipient_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    email_sent_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    sms_sent_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+    status: Mapped[PatientBroadcastStatus] = mapped_column(
+        Enum(PatientBroadcastStatus),
+        default=PatientBroadcastStatus.SENT,
+        nullable=False,
+        index=True,
+    )
+
+    sent_by_user_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("user.id"), nullable=True, index=True
+    )
+    sent_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    sent_by: Mapped[Optional["User"]] = relationship()
+    recipients: Mapped[list["PatientBroadcastRecipient"]] = relationship(
+        back_populates="broadcast", cascade="all, delete-orphan"
+    )
+
+
+class PatientBroadcastRecipient(TenantTable):
+    """
+    Per-patient delivery + read record for a :class:`PatientBroadcast`.
+
+    This is the row the patient portal reads as an inbox item; ``read_at``
+    tracks whether the patient has opened the message.
+    """
+
+    broadcast_id: Mapped[int] = mapped_column(
+        ForeignKey("patient_broadcast.id"), nullable=False, index=True
+    )
+    patient_id: Mapped[int] = mapped_column(
+        ForeignKey("patient.id"), nullable=False, index=True
+    )
+    read_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    broadcast: Mapped["PatientBroadcast"] = relationship(back_populates="recipients")
+    patient: Mapped["Patient"] = relationship()
+
+    __table_args__ = (
+        UniqueConstraint(
+            "broadcast_id", "patient_id", name="uq_patient_broadcast_recipient"
+        ),
+    )
+
+
 class NotificationTemplate(TenantTable):
     """Reusable notification template."""
 
@@ -2843,6 +3533,23 @@ class DocumentTemplate(TenantTable):
     is_default: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
+class ClinicalTemplate(TenantTable):
+    """
+    Reusable clinical documentation template (SOAP notes, history,
+    examination, procedure notes). ``sections`` is an ordered list of
+    ``{"title": str, "content": str}`` blocks that pre-fill a consultation.
+    """
+
+    name: Mapped[str] = mapped_column(String(150), nullable=False, index=True)
+    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    specialty: Mapped[Optional[str]] = mapped_column(String(100), nullable=True, index=True)
+    # SOAP, HISTORY, EXAMINATION, PROCEDURE, GENERAL — plain string so new
+    # types never require a DB enum migration.
+    template_type: Mapped[str] = mapped_column(String(30), default="SOAP", nullable=False, index=True)
+    sections: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
+    usage_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    is_favorite: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+
 
 class Notification(TenantTable):
     """Notification record for in-app, email, SMS, WhatsApp, or push."""
@@ -2870,6 +3577,11 @@ class Notification(TenantTable):
     recipient_address: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     subject: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     body: Mapped[str] = mapped_column(Text, nullable=False)
+    # Optional pre-rendered HTML alternative for email delivery. Persisted so
+    # asynchronous / tenant-aware delivery (the notification worker + tenant
+    # SMTP) can send the same styled email the caller composed, instead of
+    # re-wrapping the plain-text body.
+    body_html: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     payload_metadata: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
 
@@ -3184,6 +3896,9 @@ class SubscriptionPlan(MasterTable):
     description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     price: Mapped[Decimal] = mapped_column(Numeric(10, 2), default=0.00)
+    # Optional explicit annual price (usually a discount vs. 12x monthly). When
+    # NULL the annual price is derived as 12 x the monthly ``price``.
+    annual_price: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 2), nullable=True)
     currency: Mapped[str] = mapped_column(String(3), default="NGN")
     interval: Mapped[SubscriptionInterval] = mapped_column(
         Enum(SubscriptionInterval), default=SubscriptionInterval.MONTHLY
@@ -3244,6 +3959,10 @@ class SaaSAdmin(MasterTable):
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
     status: Mapped[UserStatus] = mapped_column(Enum(UserStatus), default=UserStatus.ACTIVE)
     is_superuser: Mapped[bool] = mapped_column(Boolean, default=True)
+
+    # Self-service profile media (parity with tenant User profile).
+    profile_photo_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    signature_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
 
     # Platform-level RBAC. Defaults to SUPPORT_ADMIN — the safest grant
     # for newly-provisioned admins.
@@ -3417,6 +4136,12 @@ class TenantSubscription(MasterTable):
     end_date: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     trial_end_date: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
+    # Billing cycle the tenant chose for this subscription (MONTHLY or YEARLY).
+    # Drives the invoice amount and how far each period rolls forward, so a
+    # tenant can subscribe annually even when the plan's default interval is
+    # monthly.
+    billing_interval: Mapped[str] = mapped_column(String(20), default="MONTHLY", server_default="MONTHLY", nullable=False)
+
     # Current billing window. Updated when an invoice is paid.
     current_period_start: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     current_period_end: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
@@ -3544,6 +4269,25 @@ class SubscriptionPayment(MasterTable):
     notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     raw_payload: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
 
+    # ------------------------------------------------------------------
+    # Manual (bank counter / online-transfer) payment evidence + review.
+    # A manual payment lands in status=PENDING with proof attached, and is
+    # promoted to SUCCEEDED only when a SaaS admin confirms it.
+    # ------------------------------------------------------------------
+    proof_file_path: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    proof_file_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    proof_content_type: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
+    payer_bank_name: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
+    payer_account_name: Mapped[Optional[str]] = mapped_column(String(150), nullable=True)
+    payer_reference: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
+
+    # SaaS-admin review trail.
+    confirmed_by_admin_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("saas_admin.id"), nullable=True, index=True
+    )
+    confirmed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    rejected_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
     invoice: Mapped["SubscriptionInvoice"] = relationship(back_populates="payments")
     tenant: Mapped["Tenant"] = relationship()
 
@@ -3593,6 +4337,13 @@ class Tenant(MasterTable):
 
     status: Mapped[UserStatus] = mapped_column(Enum(UserStatus), default=UserStatus.ACTIVE)
     is_provisioned: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Last provisioning failure (cleared on success). Lets the SaaS console
+    # surface WHY a tenant is stuck instead of leaving it in limbo.
+    provisioning_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    #: Append-only log of provisioning/repair steps for the SaaS console
+    #: modal: [{"step","detail","status","at"}]. Reset at the start of each
+    #: provisioning run.
+    provisioning_steps: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
     onboarding_data: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     subscriptions: Mapped[list["TenantSubscription"]] = relationship(back_populates="tenant")
 
@@ -5015,8 +5766,11 @@ class PortalPreferences(TenantTable):
 class PortalAppointmentRequest(TenantTable):
     """Patient-initiated appointment request via the portal."""
 
-    account_id: Mapped[int] = mapped_column(
-        ForeignKey("portal_account.id"), nullable=False, index=True
+    # The portal signs patients in via OTP, so a dedicated PortalAccount row is
+    # optional — link it when one exists, otherwise the request is keyed by the
+    # patient alone.
+    account_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("portal_account.id"), nullable=True, index=True
     )
     patient_id: Mapped[int] = mapped_column(ForeignKey("patient.id"), nullable=False, index=True)
     facility_id: Mapped[Optional[int]] = mapped_column(ForeignKey("facility.id"), nullable=True, index=True)
@@ -5027,6 +5781,12 @@ class PortalAppointmentRequest(TenantTable):
 
     requested_for: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
     reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # Patient-declared urgency (NORMAL / URGENT / EMERGENCY).
+    priority: Mapped[str] = mapped_column(String(20), default="NORMAL", server_default="NORMAL", nullable=False)
+    # Optional doctor the patient asked to see (a clinician staff profile).
+    preferred_clinician_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("staff_profile.id"), nullable=True, index=True
+    )
     status: Mapped[PortalAppointmentRequestStatus] = mapped_column(
         Enum(PortalAppointmentRequestStatus),
         default=PortalAppointmentRequestStatus.REQUESTED,
@@ -5041,8 +5801,9 @@ class PortalAppointmentRequest(TenantTable):
         ForeignKey("staff_profile.id"), nullable=True
     )
 
-    account: Mapped["PortalAccount"] = relationship(back_populates="appointment_requests")
+    account: Mapped[Optional["PortalAccount"]] = relationship(back_populates="appointment_requests")
     patient: Mapped["Patient"] = relationship()
+    preferred_clinician: Mapped[Optional["StaffProfile"]] = relationship(foreign_keys=[preferred_clinician_id])
     converted_appointment: Mapped[Optional["Appointment"]] = relationship()
 
 
@@ -7029,6 +7790,7 @@ class Timesheet(TenantTable):
         Enum(TimesheetStatus), default=TimesheetStatus.DRAFT, nullable=False, index=True
     )
     submitted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    approval_request_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True, index=True)
     approved_by_user_id: Mapped[Optional[int]] = mapped_column(ForeignKey("user.id"), nullable=True)
     approved_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     locked_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -7052,6 +7814,7 @@ class TimesheetEntry(TenantTable):
     weekend_hours: Mapped[Decimal] = mapped_column(Numeric(6, 2), default=0)
     holiday_hours: Mapped[Decimal] = mapped_column(Numeric(6, 2), default=0)
     is_absent: Mapped[bool] = mapped_column(Boolean, default=False)
+    is_leave: Mapped[bool] = mapped_column(Boolean, default=False)
     note: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     timesheet: Mapped["Timesheet"] = relationship(back_populates="entries")
 
@@ -7145,6 +7908,10 @@ class ReimbursementRequest(TenantTable):
     category: Mapped[str] = mapped_column(String(100), nullable=False)
     description: Mapped[str] = mapped_column(Text, nullable=False)
     receipt_url: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    account_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("account.id"), nullable=True, index=True
+    )
+    account: Mapped[Optional["Account"]] = relationship()
     status: Mapped[ReimbursementStatus] = mapped_column(
         Enum(ReimbursementStatus), default=ReimbursementStatus.DRAFT, nullable=False, index=True
     )
@@ -7247,6 +8014,14 @@ class StaffSalary(TenantTable):
     currency: Mapped[str] = mapped_column(String(3), default="NGN")
     allowances: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)  # [{type_code, amount}]
     deductions: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
+    #: Staff's declared annual rent — drives the NTA-2025 rent relief
+    #: (20% of rent capped at ₦500,000) in PAYE.
+    annual_rent: Mapped[Optional[Decimal]] = mapped_column(Numeric(14, 2), nullable=True)
+    #: Template this structure was generated from (traceability only; the
+    #: JSON above remains the source of truth for calculation).
+    component_template_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("payroll_component_template.id"), nullable=True, index=True
+    )
     effective_from: Mapped[date] = mapped_column(Date, nullable=False, index=True)
     effective_to: Mapped[Optional[date]] = mapped_column(Date, nullable=True, index=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
@@ -7266,6 +8041,10 @@ class PayrollRun(TenantTable):
     department_id: Mapped[Optional[int]] = mapped_column(
         ForeignKey("department.id"), nullable=True, index=True
     )
+    account_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("account.id"), nullable=True, index=True
+    )
+    account: Mapped[Optional["Account"]] = relationship()
     status: Mapped[PayrollRunStatus] = mapped_column(
         Enum(PayrollRunStatus), default=PayrollRunStatus.DRAFT, nullable=False, index=True
     )
@@ -7278,6 +8057,8 @@ class PayrollRun(TenantTable):
     paid_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     locked_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # Link to the approval engine's ApprovalRequest driving this run's approval.
+    approval_request_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True, index=True)
 
 
 class PayrollLine(TenantTable):
@@ -7315,6 +8096,153 @@ class PayrollLine(TenantTable):
     )
     paid_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+
+class PensionProvider(TenantTable):
+    """Pension Fund Administrator (PFA) the hospital remits contributions to.
+
+    Staff are linked to a provider via StaffProfile.pension_provider_id and
+    the pension remittance schedule is generated per provider.
+    """
+
+    __tablename__ = "pension_provider"
+
+    code: Mapped[str] = mapped_column(String(60), unique=True, nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    pfa_license_no: Mapped[Optional[str]] = mapped_column(String(80), nullable=True)
+    contact_email: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    contact_phone: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    address: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    #: Bank account contributions are remitted into (shown on the schedule).
+    bank_name: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
+    bank_account_no: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, index=True)
+    note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+
+class PayrollComponent(TenantTable):
+    """Catalog entry for a configurable pay component.
+
+    A component is any named element of pay: an earning (basic, housing,
+    hazard), a voluntary deduction (union dues, cooperative), a statutory
+    deduction (PAYE, pension, NHF) or an employer contribution (employer
+    pension). The catalog drives templates, salary structures and the
+    per-line component breakdown persisted at calculation time.
+    """
+
+    __tablename__ = "payroll_component"
+
+    code: Mapped[str] = mapped_column(String(60), unique=True, nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(150), nullable=False)
+    component_type: Mapped[PayrollComponentType] = mapped_column(
+        Enum(PayrollComponentType), nullable=False, index=True
+    )
+    calc_method: Mapped[PayrollCalcMethod] = mapped_column(
+        Enum(PayrollCalcMethod), default=PayrollCalcMethod.FIXED_AMOUNT, nullable=False
+    )
+    default_amount: Mapped[Optional[Decimal]] = mapped_column(Numeric(14, 2), nullable=True)
+    default_percent: Mapped[Optional[Decimal]] = mapped_column(Numeric(7, 3), nullable=True)
+    #: Earnings: included in the PAYE taxable base when True.
+    is_taxable: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    #: Deductions: reduces the PAYE taxable base when True (e.g. NHIS,
+    #: life-insurance premiums under the Nigeria Tax Act 2025).
+    is_tax_relief: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    #: Statutory components are system-calculated; they cannot be added to
+    #: templates/salary structures manually.
+    is_statutory: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, index=True)
+    gl_account_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("account.id"), nullable=True, index=True
+    )
+    gl_account: Mapped[Optional["Account"]] = relationship()
+    display_order: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+
+class PayrollComponentTemplate(TenantTable):
+    """A reusable pay structure: a named bundle of components with amounts
+    or percentages, applied to staff to produce their salary structure
+    (e.g. 'Consultant Package', 'Nursing Grade 7')."""
+
+    __tablename__ = "payroll_component_template"
+
+    code: Mapped[str] = mapped_column(String(60), unique=True, nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(150), nullable=False)
+    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, index=True)
+
+    items: Mapped[list["PayrollComponentTemplateItem"]] = relationship(
+        back_populates="template", cascade="all, delete-orphan",
+        order_by="PayrollComponentTemplateItem.display_order",
+    )
+
+
+class PayrollComponentTemplateItem(TenantTable):
+    """One component inside a template, with its default value."""
+
+    __tablename__ = "payroll_component_template_item"
+
+    template_id: Mapped[int] = mapped_column(
+        ForeignKey("payroll_component_template.id"), nullable=False, index=True
+    )
+    component_id: Mapped[int] = mapped_column(
+        ForeignKey("payroll_component.id"), nullable=False, index=True
+    )
+    amount: Mapped[Optional[Decimal]] = mapped_column(Numeric(14, 2), nullable=True)
+    percent: Mapped[Optional[Decimal]] = mapped_column(Numeric(7, 3), nullable=True)
+    display_order: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+    template: Mapped["PayrollComponentTemplate"] = relationship(back_populates="items")
+    component: Mapped["PayrollComponent"] = relationship()
+
+    __table_args__ = (
+        UniqueConstraint("template_id", "component_id", name="uq_payroll_template_component"),
+    )
+
+
+class PayrollLineComponent(TenantTable):
+    """Normalized per-payslip component row written at calculation time.
+
+    Every element of a payslip — each earning, statutory deduction,
+    voluntary deduction and employer contribution — is persisted here so
+    payslips, reports and integrations read a stable structure instead of
+    parsing JSON.
+    """
+
+    __tablename__ = "payroll_line_component"
+
+    payroll_line_id: Mapped[int] = mapped_column(
+        ForeignKey("payroll_line.id"), nullable=False, index=True
+    )
+    component_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("payroll_component.id"), nullable=True, index=True
+    )
+    code: Mapped[str] = mapped_column(String(60), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(150), nullable=False)
+    component_type: Mapped[PayrollComponentType] = mapped_column(
+        Enum(PayrollComponentType), nullable=False, index=True
+    )
+    amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), default=0, nullable=False)
+    is_taxable: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    sequence: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    meta_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+
+    line: Mapped["PayrollLine"] = relationship()
+
+
+class PayrollOneOff(TenantTable):
+    """A one-off earning or deduction applied to one staff member in one
+    payroll run: bonuses, arrears, 13th-month, ad-hoc awards or recoveries."""
+
+    __tablename__ = "payroll_one_off"
+
+    payroll_run_id: Mapped[int] = mapped_column(ForeignKey("payroll_run.id"), nullable=False, index=True)
+    staff_profile_id: Mapped[int] = mapped_column(ForeignKey("staff_profile.id"), nullable=False, index=True)
+    #: BONUS | ARREARS | THIRTEENTH_MONTH | OTHER_EARNING | OTHER_DEDUCTION
+    kind: Mapped[str] = mapped_column(String(30), nullable=False, index=True)
+    amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    is_taxable: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    note: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
 
 
 class OvertimeRecord(TenantTable):
@@ -7393,6 +8321,10 @@ class SalaryAdvance(TenantTable):
     amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
     reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     repayment_month: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    account_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("account.id"), nullable=True, index=True
+    )
+    account: Mapped[Optional["Account"]] = relationship()
     status: Mapped[SalaryAdvanceStatus] = mapped_column(
         Enum(SalaryAdvanceStatus), default=SalaryAdvanceStatus.DRAFT, nullable=False, index=True
     )
@@ -7404,6 +8336,11 @@ class SalaryAdvance(TenantTable):
     
     # Link to approval engine (optional but helpful back-reference)
     approval_request_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    #: Payroll recovery: set when this advance is withheld from a payslip.
+    recovered_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    recovered_in_payroll_line_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("payroll_line.id"), nullable=True
+    )
 
 
 
@@ -7669,73 +8606,83 @@ class StaffAuditLog(TenantTable):
 # APPROVAL ENGINE
 # ============================================================
 #
-# Tenant-managed approval workflows for internal staff requests.
-# Each tenant defines its own ApprovalFlow rows (one per subject_type
-# per use case, e.g. "STANDARD_LEAVE", "MANAGER_REIMBURSEMENT") and
-# assembles them from ordered ApprovalFlowStep + ApprovalFlowStepApprover
-# rows. ApprovalRequest is the runtime instance; ApprovalRequestStep is
-# the per-request snapshot of each definition step; ApprovalDecision is
-# the audit row of every approve/reject/delegate action.
+# Generic, reusable approval engine. A RequestType (e.g. PAYROLL_RUN) has
+# one or more ApprovalFlows; each flow has ordered ApprovalSteps. Submitting
+# a subject creates an ApprovalRequest that walks the flow's steps; every
+# action taken on a step writes an ApprovalLog row.
+
+
+class RequestType(TenantTable):
+    """A kind of request that can be routed through an approval flow."""
+
+    __tablename__ = "request_type"
+
+    code: Mapped[str] = mapped_column(String(60), unique=True, nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(150), nullable=False)
+    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, index=True)
+
+    flows: Mapped[list["ApprovalFlow"]] = relationship(
+        back_populates="request_type", cascade="all, delete-orphan"
+    )
 
 
 class ApprovalFlow(TenantTable):
-    """
-    Tenant-defined approval flow definition.
-
-    A flow is keyed by ``subject_type`` (e.g. LEAVE_REQUEST, REIMBURSEMENT)
-    plus a tenant-unique ``code``. Multiple flows may exist for the same
-    subject type (e.g. SHORT_LEAVE vs ANNUAL_LEAVE) — set ``is_default``
-    on the one to use when no specific flow is requested.
-    """
+    """An approval flow (chain of steps) belonging to a RequestType."""
 
     __tablename__ = "approval_flow"
 
+    request_type_id: Mapped[int] = mapped_column(
+        ForeignKey("request_type.id"), nullable=False, index=True
+    )
     code: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
     name: Mapped[str] = mapped_column(String(180), nullable=False)
     description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    subject_type: Mapped[ApprovalSubjectType] = mapped_column(
-        Enum(ApprovalSubjectType),
-        default=ApprovalSubjectType.GENERIC,
-        nullable=False,
-        index=True,
-    )
     is_default: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
-    version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
-    # Operational guards
-    sla_hours: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    auto_cancel_after_hours: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, index=True)
     notify_on_submit: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     notify_on_decision: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
     __table_args__ = (
-        UniqueConstraint("subject_type", "code", name="uq_approval_flow_subject_code"),
-        Index("ix_approval_flow_subject_default", "subject_type", "is_default"),
+        UniqueConstraint("request_type_id", "code", name="uq_approval_flow_type_code"),
     )
 
-    steps: Mapped[list["ApprovalFlowStep"]] = relationship(
-        back_populates="flow", cascade="all, delete-orphan", order_by="ApprovalFlowStep.step_order"
+    request_type: Mapped["RequestType"] = relationship(back_populates="flows")
+    steps: Mapped[list["ApprovalStep"]] = relationship(
+        back_populates="flow",
+        cascade="all, delete-orphan",
+        order_by="ApprovalStep.step_order",
     )
     requests: Mapped[list["ApprovalRequest"]] = relationship(back_populates="flow")
 
 
-class ApprovalFlowStep(TenantTable):
-    """
-    One ordered step inside an ``ApprovalFlow``.
+class ApprovalStep(TenantTable):
+    """One ordered step inside an ApprovalFlow, with a single approver spec."""
 
-    The step's ``decision_rule`` controls when the step passes. ``ANY_OF``
-    advances on the first approve; ``ALL_OF`` requires every required
-    approver; ``N_OF_M`` uses ``required_approvals``. Rejection at any
-    step rejects the whole request (handled by the service).
-    """
-
-    __tablename__ = "approval_flow_step"
+    __tablename__ = "approval_step"
 
     flow_id: Mapped[int] = mapped_column(
         ForeignKey("approval_flow.id"), nullable=False, index=True
     )
     step_order: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
     name: Mapped[str] = mapped_column(String(180), nullable=False)
-    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    approver_kind: Mapped[ApprovalApproverKind] = mapped_column(
+        Enum(ApprovalApproverKind), nullable=False, index=True
+    )
+    approver_user_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("user.id"), nullable=True, index=True
+    )
+    approver_role_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("role.id"), nullable=True, index=True
+    )
+    approver_department_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("department.id"), nullable=True, index=True
+    )
+    dynamic_token: Mapped[Optional[ApprovalDynamicApprover]] = mapped_column(
+        Enum(ApprovalDynamicApprover), nullable=True
+    )
+
     decision_rule: Mapped[ApprovalStepDecisionRule] = mapped_column(
         Enum(ApprovalStepDecisionRule),
         default=ApprovalStepDecisionRule.ANY_OF,
@@ -7743,97 +8690,38 @@ class ApprovalFlowStep(TenantTable):
     )
     required_approvals: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     allow_self_approval: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
-    sla_hours: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    is_optional: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
-
-    # Optional condition expression evaluated against the request payload
-    # at submit time. If the condition is False the step is auto-SKIPPED
-    # for that request. Format: {"field": "amount", "op": "gt",
-    # "value": 1000} or composite {"all": [...]} / {"any": [...]} /
-    # {"not": {...}}. See app.utils.approval_utils.evaluate_condition.
-    condition: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
-
-    # Steps sharing the same parallel_group activate simultaneously; the
-    # group is treated as a single advancement boundary (the engine only
-    # advances past the group when every member is APPROVED or SKIPPED).
-    # NULL means "sequential, no group".
-    parallel_group: Mapped[Optional[str]] = mapped_column(String(60), nullable=True, index=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
     __table_args__ = (
         UniqueConstraint("flow_id", "step_order", name="uq_approval_step_order"),
     )
 
     flow: Mapped["ApprovalFlow"] = relationship(back_populates="steps")
-    approvers: Mapped[list["ApprovalFlowStepApprover"]] = relationship(
-        back_populates="step", cascade="all, delete-orphan"
-    )
-
-
-class ApprovalFlowStepApprover(TenantTable):
-    """
-    A target approver attached to an ``ApprovalFlowStep``.
-
-    A step can have many of these. Each row identifies *who* can act:
-    a specific user, anyone with a role, anyone in a department, or a
-    dynamic resolver token (e.g. requester's manager).
-    """
-
-    __tablename__ = "approval_flow_step_approver"
-
-    step_id: Mapped[int] = mapped_column(
-        ForeignKey("approval_flow_step.id"), nullable=False, index=True
-    )
-    approver_kind: Mapped[ApprovalApproverKind] = mapped_column(
-        Enum(ApprovalApproverKind), nullable=False, index=True
-    )
-
-    # Set exactly one of the following based on approver_kind.
-    user_id: Mapped[Optional[int]] = mapped_column(
-        ForeignKey("user.id"), nullable=True, index=True
-    )
-    role_id: Mapped[Optional[int]] = mapped_column(
-        ForeignKey("role.id"), nullable=True, index=True
-    )
-    department_id: Mapped[Optional[int]] = mapped_column(
-        ForeignKey("department.id"), nullable=True, index=True
-    )
-    dynamic_token: Mapped[Optional[ApprovalDynamicApprover]] = mapped_column(
-        Enum(ApprovalDynamicApprover), nullable=True
-    )
-
-    # For ALL_OF / N_OF_M semantics: rows where is_required=True must approve.
-    is_required: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
-    notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-
-    step: Mapped["ApprovalFlowStep"] = relationship(back_populates="approvers")
 
 
 class ApprovalRequest(TenantTable):
-    """
-    Runtime instance of an approval flow tied to a subject record.
-
-    ``subject_type`` + ``subject_id`` link back to the underlying domain
-    row (e.g. a LeaveRequest). ``payload`` stores a JSON snapshot of the
-    request data so historical audits don't break if the source row is
-    edited later.
-    """
+    """Runtime instance of a RequestType flowing through an ApprovalFlow."""
 
     __tablename__ = "approval_request"
 
+    request_type_id: Mapped[int] = mapped_column(
+        ForeignKey("request_type.id"), nullable=False, index=True
+    )
+    request_type_code: Mapped[str] = mapped_column(String(60), nullable=False, index=True)
     flow_id: Mapped[int] = mapped_column(
         ForeignKey("approval_flow.id"), nullable=False, index=True
     )
-    subject_type: Mapped[ApprovalSubjectType] = mapped_column(
-        Enum(ApprovalSubjectType), nullable=False, index=True
-    )
-    subject_id: Mapped[Optional[int]] = mapped_column(
-        BigInteger, nullable=True, index=True
-    )
+    subject_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True, index=True)
+
     requester_user_id: Mapped[int] = mapped_column(
         ForeignKey("user.id"), nullable=False, index=True
     )
     requester_staff_profile_id: Mapped[Optional[int]] = mapped_column(
         ForeignKey("staff_profile.id"), nullable=True, index=True
+    )
+    #: User hand-picked by the requester to action the FIRST step.
+    assigned_approver_user_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("user.id"), nullable=True, index=True
     )
     department_id: Mapped[Optional[int]] = mapped_column(
         ForeignKey("department.id"), nullable=True, index=True
@@ -7845,174 +8733,57 @@ class ApprovalRequest(TenantTable):
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     payload: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
-    priority: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
 
     status: Mapped[ApprovalRequestStatus] = mapped_column(
         Enum(ApprovalRequestStatus),
-        default=ApprovalRequestStatus.DRAFT,
+        default=ApprovalRequestStatus.PENDING,
         nullable=False,
         index=True,
     )
+    # Order of the step currently awaiting a decision (NULL once terminal).
+    current_step_order: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
 
-    submitted_at: Mapped[Optional[datetime]] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
-    completed_at: Mapped[Optional[datetime]] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
-    expires_at: Mapped[Optional[datetime]] = mapped_column(
-        DateTime(timezone=True), nullable=True, index=True
-    )
-    current_step_id: Mapped[Optional[int]] = mapped_column(
-        ForeignKey("approval_request_step.id", use_alter=True),
-        nullable=True,
-    )
+    submitted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     decision_summary: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     __table_args__ = (
-        Index(
-            "ix_approval_request_subject",
-            "subject_type",
-            "subject_id",
-        ),
-        Index(
-            "ix_approval_request_status_requester",
-            "status",
-            "requester_user_id",
-        ),
+        Index("ix_approval_request_subject", "request_type_code", "subject_id"),
+        Index("ix_approval_request_status_requester", "status", "requester_user_id"),
     )
 
+    request_type: Mapped["RequestType"] = relationship()
     flow: Mapped["ApprovalFlow"] = relationship(back_populates="requests")
-    steps: Mapped[list["ApprovalRequestStep"]] = relationship(
-        back_populates="request", 
-        cascade="all, delete-orphan", 
-        order_by="ApprovalRequestStep.step_order",
-        foreign_keys="[ApprovalRequestStep.request_id]"
-    )
-    comments: Mapped[list["ApprovalComment"]] = relationship(
-        back_populates="request", cascade="all, delete-orphan"
-    )
-    
-    current_step: Mapped[Optional["ApprovalRequestStep"]] = relationship(
-        foreign_keys=[current_step_id], post_update=True
+    logs: Mapped[list["ApprovalLog"]] = relationship(
+        back_populates="request",
+        cascade="all, delete-orphan",
+        order_by="ApprovalLog.id",
     )
 
 
-class ApprovalRequestStep(TenantTable):
-    """
-    Per-request snapshot of a flow step.
+class ApprovalLog(TenantTable):
+    """Audit record of a single action taken on an ApprovalRequest step."""
 
-    Created when an ``ApprovalRequest`` is submitted so the step
-    definition can change later without rewriting history. Tracks
-    counters used by the engine to evaluate the decision rule.
-    """
-
-    __tablename__ = "approval_request_step"
+    __tablename__ = "approval_log"
 
     request_id: Mapped[int] = mapped_column(
         ForeignKey("approval_request.id"), nullable=False, index=True
     )
-    flow_step_id: Mapped[int] = mapped_column(
-        ForeignKey("approval_flow_step.id"), nullable=False, index=True
+    step_order: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
+    step_name: Mapped[Optional[str]] = mapped_column(String(180), nullable=True)
+    action: Mapped[ApprovalLogAction] = mapped_column(
+        Enum(ApprovalLogAction), nullable=False, index=True
     )
-    step_order: Mapped[int] = mapped_column(Integer, nullable=False)
-    name: Mapped[str] = mapped_column(String(180), nullable=False)
-    decision_rule: Mapped[ApprovalStepDecisionRule] = mapped_column(
-        Enum(ApprovalStepDecisionRule),
-        default=ApprovalStepDecisionRule.ANY_OF,
-        nullable=False,
-    )
-    required_approvals: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
-    is_optional: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
-    # Snapshotted from ApprovalFlowStep at submit time so editing the
-    # flow definition later doesn't change live request behaviour.
-    parallel_group: Mapped[Optional[str]] = mapped_column(String(60), nullable=True, index=True)
-    condition_snapshot: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
-
-    # Snapshot of the eligible approver user ids resolved at step start.
-    eligible_user_ids: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
-    # Snapshot of approver entries (kind/user/role/department/token, is_required).
-    approver_specs: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
-
-    status: Mapped[ApprovalRequestStepStatus] = mapped_column(
-        Enum(ApprovalRequestStepStatus),
-        default=ApprovalRequestStepStatus.PENDING,
-        nullable=False,
-        index=True,
-    )
-
-    approvals_received: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-    rejections_received: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-
-    started_at: Mapped[Optional[datetime]] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
-    completed_at: Mapped[Optional[datetime]] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
-
-    __table_args__ = (
-        UniqueConstraint(
-            "request_id", "step_order", name="uq_approval_request_step_order"
-        ),
-    )
-
-    request: Mapped["ApprovalRequest"] = relationship(
-        back_populates="steps",
-        foreign_keys=[request_id]
-    )
-    flow_step: Mapped["ApprovalFlowStep"] = relationship()
-    decisions: Mapped[list["ApprovalDecision"]] = relationship(
-        back_populates="request_step", cascade="all, delete-orphan"
-    )
-
-
-class ApprovalDecision(TenantTable):
-    """One approve/reject/delegate action recorded against a request step."""
-
-    __tablename__ = "approval_decision"
-
-    request_id: Mapped[int] = mapped_column(
-        ForeignKey("approval_request.id"), nullable=False, index=True
-    )
-    request_step_id: Mapped[int] = mapped_column(
-        ForeignKey("approval_request_step.id"), nullable=False, index=True
-    )
-    decided_by_user_id: Mapped[int] = mapped_column(
-        ForeignKey("user.id"), nullable=False, index=True
-    )
-    action: Mapped[ApprovalDecisionAction] = mapped_column(
-        Enum(ApprovalDecisionAction), nullable=False, index=True
+    actor_user_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("user.id"), nullable=True, index=True
     )
     comment: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    delegated_to_user_id: Mapped[Optional[int]] = mapped_column(
-        ForeignKey("user.id"), nullable=True
-    )
-    decided_at: Mapped[datetime] = mapped_column(
+    resulting_status: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)
+    created_at_ts: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, nullable=False
     )
 
-    request: Mapped["ApprovalRequest"] = relationship()
-    request_step: Mapped["ApprovalRequestStep"] = relationship(back_populates="decisions")
-
-
-class ApprovalComment(TenantTable):
-    """Free-form comment thread attached to an approval request."""
-
-    __tablename__ = "approval_comment"
-
-    request_id: Mapped[int] = mapped_column(
-        ForeignKey("approval_request.id"), nullable=False, index=True
-    )
-    author_user_id: Mapped[int] = mapped_column(
-        ForeignKey("user.id"), nullable=False, index=True
-    )
-    body: Mapped[str] = mapped_column(Text, nullable=False)
-    posted_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=utc_now, nullable=False
-    )
-
-    request: Mapped["ApprovalRequest"] = relationship(back_populates="comments")
+    request: Mapped["ApprovalRequest"] = relationship(back_populates="logs")
 
 
 # =============================================================================
@@ -8032,6 +8803,9 @@ class ShiftDefinition(TenantTable):
     department_id: Mapped[int] = mapped_column(
         ForeignKey("department.id"), nullable=False, index=True
     )
+    service_delivery_point_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("service_delivery_point.id"), nullable=True, index=True
+    )
     name: Mapped[str] = mapped_column(String(150), nullable=False)
     code: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
     shift_type: Mapped[StaffShiftType] = mapped_column(
@@ -8047,6 +8821,19 @@ class ShiftDefinition(TenantTable):
 
     # relationships
     department: Mapped["Department"] = relationship()
+    service_delivery_point: Mapped[Optional["ServiceDeliveryPoint"]] = relationship()
+
+    @property
+    def department_name(self) -> Optional[str]:
+        return self.department.name if self.department else None
+
+    @property
+    def service_delivery_point_name(self) -> Optional[str]:
+        return (
+            self.service_delivery_point.name
+            if self.service_delivery_point is not None
+            else None
+        )
 
 
 class StaffShiftAssignment(TenantTable):
@@ -8341,6 +9128,124 @@ class ClinicalMacro(TenantTable):
 # AI & CLINICAL DECISION SUPPORT
 # ============================================================
 
+class MedicalExamPackage(TenantTable):
+    """Configurable medical-examination package (pre-employment, school,
+    immigration, insurance, annual wellness, …): a named bundle of laboratory
+    tests generated automatically when an examination begins."""
+
+    __tablename__ = "medical_exam_package"
+
+    code: Mapped[str] = mapped_column(String(60), unique=True, nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    exam_type: Mapped[str] = mapped_column(String(60), nullable=False, index=True)
+    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    #: LabTestCatalog ids automatically ordered for this package.
+    lab_test_ids: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
+    price: Mapped[Optional[Decimal]] = mapped_column(Numeric(14, 2), nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, index=True)
+
+
+class MedicalExamination(TenantTable):
+    """A medical-fitness assessment attached to a visit: package-driven
+    investigations, physician review and the fitness determination."""
+
+    __tablename__ = "medical_examination"
+
+    exam_no: Mapped[str] = mapped_column(String(60), unique=True, nullable=False, index=True)
+    visit_id: Mapped[int] = mapped_column(ForeignKey("visit.id"), nullable=False, index=True)
+    patient_id: Mapped[int] = mapped_column(ForeignKey("patient.id"), nullable=False, index=True)
+    package_id: Mapped[int] = mapped_column(
+        ForeignKey("medical_exam_package.id"), nullable=False, index=True
+    )
+    lab_order_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("lab_order.id"), nullable=True, index=True
+    )
+    #: IN_PROGRESS -> COMPLETED (finalised with a fitness determination).
+    status: Mapped[str] = mapped_column(String(30), default="IN_PROGRESS", nullable=False, index=True)
+    #: FIT | FIT_WITH_RESTRICTIONS | TEMPORARILY_UNFIT | PERMANENTLY_UNFIT
+    fitness_status: Mapped[Optional[str]] = mapped_column(String(40), nullable=True, index=True)
+    clinical_findings: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    recommendations: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    restrictions: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    reviewed_by_staff_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("staff_profile.id"), nullable=True, index=True
+    )
+    reviewed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    package: Mapped["MedicalExamPackage"] = relationship()
+    lab_order: Mapped[Optional["LabOrder"]] = relationship()
+    patient: Mapped["Patient"] = relationship()
+    visit: Mapped["Visit"] = relationship()
+
+
+class PatientBaselineProfile(TenantTable):
+    """Lifelong Baseline Medical Profile — one row per patient, maintained
+    independently of visits, versioned via PatientBaselineProfileRevision.
+
+    Blood group, genotype and the narrative allergies/chronic-conditions
+    remain on Patient (every existing consumer reads them there); this table
+    holds the rest of the lifelong record and the version counter.
+    """
+
+    __tablename__ = "patient_baseline_profile"
+
+    patient_id: Mapped[int] = mapped_column(
+        ForeignKey("patient.id"), nullable=False, unique=True, index=True
+    )
+    rhesus_factor: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)
+    #: Baseline diagnostic indicators — lifelong screening results, distinct
+    #: from visit-specific investigations.
+    g6pd_status: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    hepatitis_b_status: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    hepatitis_c_status: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    #: Sensitive — surfaced only to users holding PATIENT_READ; hospitals with
+    #: stricter policy can blank it via the profile editor.
+    hiv_status: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    blood_sugar_baseline: Mapped[Optional[str]] = mapped_column(String(80), nullable=True)
+    lipid_profile_baseline: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    known_allergies: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    chronic_conditions: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    existing_diagnoses: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    long_term_medications: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    past_medical_history: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    past_surgical_history: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    family_history: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    social_history: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    immunization_history: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    obstetric_history: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    disability_info: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    organ_donor: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
+    baseline_height_cm: Mapped[Optional[Decimal]] = mapped_column(Numeric(6, 2), nullable=True)
+    baseline_weight_kg: Mapped[Optional[Decimal]] = mapped_column(Numeric(6, 2), nullable=True)
+    primary_physician_staff_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("staff_profile.id"), nullable=True, index=True
+    )
+    additional_notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    version: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+    patient: Mapped["Patient"] = relationship()
+
+
+class PatientBaselineProfileRevision(TenantTable):
+    """Audit trail: full before-snapshot for every baseline profile change."""
+
+    __tablename__ = "patient_baseline_profile_revision"
+
+    profile_id: Mapped[int] = mapped_column(
+        ForeignKey("patient_baseline_profile.id"), nullable=False, index=True
+    )
+    patient_id: Mapped[int] = mapped_column(
+        ForeignKey("patient.id"), nullable=False, index=True
+    )
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    snapshot_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    changed_fields: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
+    changed_by_user_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("user.id"), nullable=True
+    )
+    changed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class PatientAllergy(TenantTable):
     """Tracks patient allergies to drugs, food, or environment for CDSS."""
 
@@ -8398,3 +9303,201 @@ class AiScribeJob(TenantTable):
     consultation: Mapped["Consultation"] = relationship()
     clinician_staff: Mapped["StaffProfile"] = relationship()
 
+
+
+# ===========================================================================
+# Hospital Membership Number configuration + Referral import provenance
+# ===========================================================================
+
+
+class HospitalNumberConfig(TenantTable):
+    """Per-hospital configurable Hospital Membership Number (Hospital Number)
+    numbering scheme. One active row per tenant DB. The Hospital Number is
+    hospital-local and independent of the patient's global identifier."""
+
+    __tablename__ = "hospital_number_config"
+
+    prefix: Mapped[Optional[str]] = mapped_column(String(24), nullable=True)
+    suffix: Mapped[Optional[str]] = mapped_column(String(24), nullable=True)
+    branch_code: Mapped[Optional[str]] = mapped_column(String(24), nullable=True)
+    separator: Mapped[str] = mapped_column(String(4), default="-", nullable=False)
+    include_year: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    # "YYYY" or "YY"
+    year_format: Mapped[str] = mapped_column(String(4), default="YYYY", nullable=False)
+    include_month: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    min_digits: Mapped[int] = mapped_column(Integer, default=6, nullable=False)
+    # CONTINUOUS | ANNUAL | MONTHLY
+    reset_mode: Mapped[str] = mapped_column(String(12), default="CONTINUOUS", nullable=False)
+    next_sequence: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    current_period: Mapped[Optional[str]] = mapped_column(String(12), nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+
+
+class ReferralImportLog(TenantTable):
+    """Audit ledger of a one-click patient registration performed from an
+    accepted inter-facility referral. Captures provenance (source/target
+    hospital), the importing user, what was created, and any edits the
+    registrar made to the imported data before saving."""
+
+    __tablename__ = "referral_import_log"
+
+    referral_id: Mapped[Optional[int]] = mapped_column(Integer, index=True, nullable=True)
+    referral_no: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    source_tenant_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    source_hospital_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    target_tenant_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    patient_global_id: Mapped[Optional[str]] = mapped_column(String(100), index=True, nullable=True)
+    created_patient_id: Mapped[Optional[int]] = mapped_column(Integer, index=True, nullable=True)
+    hospital_number: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    imported_by_user_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    imported_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    records_created: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    modifications: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    provenance: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+
+
+class ImportedClinicalRecord(TenantTable):
+    """A clinically-relevant record imported from a referring hospital during
+    one-click registration. Stored separately from native operational tables
+    (so cross-tenant staff/service/catalogue ids never dangle), clearly tagged
+    with its originating hospital, and fully viewable in the receiving
+    hospital's clinical workflow. Typically the patient's two most recent
+    visits and their associated consultation notes, diagnoses, prescriptions,
+    laboratory and radiology records."""
+
+    __tablename__ = "imported_clinical_record"
+
+    patient_id: Mapped[int] = mapped_column(
+        ForeignKey("patient.id"), index=True, nullable=False)
+    source_tenant_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    source_hospital_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    source_referral_no: Mapped[Optional[str]] = mapped_column(String(100), index=True, nullable=True)
+    # 1 = most recent visit, 2 = next most recent, etc.
+    visit_index: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    visit_reference: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    visit_date: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Visit | Consultation | Diagnosis | Prescription | LabOrder | LabResult ...
+    record_type: Mapped[str] = mapped_column(String(60), index=True, nullable=False)
+    record_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    imported_by_user_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    imported_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+# ============================================================
+# WhatsApp Business Platform (Meta Cloud API) integration
+# ------------------------------------------------------------
+# Meta delivers every webhook to a single app-level URL; the
+# ``phone_number_id`` inside the payload identifies the business number.
+# ``WhatsAppAccountConfig`` (master DB) maps a business number to a tenant so
+# the receiver can route each event into the right tenant database. Raw
+# deliveries are logged (master) for audit + idempotency; parsed conversations
+# and messages live in the tenant database.
+# ============================================================
+
+class WhatsAppAccountConfig(MasterTable):
+    """Master-DB mapping of a WhatsApp business phone number to a tenant, plus
+    that number's Cloud API credentials. ``is_active`` (from BaseTable) gates
+    routing/sending for the number."""
+
+    __tablename__ = "whatsapp_account_config"
+
+    tenant_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("tenant.id"), nullable=False, index=True
+    )
+    # The routing key: Meta's phone_number_id (metadata.phone_number_id).
+    phone_number_id: Mapped[str] = mapped_column(
+        String(64), unique=True, nullable=False, index=True
+    )
+    waba_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+    display_phone_number: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    business_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    # Encrypted at rest (app.core.cryptography). System-user/user access token
+    # used for outbound Cloud API calls for this number.
+    access_token_encrypted: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # Optional per-number overrides of the app-level verify token / app secret
+    # (used with Meta "webhook overrides"). Fall back to global settings if unset.
+    verify_token_encrypted: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    app_secret_encrypted: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # Role codes whose holders should be notified of new inbound messages.
+    notify_role_codes: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
+
+
+class WhatsAppWebhookEvent(MasterTable):
+    """Raw, auditable log of every webhook delivery (master DB). ``payload_hash``
+    is the SHA-256 of the raw request body and is unique, giving idempotency:
+    Meta retries deliver an identical body, so a duplicate is detected and
+    skipped rather than reprocessed."""
+
+    __tablename__ = "whatsapp_webhook_event"
+
+    tenant_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
+    phone_number_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+    waba_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    object_type: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    field: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    payload_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True, nullable=False)
+    payload_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    processed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    routed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    processing_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    received_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+
+
+class WhatsAppConversation(TenantTable):
+    """A per-tenant conversation thread with a single WhatsApp user
+    (``wa_id``), optionally linked to a patient record."""
+
+    __tablename__ = "whatsapp_conversation"
+    __table_args__ = (
+        UniqueConstraint("phone_number_id", "wa_id", name="uq_wa_conversation_number_waid"),
+    )
+
+    phone_number_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+    wa_id: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    contact_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    patient_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("patient.id"), nullable=True, index=True
+    )
+    status: Mapped[str] = mapped_column(String(20), default="OPEN", nullable=False)
+    unread_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    last_message_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_inbound_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_outbound_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class WhatsAppMessage(TenantTable):
+    """A single inbound or outbound WhatsApp message. ``wa_message_id`` (Meta's
+    ``wamid``) is unique, giving idempotency for retried inbound deliveries and
+    a lookup key for outbound status updates."""
+
+    __tablename__ = "whatsapp_message"
+
+    conversation_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("whatsapp_conversation.id"), nullable=True, index=True
+    )
+    wa_message_id: Mapped[Optional[str]] = mapped_column(
+        String(128), unique=True, nullable=True, index=True
+    )
+    direction: Mapped[str] = mapped_column(String(10), nullable=False, index=True)
+    from_number: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    to_number: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    phone_number_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+    message_type: Mapped[str] = mapped_column(String(24), default="TEXT", nullable=False)
+    body: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    caption: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    media_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    media_mime_type: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
+    media_filename: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    # Outbound lifecycle (ACCEPTED/SENT/DELIVERED/READ/FAILED); null for inbound.
+    status: Mapped[Optional[str]] = mapped_column(String(16), nullable=True, index=True)
+    status_updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    error_code: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    error_title: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    patient_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("patient.id"), nullable=True, index=True
+    )
+    sent_by_user_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    wa_timestamp: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    raw_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)

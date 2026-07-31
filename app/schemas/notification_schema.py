@@ -139,6 +139,7 @@ class NotificationAdHocDispatchSchema(BaseModel):
     channel: str = Field(..., description="IN_APP, EMAIL, SMS, WHATSAPP")
     subject: Optional[str] = Field(None, max_length=255)
     body: str = Field(..., min_length=1)
+    body_html: Optional[str] = Field(None, description="Optional HTML alternative for email delivery.")
     user_id: Optional[int] = None
     patient_id: Optional[int] = None
     recipient_address: Optional[str] = Field(None, max_length=255)
@@ -167,6 +168,7 @@ class NotificationReadSchema(BaseModel):
     body: str
     payload_metadata: Optional[dict[str, Any]] = None
     scheduled_at: Optional[datetime] = None
+    read_at: Optional[datetime] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 
@@ -177,6 +179,14 @@ class NotificationListResponseSchema(BaseModel):
     items: list[NotificationReadSchema]
     count: int
     meta: dict
+
+
+class NotificationMarkAllReadResponseSchema(BaseModel):
+    """Response for the 'mark all as read' bulk action."""
+
+    success: bool = True
+    message: str = "Notifications marked as read."
+    updated: int = 0
 
 
 class NotificationActionResponseSchema(BaseModel):

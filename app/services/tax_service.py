@@ -123,7 +123,30 @@ class TaxService:
         self.db.refresh(rec)
         return rec
 
-    # ------------------------------------------------------------------
+    def delete_tax_type(self, tax_type_id: int) -> None:
+        rec = self._get_tax_type(tax_type_id)
+        # Guard: a type still referenced by rules cannot be removed, otherwise
+        # those rules would point at a missing type. Ask the caller to clean up
+        # the dependent rules first.
+        dependent_rules = (
+            self.db.query(TaxRule)
+            .filter(TaxRule.tax_type_id == tax_type_id, TaxRule.is_deleted.is_(False))
+            .count()
+        )
+        if dependent_rules:
+            raise BadRequestError(
+                message=(
+                    "This tax type still has tax rules attached. Delete or "
+                    "reassign those rules before removing the type."
+                )
+            )
+        before = self._snap(rec)
+        rec.is_deleted = True
+        rec.is_active = False
+        self._audit("tax_type", rec.id, "DELETE", before=before, after=self._snap(rec))
+        self.db.commit()
+
+        # ------------------------------------------------------------------
     # TAX RATE CRUD
     # ------------------------------------------------------------------
 
@@ -199,6 +222,45 @@ class TaxService:
         self.db.commit()
         self.db.refresh(rec)
         return rec
+
+    def update_rule(self, rule_id: int, **fields) -> TaxRule:
+        rec = (
+            self.db.query(TaxRule)
+            .filter(TaxRule.id == rule_id, TaxRule.is_deleted.is_(False))
+            .first()
+        )
+        if rec is None:
+            raise BadRequestError(message="Tax rule not found.")
+        before = self._snap(rec)
+        # Validate a re-pointed tax type before applying anything.
+        if fields.get("tax_type_id") is not None:
+            self._get_tax_type(fields["tax_type_id"])
+        allowed = {
+            "tax_type_id", "name", "scope", "applicability", "match_values",
+            "pricing_mode", "priority", "facility_id", "is_active",
+        }
+        for k, v in fields.items():
+            if k not in allowed:
+                continue
+            setattr(rec, k, v)
+        self._audit("tax_rule", rec.id, "UPDATE", before=before, after=self._snap(rec))
+        self.db.commit()
+        self.db.refresh(rec)
+        return rec
+
+    def delete_rule(self, rule_id: int) -> None:
+        rec = (
+            self.db.query(TaxRule)
+            .filter(TaxRule.id == rule_id, TaxRule.is_deleted.is_(False))
+            .first()
+        )
+        if rec is None:
+            raise BadRequestError(message="Tax rule not found.")
+        before = self._snap(rec)
+        rec.is_deleted = True
+        rec.is_active = False
+        self._audit("tax_rule", rec.id, "DELETE", before=before, after=self._snap(rec))
+        self.db.commit()
 
     def add_exemption(
         self,

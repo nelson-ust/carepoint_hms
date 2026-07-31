@@ -72,7 +72,7 @@ def list_roles(
     _: AdminUser,
     service: Annotated[RoleService, Depends(get_role_service)],
     skip: int = Query(0, ge=0, description="Pagination offset."),
-    limit: int = Query(20, ge=1, le=100, description="Pagination size."),
+    limit: int = Query(20, ge=1, le=1000, description="Pagination size."),
 ):
     """
     Return a paginated list of roles.

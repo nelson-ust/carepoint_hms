@@ -1,11 +1,13 @@
-from typing import List
+from typing import List, Optional
 from fastapi import APIRouter, Depends, status
 from sqlalchemy.orm import Session
 from app.core.database import get_db
 from app.schemas.hr_payroll_schemas import (
     AllowanceTypeCreateSchema, AllowanceTypeReadSchema,
     DeductionTypeCreateSchema, DeductionTypeReadSchema,
-    StatutoryDeductionConfigCreateSchema, StatutoryDeductionConfigReadSchema
+    StatutoryDeductionConfigCreateSchema, StatutoryDeductionConfigReadSchema,
+    SalaryGradeCreateSchema, SalaryGradeReadSchema,
+    SalaryStepCreateSchema, SalaryStepReadSchema,
 )
 from app.services.hr_payroll_service import HRPayrollService
 
@@ -58,3 +60,35 @@ def list_statutory_configs(
     service: HRPayrollService = Depends(_get_service)
 ):
     return service.repository.list_statutory_configs()
+
+
+# ── Salary Grades ─────────────────────────────────────────────────────
+
+@router.post("/salary-grades", response_model=SalaryGradeReadSchema)
+def create_salary_grade(
+    payload: SalaryGradeCreateSchema,
+    service: HRPayrollService = Depends(_get_service)
+):
+    return service.create_salary_grade(payload)
+
+@router.get("/salary-grades", response_model=List[SalaryGradeReadSchema])
+def list_salary_grades(
+    service: HRPayrollService = Depends(_get_service)
+):
+    return service.repository.list_salary_grades()
+
+# ── Salary Steps ──────────────────────────────────────────────────────
+
+@router.post("/salary-steps", response_model=SalaryStepReadSchema)
+def create_salary_step(
+    payload: SalaryStepCreateSchema,
+    service: HRPayrollService = Depends(_get_service)
+):
+    return service.create_salary_step(payload)
+
+@router.get("/salary-steps", response_model=List[SalaryStepReadSchema])
+def list_salary_steps(
+    grade_id: Optional[int] = None,
+    service: HRPayrollService = Depends(_get_service)
+):
+    return service.repository.list_salary_steps(grade_id)

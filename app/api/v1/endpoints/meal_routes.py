@@ -88,7 +88,7 @@ def list_meal_orders(
     service: Annotated[MealService, Depends(get_meal_service)],
     _: Annotated[User, Depends(require_permission("MEAL_READ"))],
     skip: int = Query(0, ge=0),
-    limit: int = Query(50, ge=1, le=200),
+    limit: int = Query(50, ge=1, le=1000),
     visit_id: Optional[int] = Query(None),
     patient_id: Optional[int] = Query(None),
     status: Optional[str] = Query(None, description="ORDERED, SERVED, CANCELLED"),

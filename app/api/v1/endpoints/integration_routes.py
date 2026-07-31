@@ -1,50 +1,79 @@
-from typing import List, Annotated
+# app/api/v1/endpoints/integration_routes.py
+from __future__ import annotations
+
+"""
+Integration partner management + outbound calls (staff/admin, JWT-authed).
+Inbound API-key endpoints live in integration_public_routes.py.
+"""
+
+from typing import Annotated
+
 from fastapi import APIRouter, Depends, status
-from sqlalchemy.orm import Session
-from app.core.database import get_db
-from app.schemas.integration_schemas import IntegrationEndpointRead, IntegrationEndpointCreate, IntegrationEndpointUpdate
+
+from app.core.dependencies import AdminUser
+from app.core.exceptions import BadRequestError
+from app.core.multitenancy import get_current_tenant_id
+from app.schemas.integration_schemas import (
+    OutboundRequestSchema,
+    PartnerCreateSchema,
+    PartnerUpdateSchema,
+)
 from app.services.integration_service import IntegrationService
-from app.dependencies.role import require_permission
 
-router = APIRouter(prefix="/integrations", tags=["Integrations Management"])
+router = APIRouter(prefix="/integration", tags=["Integrations"])
 
-@router.get("/", response_model=List[IntegrationEndpointRead])
-def list_integrations(
-    db: Annotated[Session, Depends(get_db)],
-    _: Annotated[bool, Depends(require_permission("INTEGRATION_READ"))]
-):
-    return IntegrationService(db).get_endpoints()
 
-@router.post("/", response_model=IntegrationEndpointRead, status_code=status.HTTP_201_CREATED)
-def create_integration(
-    payload: IntegrationEndpointCreate,
-    db: Annotated[Session, Depends(get_db)],
-    _: Annotated[bool, Depends(require_permission("INTEGRATION_CREATE"))]
-):
-    return IntegrationService(db).create_endpoint(payload)
+def _tenant_id() -> int:
+    tid = get_current_tenant_id()
+    if not tid:
+        raise BadRequestError(message="A tenant context is required to manage integrations.")
+    return tid
 
-@router.get("/{endpoint_id}", response_model=IntegrationEndpointRead)
-def get_integration(
-    endpoint_id: int,
-    db: Annotated[Session, Depends(get_db)],
-    _: Annotated[bool, Depends(require_permission("INTEGRATION_READ"))]
-):
-    return IntegrationService(db).get_endpoint(endpoint_id)
 
-@router.put("/{endpoint_id}", response_model=IntegrationEndpointRead)
-def update_integration(
-    endpoint_id: int,
-    payload: IntegrationEndpointUpdate,
-    db: Annotated[Session, Depends(get_db)],
-    _: Annotated[bool, Depends(require_permission("INTEGRATION_UPDATE"))]
-):
-    return IntegrationService(db).update_endpoint(endpoint_id, payload)
+@router.post("/partners", status_code=status.HTTP_201_CREATED, summary="Register a third-party integration partner")
+def create_partner(payload: PartnerCreateSchema, actor: AdminUser):
+    tenant_id = _tenant_id()
+    partner, api_key = IntegrationService().create_partner(
+        tenant_id=tenant_id, name=payload.name, description=payload.description,
+        scopes=payload.scopes, expiry_days=payload.expiry_days, base_url=payload.base_url,
+        auth_header=payload.auth_header, auth_secret=payload.auth_secret,
+        created_by_user_id=getattr(actor, "id", None),
+    )
+    return {"success": True, "message": "Integration partner created. Copy the API key now — it won't be shown again.",
+            "partner": partner, "api_key": api_key}
 
-@router.delete("/{endpoint_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_integration(
-    endpoint_id: int,
-    db: Annotated[Session, Depends(get_db)],
-    _: Annotated[bool, Depends(require_permission("INTEGRATION_DELETE"))]
-):
-    IntegrationService(db).delete_endpoint(endpoint_id)
-    return None
+
+@router.get("/partners", summary="List integration partners")
+def list_partners(actor: AdminUser):
+    return {"success": True, "items": IntegrationService().list_partners(tenant_id=_tenant_id())}
+
+
+@router.patch("/partners/{partner_id}", summary="Update an integration partner")
+def update_partner(partner_id: int, payload: PartnerUpdateSchema, actor: AdminUser):
+    partner = IntegrationService().update_partner(
+        partner_id=partner_id, tenant_id=_tenant_id(),
+        changes=payload.model_dump(exclude_unset=True),
+    )
+    return {"success": True, "message": "Partner updated.", "partner": partner}
+
+
+@router.post("/partners/{partner_id}/rotate-key", summary="Rotate a partner's API key")
+def rotate_key(partner_id: int, actor: AdminUser):
+    partner, api_key = IntegrationService().rotate_key(partner_id=partner_id, tenant_id=_tenant_id())
+    return {"success": True, "message": "API key rotated. The previous key is now invalid.",
+            "partner": partner, "api_key": api_key}
+
+
+@router.delete("/partners/{partner_id}", summary="Revoke (deactivate) an integration partner")
+def revoke_partner(partner_id: int, actor: AdminUser):
+    partner = IntegrationService().revoke_partner(partner_id=partner_id, tenant_id=_tenant_id())
+    return {"success": True, "message": "Partner revoked.", "partner": partner}
+
+
+@router.post("/partners/{partner_id}/request", summary="Call the partner's endpoint (outbound)")
+def outbound_request(partner_id: int, payload: OutboundRequestSchema, actor: AdminUser):
+    result = IntegrationService().outbound_request(
+        partner_id=partner_id, tenant_id=_tenant_id(), path=payload.path,
+        method=payload.method, params=payload.params, payload=payload.payload,
+    )
+    return {"success": True, "result": result}

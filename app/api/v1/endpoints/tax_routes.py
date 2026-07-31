@@ -126,6 +126,18 @@ class TaxRuleReadSchema(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class TaxRuleUpdateSchema(BaseModel):
+    tax_type_id: Optional[int] = None
+    name: Optional[str] = None
+    scope: Optional[TaxScope] = None
+    applicability: Optional[TaxApplicability] = None
+    match_values: Optional[list[str]] = None
+    pricing_mode: Optional[TaxPricingMode] = None
+    priority: Optional[int] = None
+    facility_id: Optional[int] = None
+    is_active: Optional[bool] = None
+
+
 class TaxExemptionCreateSchema(BaseModel):
     tax_type_id: int
     scope: TaxExemptionScope
@@ -220,9 +232,11 @@ class TaxAuditLogReadSchema(BaseModel):
 
 def _service(
     db: Annotated[Session, Depends(get_db)],
-    actor: Annotated[Optional[Any], Depends(lambda: None)] = None,
+    actor: CurrentActiveUser = None,  # noqa: RUF013 - resolved by FastAPI dependency
 ) -> TaxService:
-    return TaxService(db, actor_user_id=getattr(actor, "id", None) if actor else None)
+    # Capturing the acting user lets the tax audit log record *who* made each
+    # change instead of attributing everything to "system".
+    return TaxService(db, actor_user_id=getattr(actor, "id", None))
 
 
 # ---------------------------------------------------------------------------
@@ -269,6 +283,20 @@ def update_type(
     service: Annotated[TaxService, Depends(_service)],
 ):
     return service.update_tax_type(tax_type_id, **payload.model_dump(exclude_none=True))
+
+
+@router.delete(
+    "/types/{tax_type_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Delete (soft) a tax type",
+)
+def delete_type(
+    tax_type_id: int,
+    _: AdminUser,
+    service: Annotated[TaxService, Depends(_service)],
+):
+    service.delete_tax_type(tax_type_id)
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -339,6 +367,34 @@ def list_rules(
     if tax_type_id is not None:
         q = q.filter(TaxRule.tax_type_id == tax_type_id)
     return q.order_by(TaxRule.priority.asc()).all()
+
+
+@router.put(
+    "/rules/{rule_id}",
+    response_model=TaxRuleReadSchema,
+    summary="Update a tax-applicability rule",
+)
+def update_rule(
+    rule_id: int,
+    payload: TaxRuleUpdateSchema,
+    _: AdminUser,
+    service: Annotated[TaxService, Depends(_service)],
+):
+    return service.update_rule(rule_id, **payload.model_dump(exclude_unset=True))
+
+
+@router.delete(
+    "/rules/{rule_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Delete (soft) a tax-applicability rule",
+)
+def delete_rule(
+    rule_id: int,
+    _: AdminUser,
+    service: Annotated[TaxService, Depends(_service)],
+):
+    service.delete_rule(rule_id)
+    return None
 
 
 @router.post(

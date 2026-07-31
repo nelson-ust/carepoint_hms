@@ -1,3 +1,4 @@
+from datetime import date
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Query, status
@@ -9,7 +10,8 @@ from app.schemas.leave_request_schemas import (
     LeaveRequestCreateSchema,
     LeaveRequestReadSchema,
     LeaveRequestUpdateSchema,
-    LeaveRequestSubmitSchema
+    LeaveRequestSubmitSchema,
+    LeaveRequestSelfCreateSchema,
 )
 from app.services.leave_request_service import LeaveRequestService
 
@@ -59,6 +61,89 @@ def list_leave_requests(
         "total": total,
         "items": [LeaveRequestReadSchema.model_validate(req) for req in items],
     }
+
+@router.get(
+    "/me/days",
+    response_model=dict[str, Any],
+    status_code=status.HTTP_200_OK,
+    summary="List my own leave days within a period",
+)
+def list_my_leave_days(
+    service: Annotated[LeaveRequestService, Depends(get_leave_request_service)],
+    current_user: CurrentActiveUser,
+    start: date = Query(..., description="Period start (inclusive)"),
+    end: date = Query(..., description="Period end (inclusive)"),
+):
+    items = service.list_my_leave_days(user_id=current_user.id, start=start, end=end)
+    return {"success": True, "total": len(items), "items": items}
+
+@router.get(
+    "/me",
+    response_model=dict[str, Any],
+    status_code=status.HTTP_200_OK,
+    summary="List my own leave requests",
+)
+def list_my_leave_requests(
+    service: Annotated[LeaveRequestService, Depends(get_leave_request_service)],
+    current_user: CurrentActiveUser,
+    skip: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=1000),
+):
+    items, total = service.list_my_leave_requests(user_id=current_user.id, skip=skip, limit=limit)
+    return {
+        "success": True,
+        "total": total,
+        "items": [LeaveRequestReadSchema.model_validate(req) for req in items],
+    }
+
+@router.post(
+    "/me",
+    response_model=dict[str, Any],
+    status_code=status.HTTP_201_CREATED,
+    summary="Create my own leave request",
+)
+def create_my_leave_request(
+    payload: LeaveRequestSelfCreateSchema,
+    service: Annotated[LeaveRequestService, Depends(get_leave_request_service)],
+    current_user: CurrentActiveUser,
+):
+    leave_req = service.create_my_leave_request(payload, user_id=current_user.id)
+    return {
+        "success": True,
+        "message": "Leave request created successfully.",
+        "leave_request": LeaveRequestReadSchema.model_validate(leave_req),
+    }
+
+@router.post(
+    "/me/{request_id}/submit",
+    response_model=dict[str, Any],
+    status_code=status.HTTP_200_OK,
+    summary="Submit my own leave request for approval",
+)
+def submit_my_leave_request(
+    request_id: int,
+    payload: LeaveRequestSubmitSchema,
+    service: Annotated[LeaveRequestService, Depends(get_leave_request_service)],
+    current_user: CurrentActiveUser,
+):
+    leave_req = service.submit_my_leave_request(request_id, payload, user_id=current_user.id)
+    return {
+        "success": True,
+        "message": "Leave request submitted for approval.",
+        "leave_request": LeaveRequestReadSchema.model_validate(leave_req),
+    }
+
+@router.delete(
+    "/me/{request_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Delete my own draft leave request",
+)
+def delete_my_leave_request(
+    request_id: int,
+    service: Annotated[LeaveRequestService, Depends(get_leave_request_service)],
+    current_user: CurrentActiveUser,
+):
+    service.delete_my_leave_request(request_id, user_id=current_user.id)
 
 @router.get(
     "/{request_id}",

@@ -409,6 +409,30 @@ DEMO_BILLABLE_SERVICES: list[dict[str, Any]] = [
     },
 ]
 
+# Default chart of accounts (revenue) + category->account mapping.
+DEFAULT_ACCOUNTS: list[dict[str, str]] = [
+    {"code": "REV-CONS", "name": "Consultation Revenue"},
+    {"code": "REV-LAB", "name": "Laboratory Revenue"},
+    {"code": "REV-RAD", "name": "Radiology Revenue"},
+    {"code": "REV-PHARM", "name": "Pharmacy & Drugs Revenue"},
+    {"code": "REV-PROC", "name": "Procedure & Theatre Revenue"},
+    {"code": "REV-BED", "name": "Bed & Ward Revenue"},
+    {"code": "REV-GEN", "name": "General Services Revenue"},
+]
+
+CATEGORY_ACCOUNT_MAP: dict[str, str] = {
+    "CONSULTATION": "REV-CONS",
+    "LABORATORY": "REV-LAB",
+    "LAB": "REV-LAB",
+    "RADIOLOGY": "REV-RAD",
+    "PHARMACY": "REV-PHARM",
+    "DRUG": "REV-PHARM",
+    "PROCEDURE": "REV-PROC",
+    "SURGERY": "REV-PROC",
+    "INPATIENT": "REV-BED",
+    "BED": "REV-BED",
+}
+
 # Notification templates — the keys downstream services dispatch by code.
 DEMO_NOTIFICATION_TEMPLATES: list[dict[str, str]] = [
     {
@@ -754,6 +778,42 @@ def seed_billable_services(db: Session) -> dict[str, BillableService]:
     return by_code
 
 
+def seed_accounts(db: Session) -> dict:
+    """Seed the default (revenue) chart of accounts. Idempotent by code."""
+    from app.core.enums import AccountType
+    from app.models.all_models import Account
+
+    by_code = {}
+    for entry in DEFAULT_ACCOUNTS:
+        existing = (
+            db.query(Account)
+            .filter(Account.code == entry["code"], Account.is_deleted.is_(False))
+            .first()
+        )
+        if existing is None:
+            existing = Account(
+                code=entry["code"],
+                name=entry["name"],
+                account_type=AccountType.REVENUE,
+            )
+            db.add(existing)
+            db.flush()
+            db.refresh(existing)
+        by_code[existing.code] = existing
+    return by_code
+
+
+def _link_services_to_accounts(billable_services: dict, accounts: dict) -> None:
+    """Point every seeded billable service at its revenue account."""
+    general = accounts.get("REV-GEN")
+    for bs in billable_services.values():
+        if getattr(bs, "account_id", None) is None:
+            code = CATEGORY_ACCOUNT_MAP.get((bs.category or "").upper(), "REV-GEN")
+            acct = accounts.get(code) or general
+            if acct is not None:
+                bs.account_id = acct.id
+
+
 def seed_drugs(db: Session) -> dict[str, Drug]:
     """Seed drug categories first, then drugs. Both via service classes."""
     cat_service = DrugCategoryService(db)
@@ -940,8 +1000,13 @@ def seed_demo_data(
     )
     summary["service_delivery_points"] = len(sdps)
 
+    # Chart of accounts must exist before services can reference them.
+    accounts = seed_accounts(db)
+    summary["accounts"] = len(accounts)
+
     # Billable services need to exist before the wards reference them.
     billable_services = seed_billable_services(db)
+    _link_services_to_accounts(billable_services, accounts)
     db.commit()
     summary["billable_services"] = len(billable_services)
 

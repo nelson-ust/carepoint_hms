@@ -85,6 +85,7 @@ class DrugReadSchema(BaseModel):
     unit_price: Optional[Decimal] = None
     reorder_level: Optional[Decimal] = None
     is_controlled: bool = False
+    category: Optional[DrugCategoryReadSchema] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 

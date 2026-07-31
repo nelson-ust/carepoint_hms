@@ -29,7 +29,7 @@ Self-service password change and "revoke my other sessions" are available to
 authenticated active users.
 """
 
-from typing import Annotated, Any
+from typing import Annotated, Any, Optional
 
 from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.orm import Session
@@ -94,12 +94,14 @@ def list_users(
     _: AdminUser,
     service: Annotated[StaffProfileService, Depends(get_staff_profile_service)],
     skip: int = Query(0, ge=0, description="Pagination offset."),
-    limit: int = Query(20, ge=1, le=100, description="Pagination size."),
+    limit: int = Query(20, ge=1, le=1000, description="Pagination size."),
+    search: Optional[str] = Query(None, max_length=120, description="Filter by name, username, email, staff no or job title."),
+    user_status: Optional[str] = Query(None, alias="status", max_length=30, description="Filter by exact user status."),
 ):
     """
     Return a paginated list of users with lightweight staff profile context.
     """
-    items, total = service.list_users(skip=skip, limit=limit)
+    items, total = service.list_users(skip=skip, limit=limit, search=search, status=user_status)
     return paginate_response(
         items=items,
         total=total,
@@ -329,7 +331,7 @@ def list_user_sessions(
     _: AdminUser,
     service: Annotated[StaffProfileService, Depends(get_staff_profile_service)],
     skip: int = Query(0, ge=0, description="Pagination offset."),
-    limit: int = Query(20, ge=1, le=100, description="Pagination size."),
+    limit: int = Query(20, ge=1, le=1000, description="Pagination size."),
 ):
     """
     Review a user's login history and session records.
@@ -443,7 +445,7 @@ def list_staff_profiles(
     _: AdminUser,
     service: Annotated[StaffProfileService, Depends(get_staff_profile_service)],
     skip: int = Query(0, ge=0, description="Pagination offset."),
-    limit: int = Query(20, ge=1, le=100, description="Pagination size."),
+    limit: int = Query(20, ge=1, le=1000, description="Pagination size."),
 ):
     """
     Return a paginated list of detailed staff profile records.

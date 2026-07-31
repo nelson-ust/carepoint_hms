@@ -15,6 +15,7 @@ from app.repositories.payment_repository import PaymentRepository
 from app.schemas.payment_schema import PaymentReceiveSchema, PaymentRefundSchema
 from app.schemas.membership_card_schemas import MembershipCardDebit
 from app.services.membership_card_service import MembershipCardService
+from app.utils.charge_capture import summarize_purpose as _summarize_purpose
 from app.utils.security_event_util import record_security_event
 
 
@@ -62,11 +63,17 @@ class PaymentService:
         if payload.payment_method == "MEMBERSHIP_CARD":
             if not payload.membership_card_id:
                 raise BadRequestError("membership_card_id is required for MEMBERSHIP_CARD payment method.")
-            
+
             card_service = MembershipCardService(self.db)
             # Find facility_id - fallback to invoice facility or default
             facility_id = getattr(invoice, "facility_id", None) or 1
-            
+
+            # Human-readable purpose from the invoice's line items, for the
+            # payment receipt (e.g. "Consultation, Laboratory tests").
+            purpose = _summarize_purpose(
+                [getattr(i, "service_name", None) for i in (invoice.items or []) if not getattr(i, "is_deleted", False)]
+            ) or f"Invoice {invoice.invoice_no}"
+
             card_service.debit_card(
                 card_id=payload.membership_card_id,
                 payload=MembershipCardDebit(
@@ -75,10 +82,12 @@ class PaymentService:
                     visit_id=invoice.visit_id,
                     narration=f"Payment for invoice {invoice.invoice_no}",
                 ),
-                processed_by_id=actor_user_id or 1,
+                processed_by_id=(payload.received_by_staff_id or actor_user_id or 1),
                 facility_id=facility_id,
+                purpose=purpose,
+                actor_user_id=actor_user_id,
             )
-            
+
         # Handle Insurance Payment validation
         if payload.payment_method == "INSURANCE":
             if not invoice.billing_id:
@@ -133,6 +142,35 @@ class PaymentService:
         )
 
         self.db.commit()
+
+        # Payment confirmation receipt (email + in-app) for cash/POS/transfer/
+        # etc. Membership-card debits already sent their own receipt via
+        # debit_card, so they're skipped here to avoid a duplicate.
+        if (payload.payment_method or "").strip().upper() != "MEMBERSHIP_CARD":
+            try:
+                from app.utils.payment_receipt import send_payment_receipt
+
+                receipt_purpose = _summarize_purpose(
+                    [
+                        getattr(i, "service_name", None)
+                        for i in (invoice.items or [])
+                        if not getattr(i, "is_deleted", False)
+                    ]
+                ) or f"Invoice {invoice.invoice_no}"
+                send_payment_receipt(
+                    self.db,
+                    patient_id=invoice.patient_id,
+                    amount=amount,
+                    purpose=receipt_purpose,
+                    method=payment.payment_method,
+                    reference=payment.payment_reference,
+                    paid_at=payment.paid_at,
+                    currency=payment.currency or "NGN",
+                    actor_user_id=actor_user_id,
+                )
+            except Exception:
+                pass
+
         return self.repository.get_required_by_id(payment.id)
 
     def refund_payment(

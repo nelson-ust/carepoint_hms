@@ -25,7 +25,7 @@ from app.schemas.prescription_schema import (
 )
 from app.utils.charge_capture import (
     add_charge,
-    find_billable_service,
+    resolve_billable_service,
     get_or_create_open_billing,
 )
 from app.utils.payment_policy import requires_pre_payment
@@ -111,16 +111,23 @@ class PrescriptionService:
                 if drug is None:
                     continue
                 unit_price = Decimal(drug.unit_price or 0)
-                billable = find_billable_service(self.db, code=f"DRUG-{drug.sku}" if drug.sku else None)
+                drug_label = f"Drug: {drug.name}" + (f" ({drug.strength})" if drug.strength else "")
+                billable = resolve_billable_service(
+                    self.db,
+                    code=f"DRUG-{drug.sku or drug.id}",
+                    name=drug_label,
+                    default_price=unit_price,
+                    category="PHARMACY",
+                    domain="PHARMACY",
+                )
                 add_charge(
                     self.db,
                     billing=billing,
-                    service_name=f"Drug: {drug.name}"
-                    + (f" ({drug.strength})" if drug.strength else ""),
+                    service_name=drug_label,
                     service_code=f"DRUG-{drug.sku or drug.id}",
                     unit_price=unit_price,
                     quantity=Decimal(item.quantity_prescribed),
-                    billable_service_id=billable.id if billable else None,
+                    billable_service_id=billable.id,
                     source_reference=f"PRESCRIPTION_ITEM:{item.id}",
                 )
 

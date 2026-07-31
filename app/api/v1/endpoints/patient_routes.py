@@ -286,7 +286,7 @@ def list_patients(
     _: AnyAuthenticatedUser,
     service: Annotated[PatientService, Depends(get_patient_service)],
     skip: int = Query(0, ge=0, description="Pagination offset."),
-    limit: int = Query(20, ge=1, le=100, description="Pagination size."),
+    limit: int = Query(20, ge=1, le=1000, description="Pagination size."),
 ):
     """
     Return a paginated list of patients in the MPI.
@@ -320,8 +320,12 @@ def search_patients(
     patient_type: Optional[str] = Query(None),
     payer_type: Optional[str] = Query(None),
     national_identifier: Optional[str] = Query(None),
+    search: Optional[str] = Query(
+        None,
+        description="Unified quick-search across patient name, hospital number, phone, or id.",
+    ),
     skip: int = Query(0, ge=0),
-    limit: int = Query(20, ge=1, le=100),
+    limit: int = Query(20, ge=1, le=1000),
 ):
     """
     Search the Master Patient Index.
@@ -337,6 +341,7 @@ def search_patients(
         patient_type=patient_type,
         payer_type=payer_type,
         national_identifier=national_identifier,
+        search=search,
         skip=skip,
         limit=limit,
     )

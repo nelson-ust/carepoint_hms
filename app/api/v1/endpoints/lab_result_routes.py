@@ -152,3 +152,57 @@ def get_by_item(
             "released_at": None,
         }
     return result
+
+
+# ---------------------------------------------------------------------------
+# Branded lab report PDF (staff)
+# ---------------------------------------------------------------------------
+
+@router.get(
+    "/orders/{order_id}/report.pdf",
+    summary="Branded laboratory report PDF for a released order",
+)
+def lab_order_report_pdf(
+    order_id: int,
+    actor: CurrentActiveUser,
+    service: Annotated[LabResultService, Depends(get_lab_result_service)],
+    db: Annotated[Session, Depends(get_db)],
+):
+    from fastapi import Response
+    from app.api.v1.endpoints.hr_routes import _load_tenant_logo_path
+    from app.core.multitenancy import get_current_tenant
+    from app.utils.lab_report_pdf import build_lab_report_pdf
+
+    data = service.get_order_report_data(order_id)
+    hospital = "Hospital"
+    contact = None
+    try:
+        tenant = get_current_tenant()
+        if tenant is not None:
+            hospital = getattr(tenant, "name", None) or hospital
+            contact = getattr(tenant, "contact_email", None) or getattr(tenant, "billing_email", None)
+    except Exception:
+        pass
+
+    logo_path = _load_tenant_logo_path(db)
+    try:
+        pdf_bytes = build_lab_report_pdf(
+            hospital_name=hospital, hospital_contact=contact,
+            lab_name="Medical Laboratory", logo_path=logo_path,
+            patient=data["patient"], visit_number=data["visit_number"],
+            order_no=data["order_no"], ordered_at=data["ordered_at"],
+            reported_at=data["reported_at"], rows=data["rows"],
+            interpretation=data["interpretation"],
+            scientist_name=data["scientist_name"],
+            approved_by=data["approved_by"], verify_code=data["verify_code"],
+        )
+    finally:
+        if logo_path:
+            try:
+                import os as _os
+                _os.remove(logo_path)
+            except OSError:
+                pass
+    safe = "".join(ch for ch in data["order_no"] if ch.isalnum() or ch in "-_")
+    return Response(content=pdf_bytes, media_type="application/pdf",
+                    headers={"Content-Disposition": f'inline; filename="lab-report-{safe}.pdf"'})

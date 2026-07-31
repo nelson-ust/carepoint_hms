@@ -11,6 +11,7 @@ Surfaces three classes of policy:
 """
 from __future__ import annotations
 
+import os
 import uuid
 from datetime import datetime, timezone as _tz
 from typing import Any, Iterable, Optional
@@ -18,6 +19,7 @@ from typing import Any, Iterable, Optional
 from fastapi import UploadFile
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.core.database import get_master_db_context
 from app.core.exceptions import BadRequestError, NotFoundError
 from app.models.all_models import Tenant, TenantSetting
@@ -37,7 +39,7 @@ DEFAULT_NOTIFICATION_CHANNELS: dict[str, list[str]] = {
     "user.invited": ["email"],
     "user.password_reset": ["email"],
     "appointment.created": ["in_app", "email"],
-    "appointment.reminder": ["sms", "email"],
+    "appointment.reminder": ["in_app", "email", "sms"],
     "appointment.cancelled": ["in_app", "email"],
     "invoice.created": ["in_app", "email"],
     "payment.received": ["email", "sms"],
@@ -110,29 +112,98 @@ class TenantSettingService:
         self.db.refresh(setting)
         return setting
 
+    # Image types accepted for a tenant logo.
+    _ALLOWED_LOGO_EXT: tuple[str, ...] = (".png", ".jpg", ".jpeg", ".webp", ".svg", ".gif")
+
     def upload_logo(self, file_obj: UploadFile) -> TenantSetting:
-        if not self.tenant_code:
-            raise BadRequestError(message="tenant_code is required to upload a logo.")
+        """
+        Store the tenant's branding logo and record its URL on TenantSetting.
 
-        with get_master_db_context() as master_db:
-            tenant = master_db.query(Tenant).filter(Tenant.code == self.tenant_code).first()
-            if not tenant or not tenant.aws_s3_bucket_name:
-                raise BadRequestError(message="Tenant AWS S3 bucket not provisioned.")
-            bucket_name = tenant.aws_s3_bucket_name
+        Storage strategy — S3 when it's actually configured for this tenant,
+        otherwise local disk served from the ``/uploads`` static mount. This
+        mirrors the manual card-funding evidence flow and means logo upload
+        works out of the box in deployments that don't provision per-tenant
+        S3 buckets (S3 disabled or no bucket) instead of failing hard.
+        """
+        # --- validate the file ------------------------------------------------
+        filename = file_obj.filename or "logo.png"
+        ext = os.path.splitext(filename)[1].lower()
+        if ext and ext not in self._ALLOWED_LOGO_EXT:
+            raise BadRequestError(
+                message="Unsupported image type. Upload a PNG, JPG, WEBP, SVG or GIF."
+            )
+        if not ext:
+            ext = ".png"
 
-        s3_service = S3Service()
-        file_ext = file_obj.filename.split(".")[-1] if "." in (file_obj.filename or "") else "png"
-        s3_key = f"settings/logo_{uuid.uuid4().hex}.{file_ext}"
+        # Read the bytes once (the route is sync, so use the sync file handle).
+        file_obj.file.seek(0)
+        raw = file_obj.file.read()
+        if not raw:
+            raise BadRequestError(message="The uploaded logo file is empty.")
+        max_bytes = int(getattr(settings, "MAX_UPLOAD_SIZE_MB", 20)) * 1024 * 1024
+        if len(raw) > max_bytes:
+            raise BadRequestError(
+                message=f"Logo exceeds the {getattr(settings, 'MAX_UPLOAD_SIZE_MB', 20)}MB limit."
+            )
 
-        logo_url = s3_service.upload_file(bucket_name, file_obj, s3_key)
-        if not logo_url:
-            raise BadRequestError(message="Failed to upload logo to AWS S3.")
+        # --- decide destination ----------------------------------------------
+        bucket_name: Optional[str] = None
+        if getattr(settings, "S3_ENABLED", False) and self.tenant_code:
+            with get_master_db_context() as master_db:
+                tenant = (
+                    master_db.query(Tenant)
+                    .filter(Tenant.code == self.tenant_code)
+                    .first()
+                )
+                # Tenant bucket only — provisioned on demand.
+                bucket_name = S3Service().ensure_tenant_bucket(master_db, tenant)
 
         setting = self.get_settings()
+        previous_url = setting.logo_url
+
+        if bucket_name:
+            # Cloud storage path.
+            file_obj.file.seek(0)
+            s3_key = f"settings/logo_{uuid.uuid4().hex}{ext}"
+            logo_url = S3Service().upload_file(bucket_name, file_obj, s3_key)
+            if not logo_url:
+                raise BadRequestError(message="Failed to upload logo to AWS S3.")
+        else:
+            # Local-disk fallback, served publicly via the '/uploads' mount.
+            logo_url = self._store_logo_locally(raw, ext)
+
         setting.logo_url = logo_url
         self.db.commit()
         self.db.refresh(setting)
+
+        # Best-effort cleanup of a previously stored *local* logo.
+        self._remove_local_logo(previous_url)
         return setting
+
+    def _store_logo_locally(self, raw: bytes, ext: str) -> str:
+        from app.utils.storage import tenant_logos_dir
+
+        prefix = (self.tenant_code or "tenant").lower().replace("/", "_")
+        stored_name = f"{prefix}_{uuid.uuid4().hex}{ext}"
+        dest = os.path.join(tenant_logos_dir(), stored_name)
+        with open(dest, "wb") as fh:
+            fh.write(raw)
+        return f"/uploads/tenant_logos/{stored_name}"
+
+    def _remove_local_logo(self, url: Optional[str]) -> None:
+        if not url or not url.startswith("/uploads/tenant_logos/"):
+            return
+        try:
+            from app.utils.storage import uploads_base_dir
+
+            base = os.path.realpath(uploads_base_dir())
+            rel = url[len("/uploads/") :]
+            path = os.path.realpath(os.path.join(base, *rel.split("/")))
+            # Guard against path traversal before unlinking.
+            if path.startswith(base) and os.path.isfile(path):
+                os.remove(path)
+        except OSError:
+            pass
 
     # ------------------------------------------------------------------
     # APPROVAL WORKFLOWS

@@ -26,7 +26,7 @@ from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.core.dependencies import AdminUser, require_plan_feature
+from app.core.dependencies import AdminUser, CurrentActiveUser, require_plan_feature
 from app.schemas.visit_flow_schemas import (
     VisitFlowActionResponseSchema,
     VisitFlowCombinedCreateResultSchema,
@@ -44,6 +44,7 @@ from app.schemas.visit_flow_schemas import (
     VisitFlowTemplateUpdateSchema,
     VisitFlowTemplateUpdateSchema,
 )
+from app.seeds.clinical_flow_seed import seed_standard_visit_flow
 from app.services.visit_flow_service import VisitFlowService
 from app.utils.pagination import paginate_response
 
@@ -52,6 +53,25 @@ router = APIRouter(
     tags=["Visit Flow Management"],
     dependencies=[Depends(require_plan_feature("clinical"))]
 )
+
+
+@router.post(
+    "/seed-standard",
+    status_code=status.HTTP_200_OK,
+    summary="Seed the standard outpatient clinical pathway",
+)
+def seed_standard_pathway(
+    _: AdminUser,
+    db: Annotated[Session, Depends(get_db)],
+):
+    """
+    Create the default sequential outpatient pathway template for this tenant
+    (Registration → Triage → Consultation → Laboratory → Radiology → Pharmacy →
+    Billing), mapped to the tenant's configured service delivery points.
+
+    Idempotent — if the standard template already exists it is returned as-is.
+    """
+    return seed_standard_visit_flow(db)
 
 
 def get_visit_flow_service(
@@ -91,15 +111,22 @@ def create_template(
     summary="List visit flow templates",
 )
 def list_templates(
-    _: AdminUser,
+    _: CurrentActiveUser,
+    db: Annotated[Session, Depends(get_db)],
     service: Annotated[VisitFlowService, Depends(get_visit_flow_service)],
     skip: int = Query(0, ge=0, description="Pagination offset."),
-    limit: int = Query(20, ge=1, le=100, description="Pagination size."),
+    limit: int = Query(20, ge=1, le=1000, description="Pagination size."),
     code: Optional[str] = Query(None),
     name: Optional[str] = Query(None),
 ):
     """
     Return a paginated list of reusable visit flow templates.
+
+    Readable by any authenticated clinical/reception user so they can pick a
+    care pathway when starting a visit. If the tenant has no templates yet and
+    no filters are applied, the standard outpatient pathway is seeded on the
+    fly (idempotent, best-effort) so the picker is never empty when service
+    delivery points exist.
     """
     items, total = service.list_templates(
         skip=skip,
@@ -107,6 +134,16 @@ def list_templates(
         code=code,
         name=name,
     )
+
+    if total == 0 and not code and not name:
+        try:
+            seed_standard_visit_flow(db)
+        except Exception:  # pragma: no cover - seeding must never break listing
+            pass
+        else:
+            items, total = service.list_templates(
+                skip=skip, limit=limit, code=code, name=name,
+            )
 
     return paginate_response(
         items=items,
@@ -125,11 +162,12 @@ def list_templates(
 )
 def get_template(
     template_id: int,
-    _: AdminUser,
+    _: CurrentActiveUser,
     service: Annotated[VisitFlowService, Depends(get_visit_flow_service)],
 ):
     """
-    Return a reusable visit flow template with ordered steps.
+    Return a reusable visit flow template with ordered steps. Readable by any
+    authenticated user so the care-pathway picker can preview steps.
     """
     return service.get_template(template_id)
 
@@ -265,7 +303,7 @@ def list_visit_steps(
     service: Annotated[VisitFlowService, Depends(get_visit_flow_service)],
     visit_id: Optional[int] = Query(None),
     skip: int = Query(0, ge=0, description="Pagination offset."),
-    limit: int = Query(50, ge=1, le=200, description="Pagination size."),
+    limit: int = Query(50, ge=1, le=1000, description="Pagination size."),
 ):
     """
     Return a paginated list of runtime visit flow steps.

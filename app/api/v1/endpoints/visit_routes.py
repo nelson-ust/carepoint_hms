@@ -21,7 +21,7 @@ These endpoints are intended for authorized registration/front-desk/admin staff
 and are protected with the admin dependency.
 """
 
-from typing import Annotated, Any, Optional
+from typing import Annotated, Optional
 
 from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.orm import Session
@@ -30,8 +30,9 @@ from app.core.database import get_db
 from app.core.dependencies import AdminUser, AnyAuthenticatedUser, require_plan_feature
 
 from app.schemas.visit_schemas import (
-    QueueTicketReadSchema,
     VisitActionResponseSchema,
+    VisitAdvanceResultSchema,
+    VisitAdvanceSchema,
     VisitDetailedReadSchema,
     VisitInitiateSchema,
     VisitInitiationResultSchema,
@@ -177,6 +178,41 @@ def reroute_visit(
 
 
 @router.post(
+    "/{visit_id}/advance",
+    response_model=VisitAdvanceResultSchema,
+    status_code=status.HTTP_200_OK,
+    summary="Advance visit to the next stage",
+)
+def advance_visit(
+    visit_id: int,
+    payload: VisitAdvanceSchema,
+    current_user: AdminUser,
+    service: Annotated[VisitService, Depends(get_visit_service)],
+):
+    """
+    Complete (or skip) the patient's current stage and automatically move them
+    to the next stage in the visit's clinical flow — updating the current
+    service point, queuing them there, and closing the finished stage's ticket.
+    When there is no next stage, the visit is marked completed.
+    """
+    result = service.advance_visit(
+        visit_id,
+        action=payload.action,
+        notes=payload.notes,
+        routed_by_id=current_user.id,
+        create_queue_ticket=payload.create_queue_ticket,
+    )
+    return {
+        "success": True,
+        "message": result["message"],
+        "visit": result["visit"],
+        "completed_step": result.get("completed_step"),
+        "next_step": result.get("next_step"),
+        "next_queue_ticket": result.get("next_queue_ticket"),
+    }
+
+
+@router.post(
     "/{visit_id}/switch-flow",
     response_model=VisitSwitchFlowResultSchema,
     status_code=status.HTTP_200_OK,
@@ -215,7 +251,7 @@ def list_visits(
     _: AnyAuthenticatedUser,
     service: Annotated[VisitService, Depends(get_visit_service)],
     skip: int = Query(0, ge=0, description="Pagination offset."),
-    limit: int = Query(20, ge=1, le=100, description="Pagination size."),
+    limit: int = Query(20, ge=1, le=1000, description="Pagination size."),
     patient_id: Optional[int] = Query(None),
     appointment_id: Optional[int] = Query(None),
     status_filter: Optional[str] = Query(None, alias="status"),
@@ -242,6 +278,25 @@ def list_visits(
         limit=limit,
         message="Visits fetched successfully.",
     )
+
+
+@router.get(
+    "/{visit_id}/timeline",
+    status_code=status.HTTP_200_OK,
+    summary="Chronological activity timeline for a visit",
+)
+def get_visit_timeline(
+    visit_id: int,
+    _: AnyAuthenticatedUser,
+    db: Annotated[Session, Depends(get_db)],
+):
+    """Every activity in the encounter — routing, triage, vitals,
+    consultations, orders, results, medications, procedures, billing,
+    admission and discharge — in one timestamped, staff-attributed stream,
+    assembled live from the authoritative clinical tables."""
+    from app.services.visit_timeline_service import VisitTimelineService
+
+    return VisitTimelineService(db).build(visit_id)
 
 
 @router.get(
@@ -302,19 +357,18 @@ def update_visit(
     "/{visit_id}",
     response_model=VisitActionResponseSchema,
     status_code=status.HTTP_200_OK,
-    summary="Close or remove visit placeholder response",
+    summary="Cancel visit",
 )
-def delete_visit_placeholder(
+def cancel_visit(
     visit_id: int,
     _: AdminUser,
+    service: Annotated[VisitService, Depends(get_visit_service)],
 ):
     """
-    Placeholder route for future visit delete/cancel behavior.
+    Cancel an active visit (soft-delete).
 
-    This route is included only to keep the visit route surface consistent.
-    Replace with a real cancel/delete implementation when that requirement is added.
+    Sets the visit status to CANCELLED, cancels all pending flow steps and
+    open queue tickets, and records the check-out time. The visit record is
+    retained for audit purposes; nothing is hard-deleted.
     """
-    return {
-        "success": True,
-        "message": f"Visit endpoint placeholder reached for visit_id={visit_id}.",
-    }
+    return service.cancel_visit(visit_id)

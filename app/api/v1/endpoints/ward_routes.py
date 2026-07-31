@@ -28,7 +28,7 @@ from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.core.dependencies import AdminUser, require_plan_feature
+from app.core.dependencies import AdminUser, CurrentActiveUser, require_plan_feature
 from app.schemas.ward_schemas import (
     WardActionResponseSchema,
     WardCreateSchema,
@@ -94,10 +94,10 @@ def create_ward(
     summary="List wards",
 )
 def list_wards(
-    _: AdminUser,
+    _: CurrentActiveUser,
     service: Annotated[WardService, Depends(get_ward_service)],
     skip: int = Query(0, ge=0, description="Pagination offset."),
-    limit: int = Query(20, ge=1, le=100, description="Pagination size."),
+    limit: int = Query(20, ge=1, le=1000, description="Pagination size."),
 ):
     """
     Return a paginated list of wards with operational summary fields.
@@ -126,7 +126,7 @@ def list_wards(
 )
 def get_ward(
     ward_id: int,
-    _: AdminUser,
+    _: CurrentActiveUser,
     service: Annotated[WardService, Depends(get_ward_service)],
 ):
     """
@@ -143,7 +143,7 @@ def get_ward(
 )
 def get_detailed_ward(
     ward_id: int,
-    _: AdminUser,
+    _: CurrentActiveUser,
     service: Annotated[WardService, Depends(get_ward_service)],
 ):
     """

@@ -56,3 +56,32 @@ class StatutoryDeductionConfigCreateSchema(StatutoryDeductionConfigBase):
 class StatutoryDeductionConfigReadSchema(StatutoryDeductionConfigBase):
     id: int
     model_config = ConfigDict(from_attributes=True)
+
+# ── Salary Grade & Step Schemas ───────────────────────────────────────
+
+class SalaryGradeBase(BaseModel):
+    code: str
+    name: str
+    description: Optional[str] = None
+    is_active: bool = True
+
+class SalaryGradeCreateSchema(SalaryGradeBase):
+    pass
+
+class SalaryGradeReadSchema(SalaryGradeBase):
+    id: int
+    model_config = ConfigDict(from_attributes=True)
+
+class SalaryStepBase(BaseModel):
+    grade_id: int
+    code: str
+    base_amount: Decimal = Field(..., ge=0)
+    currency: str = "NGN"
+    is_active: bool = True
+
+class SalaryStepCreateSchema(SalaryStepBase):
+    pass
+
+class SalaryStepReadSchema(SalaryStepBase):
+    id: int
+    model_config = ConfigDict(from_attributes=True)

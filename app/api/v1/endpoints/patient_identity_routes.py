@@ -86,3 +86,11 @@ def link_insurance(
     service: PatientIdentityService = Depends(_get_service)
 ):
     return service.link_patient_insurance(patient_id, payload)
+
+@router.get("/{patient_id}/insurance", response_model=List[PatientInsuranceReadSchema])
+def list_patient_insurance(
+    patient_id: int,
+    service: PatientIdentityService = Depends(_get_service)
+):
+    """List a patient's insurance policies (used to map claims to a policy)."""
+    return service.list_patient_insurance(patient_id)

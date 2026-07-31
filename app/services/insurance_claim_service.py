@@ -45,6 +45,8 @@ from app.models.all_models import (
     ClaimBatch,
     ClaimPayment,
     InsuranceClaim,
+    Patient,
+    PatientInsurance,
 )
 from app.repositories.insurance_claim_repository import (
     ClaimAdjudicationRepository,
@@ -253,6 +255,34 @@ class InsuranceClaimService:
         *,
         actor_user_id: Optional[int] = None,
     ) -> InsuranceClaim:
+        # Validate patient exists.
+        patient = self.db.get(Patient, payload.patient_id)
+        if patient is None or getattr(patient, "is_deleted", False):
+            raise BadRequestError(
+                message="Patient not found.",
+                detail={"patient_id": payload.patient_id},
+            )
+
+        # Validate the insurance policy exists, belongs to this patient, and
+        # derive the provider from the policy so the claim can never point at a
+        # provider that doesn't match the chosen policy.
+        policy = self.db.get(PatientInsurance, payload.patient_insurance_id)
+        if policy is None or getattr(policy, "is_deleted", False):
+            raise BadRequestError(
+                message="Insurance policy not found.",
+                detail={"patient_insurance_id": payload.patient_insurance_id},
+            )
+        if policy.patient_id != payload.patient_id:
+            raise BadRequestError(
+                message="The selected insurance policy does not belong to this patient.",
+                detail={
+                    "patient_id": payload.patient_id,
+                    "patient_insurance_id": payload.patient_insurance_id,
+                },
+            )
+        # The policy is the source of truth for the provider.
+        payload.insurance_provider_id = policy.insurance_provider_id
+
         # Validate batch (if provided) — must be DRAFT
         if payload.batch_id is not None:
             batch = self.batch_repository.get_required_by_id(payload.batch_id)

@@ -69,3 +69,9 @@ instance/
 # App specific
 /static/uploads/
 /media/
+
+# Cleanup (2026-07-16)
+_to_delete/
+*.db
+app/static/uploads/
+scratch/

@@ -22,6 +22,7 @@ Lifecycle and business rules
   the patient is queued at the appointment's service-delivery point.
 """
 
+import logging
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -42,6 +43,8 @@ from app.schemas.visit_schemas import VisitInitiateSchema
 from app.services.visit_service import VisitService
 from app.utils.security_event_util import record_security_event
 
+
+logger = logging.getLogger(__name__)
 
 # Statuses considered open / mutable.
 _OPEN_STATUSES = {AppointmentStatus.SCHEDULED, AppointmentStatus.RESCHEDULED}
@@ -112,6 +115,35 @@ class AppointmentService:
             service_delivery_point_id=service_delivery_point_id,
             exclude_appointment_id=exclude_appointment_id,
         )
+
+    # ============================================================
+    # REMINDERS
+    # ============================================================
+
+    def _schedule_patient_reminders(
+        self, appointment: "Appointment", *, reschedule: bool = False
+    ) -> None:
+        """
+        Best-effort scheduling of the day-before + 3-hours-before patient
+        reminders for an appointment. Never let a reminder-scheduling problem
+        break the booking/reschedule itself — failures are swallowed.
+        """
+        try:
+            from app.services.appointment_extension_service import (
+                AppointmentExtensionService,
+            )
+
+            ext = AppointmentExtensionService(self.db)
+            if reschedule:
+                ext.reschedule_reminders(appointment)
+            else:
+                ext.schedule_patient_reminders(appointment)
+        except Exception as exc:  # pragma: no cover - non-critical path
+            logger.warning(
+                "Failed to schedule reminders for appointment %s: %s",
+                getattr(appointment, "id", "?"),
+                exc,
+            )
 
     # ============================================================
     # CREATE
@@ -197,6 +229,9 @@ class AppointmentService:
             },
         )
         self.db.commit()
+
+        # Schedule the patient's day-before + 3-hours-before reminders.
+        self._schedule_patient_reminders(appointment)
         return self.repository.get_required_by_id(appointment.id)
 
     # ============================================================
@@ -270,6 +305,9 @@ class AppointmentService:
         self.repository.save(appointment)
 
         self.db.commit()
+
+        # Re-point the patient's reminders at the new slot.
+        self._schedule_patient_reminders(appointment, reschedule=True)
         return self.repository.get_required_by_id(appointment.id)
 
     def cancel(

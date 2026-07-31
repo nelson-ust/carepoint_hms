@@ -43,6 +43,7 @@ from typing import Optional
 from sqlalchemy.orm import Session
 
 from app.core.enums import (
+    AppointmentStatus,
     QueueStatus,
     VisitFlowStepStatus,
     VisitPriority,
@@ -131,6 +132,43 @@ class VisitService:
                     },
                 )
 
+            # An appointment that is cancelled / missed / already completed /
+            # rescheduled cannot start a visit.
+            if appointment.status in {
+                AppointmentStatus.CANCELLED,
+                AppointmentStatus.MISSED,
+                AppointmentStatus.COMPLETED,
+                AppointmentStatus.RESCHEDULED,
+            }:
+                status_val = (
+                    appointment.status.value
+                    if hasattr(appointment.status, "value")
+                    else str(appointment.status)
+                )
+                raise BadRequestError(
+                    message=f"This appointment is {status_val.lower()} and cannot start a visit.",
+                    detail={"appointment_id": appointment.id, "status": status_val},
+                )
+
+            # A visit can be initiated from an appointment ONLY on the date the
+            # appointment is scheduled for. Compare in the appointment's own
+            # timezone so it lines up with what the patient/clinic expects.
+            appt_dt = appointment.scheduled_start_at
+            appt_date = appt_dt.date()
+            today = datetime.now(appt_dt.tzinfo or timezone.utc).date()
+            if appt_date != today:
+                raise BadRequestError(
+                    message=(
+                        f"This appointment is scheduled for {appt_date.isoformat()}. "
+                        "A visit can only be initiated on the appointment date."
+                    ),
+                    detail={
+                        "appointment_id": appointment.id,
+                        "scheduled_date": appt_date.isoformat(),
+                        "today": today.isoformat(),
+                    },
+                )
+
         template = None
         if payload.visit_flow_template_id is not None:
             template = self.repository.get_visit_flow_template_by_id(
@@ -148,18 +186,39 @@ class VisitService:
                 detail={"patient_id": payload.patient_id},
             )
 
-        resolved_service_point = self.repository.resolve_first_service_delivery_point(
-            first_service_delivery_point_id=payload.first_service_delivery_point_id,
-            use_appointment_service_point=payload.use_appointment_service_point,
-            appointment=appointment,
-            visit_flow_template=template,
+        resolved_service_point, resolution_source = (
+            self.repository.resolve_first_service_delivery_point(
+                first_service_delivery_point_id=payload.first_service_delivery_point_id,
+                use_appointment_service_point=payload.use_appointment_service_point,
+                appointment=appointment,
+                visit_flow_template=template,
+            )
         )
+
+        # DEFAULT-PATHWAY FALLBACK
+        # A quick "Start Visit" (e.g. from the appointments list) sends no
+        # explicit service point and no chosen template; if the appointment has
+        # no service point either, nothing resolves. Rather than fail, fall back
+        # to the tenant's default care pathway (seeding the standard outpatient
+        # pathway on first use) so the patient can always be started and routed.
+        template_from_fallback = False
+        if resolved_service_point is None and template is None:
+            fallback_template = self._ensure_default_pathway_template()
+            if fallback_template is not None and fallback_template.steps:
+                template = fallback_template
+                template_from_fallback = True
+                resolved_service_point, resolution_source = (
+                    self.repository.resolve_first_service_delivery_point(
+                        visit_flow_template=template,
+                    )
+                )
 
         if not resolved_service_point:
             raise BadRequestError(
                 message=(
-                    "Unable to resolve the first service delivery point. "
-                    "Provide a service point, use appointment context, or use a template."
+                    "Unable to resolve the first service delivery point. Configure a "
+                    "service point or care pathway for this tenant, pick a starting "
+                    "service point, or use an appointment that already has one."
                 )
             )
 
@@ -176,9 +235,19 @@ class VisitService:
                 resolved_service_point = insurance_station
                 # Update payload to reflect this override for subsequent logic
                 payload.first_service_delivery_point_id = insurance_station.id
+                # The point is now dictated by the insurance flow, not by the
+                # walk-in/appointment/template source, so skip those gates.
+                resolution_source = "insurance"
+                # If the pathway came only from the default-pathway fallback,
+                # defer to the insurance station rather than the template flow.
+                if template_from_fallback:
+                    template = None
 
+        # Walk-in support is only meaningful when the operator explicitly picked
+        # the point for a walk-in (no appointment). A point resolved from a care
+        # pathway template or an appointment is not subject to this gate.
         if (
-            payload.first_service_delivery_point_id is not None
+            resolution_source == "explicit"
             and payload.appointment_id is None
             and not self.repository.service_delivery_point_supports_walk_in(
                 resolved_service_point.id
@@ -189,9 +258,11 @@ class VisitService:
                 detail={"service_delivery_point_id": resolved_service_point.id},
             )
 
+        # Appointment support is only required when the point actually came FROM
+        # the appointment. When the first stage comes from a pathway template
+        # (e.g. Registration), it need not "support appointments".
         if (
-            payload.use_appointment_service_point
-            and appointment is not None
+            resolution_source == "appointment"
             and not self.repository.service_delivery_point_supports_appointments(
                 resolved_service_point.id
             )
@@ -428,6 +499,160 @@ class VisitService:
             "new_queue_ticket": new_queue_ticket,
         }
 
+    # ============================================================
+    # SEQUENTIAL ADVANCE
+    # ============================================================
+
+    def advance_visit(
+        self,
+        visit_id: int,
+        *,
+        action: str = "complete",
+        notes: Optional[str] = None,
+        routed_by_id: Optional[int] = None,
+        create_queue_ticket: bool = True,
+    ):
+        """
+        Move a visit forward one stage in its configured clinical flow.
+
+        This is the sequential backbone of the care pathway: the patient's
+        *current* flow step is closed (``COMPLETED`` by default, or ``SKIPPED``
+        when ``action == "skip"``) and the patient is automatically advanced to
+        the next pending step in ``step_order`` — updating the visit's current
+        service point, queuing them there, and closing the finished step's queue
+        ticket. When there is no next step, the visit is marked ``COMPLETED``.
+
+        Standard practice is honoured: staff simply press "advance" at each
+        station and the patient flows Registration → Triage → Consultation →
+        (orders) → Pharmacy → Billing without re-selecting a destination.
+        """
+        normalized_action = (action or "complete").strip().lower()
+        if normalized_action not in {"complete", "skip"}:
+            raise BadRequestError(
+                message="action must be either 'complete' or 'skip'.",
+                detail={"action": action},
+            )
+
+        visit = self.repository.get_detailed_visit_by_id(visit_id)
+        if not visit:
+            raise NotFoundError(message="Visit not found.", detail={"visit_id": visit_id})
+
+        if visit.status in {VisitStatus.COMPLETED, VisitStatus.CANCELLED}:
+            raise BadRequestError(
+                message="Completed or cancelled visits cannot be advanced.",
+                detail={"visit_id": visit_id, "status": str(visit.status)},
+            )
+
+        steps = self.repository.list_visit_flow_steps(visit_id)
+        if not steps:
+            raise BadRequestError(
+                message="This visit has no clinical flow steps to advance.",
+                detail={"visit_id": visit_id},
+            )
+
+        terminal = {
+            VisitFlowStepStatus.COMPLETED,
+            VisitFlowStepStatus.SKIPPED,
+            VisitFlowStepStatus.CANCELLED,
+        }
+
+        now = datetime.now(timezone.utc)
+
+        # Resolve the step the patient is currently at.
+        current = self.repository.get_current_visit_flow_step(visit_id)
+        if current is None:
+            current = next((s for s in steps if s.status not in terminal), None)
+
+        completed_step = None
+        if current is not None:
+            current.status = (
+                VisitFlowStepStatus.SKIPPED
+                if normalized_action == "skip"
+                else VisitFlowStepStatus.COMPLETED
+            )
+            current.is_skipped = normalized_action == "skip"
+            current.is_current = False
+            current.completed_at = now
+            if notes:
+                current.notes = f"{current.notes}\n{notes}" if current.notes else notes
+            self.repository.update_visit_flow_step(current)
+            self._close_queue_tickets_for_step(visit_id, current.id)
+            completed_step = current
+
+        # Find the next actionable step: the earliest, by order, that is not
+        # already terminal and sits after the step we just closed.
+        current_order = current.step_order if current is not None else -1
+        next_step = next(
+            (s for s in steps if s.step_order > current_order and s.status not in terminal),
+            None,
+        )
+        # Fallback: any remaining non-terminal step (e.g. appended reroutes).
+        if next_step is None:
+            next_step = next(
+                (
+                    s
+                    for s in steps
+                    if s.status not in terminal
+                    and (current is None or s.id != current.id)
+                ),
+                None,
+            )
+
+        next_queue_ticket = None
+        if next_step is not None:
+            self.repository.clear_current_flags_for_visit(visit_id)
+            next_step.is_current = True
+            next_step.status = VisitFlowStepStatus.QUEUED
+            if next_step.started_at is None:
+                next_step.started_at = now
+            if routed_by_id and not next_step.routed_by_id:
+                next_step.routed_by_id = routed_by_id
+            self.repository.update_visit_flow_step(next_step)
+
+            visit.current_service_delivery_point_id = next_step.service_delivery_point_id
+            visit.status = VisitStatus.IN_PROGRESS
+            self.repository.update_visit(visit)
+
+            if create_queue_ticket:
+                next_queue_ticket = self._create_queue_ticket_for_step(
+                    visit_id=visit.id,
+                    patient_id=visit.patient_id,
+                    flow_step_id=next_step.id,
+                    service_delivery_point_id=next_step.service_delivery_point_id,
+                    queue_status=QueueStatus.WAITING,
+                )
+            message = "Patient advanced to the next stage."
+        else:
+            # No further steps — the pathway is complete.
+            visit.status = VisitStatus.COMPLETED
+            if hasattr(visit, "check_out_time") and getattr(visit, "check_out_time", None) is None:
+                visit.check_out_time = now
+            self.repository.update_visit(visit)
+            message = "Final stage completed; the visit is now closed."
+
+        self.db.commit()
+        detailed_visit = self.repository.get_detailed_visit_by_id(visit.id)
+
+        return {
+            "success": True,
+            "message": message,
+            "visit": detailed_visit,
+            "completed_step": completed_step,
+            "next_step": next_step,
+            "next_queue_ticket": next_queue_ticket,
+        }
+
+    def _close_queue_tickets_for_step(self, visit_id: int, flow_step_id: int) -> None:
+        """Mark any open queue ticket tied to a flow step as SERVED."""
+        open_states = {QueueStatus.WAITING, QueueStatus.CALLED, QueueStatus.SERVING}
+        now = datetime.now(timezone.utc)
+        for ticket in self.repository.list_queue_tickets_for_visit(visit_id):
+            if ticket.visit_flow_step_id == flow_step_id and ticket.status in open_states:
+                ticket.status = QueueStatus.SERVED
+                if hasattr(ticket, "service_ended_at") and ticket.service_ended_at is None:
+                    ticket.service_ended_at = now
+                self.repository.update_queue_ticket(ticket)
+
     def switch_visit_flow(
         self,
         visit_id: int,
@@ -653,6 +878,62 @@ class VisitService:
         updated = self.repository.update_visit(visit)
         self.db.commit()
         return self.repository.get_detailed_visit_by_id(updated.id)
+
+    # ============================================================
+    # CANCEL
+    # ============================================================
+
+    def cancel_visit(self, visit_id: int) -> dict:
+        """
+        Cancel an active visit (soft-delete semantics).
+
+        Business rules
+        --------------
+        - visit must exist
+        - completed or already-cancelled visits cannot be cancelled again
+        - all PENDING / QUEUED flow steps are cancelled
+        - all open queue tickets (WAITING / CALLED / SERVING) are cancelled
+        - the visit status is set to CANCELLED and check-out time recorded
+
+        The visit record itself is retained for audit purposes; no rows
+        are hard-deleted.
+        """
+        visit = self.get_visit(visit_id)
+
+        if visit.status in {VisitStatus.COMPLETED, VisitStatus.CANCELLED}:
+            raise BadRequestError(
+                message="Completed or cancelled visits cannot be cancelled.",
+                detail={"visit_id": visit.id, "status": str(visit.status)},
+            )
+
+        # 1. Cancel remaining runtime flow steps.
+        cancelled_steps = self.repository.cancel_pending_flow_steps(visit.id)
+
+        # 2. Cancel any still-open queue tickets.
+        cancelled_tickets = 0
+        open_ticket_statuses = {QueueStatus.WAITING, QueueStatus.CALLED, QueueStatus.SERVING}
+        for ticket in self.repository.list_queue_tickets_for_visit(visit.id):
+            if ticket.status in open_ticket_statuses:
+                ticket.status = QueueStatus.CANCELLED
+                self.repository.update_queue_ticket(ticket)
+                cancelled_tickets += 1
+
+        # 3. Close out the visit itself.
+        visit.status = VisitStatus.CANCELLED
+        if visit.check_out_time is None:
+            visit.check_out_time = datetime.now(timezone.utc)
+
+        self.repository.update_visit(visit)
+        self.db.commit()
+
+        return {
+            "success": True,
+            "message": (
+                f"Visit {visit.id} cancelled successfully "
+                f"({cancelled_steps} pending step(s) and "
+                f"{cancelled_tickets} open queue ticket(s) cancelled)."
+            ),
+        }
 
     # ============================================================
     # VISIT TAG
@@ -978,6 +1259,28 @@ class VisitService:
             status=queue_status,
             transferred_from_ticket_id=None,
         )
+
+    def _ensure_default_pathway_template(self):
+        """
+        Return the tenant's default care pathway (visit flow template), seeding
+        the standard outpatient pathway on first use when none exists yet.
+
+        Used as the last-resort resolver for the first service delivery point so
+        a visit can always be started even when the operator provided neither an
+        explicit service point, an appointment service point, nor a template.
+        Returns ``None`` only when no service points are configured (so the
+        standard pathway cannot be built) — the caller then raises a clear error.
+        """
+        template = self.repository.get_default_visit_flow_template()
+        if template is None:
+            try:
+                from app.seeds.clinical_flow_seed import seed_standard_visit_flow
+
+                seed_standard_visit_flow(self.db)
+            except Exception:  # pragma: no cover - seeding must never crash init
+                return None
+            template = self.repository.get_default_visit_flow_template()
+        return template
 
     def _resolve_visit_priority(
         self,

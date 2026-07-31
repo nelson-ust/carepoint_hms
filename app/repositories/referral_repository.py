@@ -71,6 +71,8 @@ class ReferralRepository:
         visit_id: Optional[int] = None,
         referring_staff_id: Optional[int] = None,
         status: Optional[ReferralStatus] = None,
+        source_facility_id: Optional[int] = None,
+        destination_facility_id: Optional[int] = None,
     ) -> tuple[list[Referral], int]:
         """Paginated list with common filters."""
         query = (
@@ -87,6 +89,10 @@ class ReferralRepository:
             query = query.filter(Referral.referring_staff_id == referring_staff_id)
         if status is not None:
             query = query.filter(Referral.status == status)
+        if source_facility_id is not None:
+            query = query.filter(Referral.source_facility_id == source_facility_id)
+        if destination_facility_id is not None:
+            query = query.filter(Referral.destination_facility_id == destination_facility_id)
 
         total = query.with_entities(func.count(Referral.id)).scalar() or 0
         items = (
@@ -113,6 +119,8 @@ class ReferralRepository:
         referral_date: datetime,
         status: ReferralStatus = ReferralStatus.PENDING,
         priority = None,
+        source_facility_id: Optional[int] = None,
+        destination_facility_id: Optional[int] = None,
     ) -> Referral:
         referral = Referral(
             patient_id=patient_id,
@@ -125,6 +133,8 @@ class ReferralRepository:
             referral_date=referral_date,
             status=status,
             priority=priority,
+            source_facility_id=source_facility_id,
+            destination_facility_id=destination_facility_id,
         )
         self.db.add(referral)
         self.db.flush()

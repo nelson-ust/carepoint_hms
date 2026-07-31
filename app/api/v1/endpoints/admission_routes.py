@@ -72,7 +72,7 @@ def list_admissions(
     _: Annotated[User, Depends(require_permission("BILLING_READ", "ADMISSION_CREATE", "VISIT_READ"))],
     service: Annotated[AdmissionService, Depends(get_admission_service)],
     skip: int = Query(0, ge=0),
-    limit: int = Query(50, ge=1, le=200),
+    limit: int = Query(50, ge=1, le=1000),
     patient_id: Optional[int] = Query(None),
     ward_id: Optional[int] = Query(None),
     facility_id: Optional[int] = Query(None),
@@ -259,30 +259,3 @@ def capture_bed_day_charges(
         "captured_through": summary["captured_through"],
     }
 
-
-@router.post(
-    "/{admission_id}/bed-days",
-    response_model=AdmissionBedDayCaptureResponseSchema,
-    summary="Capture bed-day charges up to a date",
-)
-def capture_bed_day_charges(
-    admission_id: int,
-    payload: AdmissionBedDayCaptureSchema,
-    actor: CurrentActiveUser,
-    service: Annotated[AdmissionService, Depends(get_admission_service)],
-    _: Annotated[User, Depends(require_permission("BILLING_CREATE", "ADMISSION_CREATE"))],
-):
-    """
-    Capture all bed-day charges for an admission up to ``through_date``.
-
-    Idempotent. Used by the nightly rollover and by cashier "settle now" flows.
-    """
-    summary = service.capture_bed_day_charges(admission_id, payload, actor_user_id=actor.id)
-    return {
-        "success": True,
-        "message": "Bed-day charges captured successfully.",
-        "admission_id": summary["admission_id"],
-        "charges_captured": summary["charges_captured"],
-        "total_amount_captured": summary["total_amount_captured"],
-        "captured_through": summary["captured_through"],
-    }

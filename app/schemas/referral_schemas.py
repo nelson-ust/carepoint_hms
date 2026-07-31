@@ -22,7 +22,8 @@ class ReferralCreateSchema(BaseModel):
 
     patient_id: int
     visit_id: Optional[int] = None
-    destination_facility: str = Field(..., max_length=255)
+    destination_facility: Optional[str] = Field(None, max_length=255, description="Free-text destination; auto-filled from destination_facility_id for internal referrals.")
+    destination_facility_id: Optional[int] = Field(None, description="Receiving facility within this tenant (seamless internal referral).")
     reason_for_referral: str
     clinical_summary: Optional[str] = None
     referral_date: datetime = Field(default_factory=datetime.utcnow)
@@ -43,7 +44,9 @@ class InterFacilityReferralCreateSchema(BaseModel):
     """Create a referral to another facility in the SaaS platform."""
 
     target_tenant_id: int
-    target_facility_id: int
+    #: 0 = "unspecified facility" — routing is per-hospital (tenant); the
+    #: precise receiving facility is optional detail.
+    target_facility_id: int = 0
     patient_global_id: str = Field(..., max_length=100)
     reason_for_referral: str
     clinical_summary: Optional[str] = None
@@ -74,6 +77,8 @@ class ReferralReadSchema(BaseModel):
     visit_id: Optional[int] = None
     referring_staff_id: int
     destination_facility: str
+    source_facility_id: Optional[int] = None
+    destination_facility_id: Optional[int] = None
     reason_for_referral: str
     clinical_summary: Optional[str] = None
     referral_date: datetime

@@ -239,6 +239,11 @@ class NotificationService:
         # Render with the supplied context.
         rendered_subject = self._render(template.subject_template, payload.context)
         rendered_body = self._render(template.body_template, payload.context) or ""
+        rendered_html = (
+            self._render(getattr(template, "body_html", None), payload.context)
+            if getattr(template, "body_html", None)
+            else None
+        ) or getattr(payload, "body_html", None)
 
         recipient = self._resolve_recipient_address(
             channel=channel,
@@ -252,6 +257,7 @@ class NotificationService:
         notification = self.repository.create(
             channel=channel,
             body=rendered_body,
+            body_html=rendered_html,
             subject=rendered_subject,
             recipient_address=recipient,
             user_id=payload.user_id,
@@ -267,7 +273,11 @@ class NotificationService:
             self.db.commit()
             return self.repository.get_required_by_id(notification.id)
 
-        self._deliver(notification, raise_on_failure=raise_on_failure)
+        self._deliver(
+            notification,
+            raise_on_failure=raise_on_failure,
+            body_html=rendered_html,
+        )
         record_security_event(
             self.db,
             user_id=actor_user_id,
@@ -303,6 +313,7 @@ class NotificationService:
         notification = self.repository.create(
             channel=channel,
             body=payload.body,
+            body_html=getattr(payload, "body_html", None),
             subject=payload.subject,
             recipient_address=recipient,
             user_id=payload.user_id,
@@ -314,7 +325,11 @@ class NotificationService:
             self.db.commit()
             return self.repository.get_required_by_id(notification.id)
 
-        self._deliver(notification, raise_on_failure=raise_on_failure)
+        self._deliver(
+            notification,
+            raise_on_failure=raise_on_failure,
+            body_html=getattr(payload, "body_html", None),
+        )
         record_security_event(
             self.db,
             user_id=actor_user_id,
@@ -390,7 +405,7 @@ class NotificationService:
 
     # ------- INTERNAL -------
 
-    def _deliver(self, notification: Notification, *, raise_on_failure: bool) -> None:
+    def _deliver(self, notification: Notification, *, raise_on_failure: bool, body_html: Optional[str] = None) -> None:
         """
         Hand a notification to its channel adapter.
 
@@ -403,6 +418,9 @@ class NotificationService:
         """
         try:
             channel = notification.channel
+            # Prefer an explicitly-passed HTML body, else the one persisted on
+            # the row (so retries / async delivery keep the styled email).
+            body_html = body_html or getattr(notification, "body_html", None)
             if channel == NotificationChannel.IN_APP:
                 # In-app delivery is just persistence — the inbox UI polls
                 # for unread rows.
@@ -416,6 +434,7 @@ class NotificationService:
                     subject=notification.subject or "(no subject)",
                     recipients=[notification.recipient_address],
                     body_text=notification.body,
+                    body_html=body_html,
                 )
                 notification.status = NotificationStatus.SENT
             elif channel == NotificationChannel.SMS:

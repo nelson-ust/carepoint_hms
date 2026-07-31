@@ -66,6 +66,15 @@ class AdmissionCreateSchema(BaseModel):
     )
     expected_discharge_at: Optional[datetime] = None
 
+    is_emergency: bool = Field(
+        default=False,
+        description=(
+            "Emergency admission. When True the visit bypasses the "
+            "doctor-recommendation requirement (life-threatening / ER cases). "
+            "Audited."
+        ),
+    )
+
     capture_first_bed_day_charge: bool = Field(
         default=True,
         description="If True, immediately captures one bed-day charge against the visit's billing.",
@@ -90,6 +99,10 @@ class AdmissionFromVisitConvertSchema(BaseModel):
     admitting_staff_id: Optional[int] = None
     admission_reason: Optional[str] = Field(None, max_length=4000)
     expected_discharge_at: Optional[datetime] = None
+    is_emergency: bool = Field(
+        default=False,
+        description="Emergency admission; bypasses the doctor-recommendation requirement.",
+    )
     capture_first_bed_day_charge: bool = True
     route_to_service_delivery_point_id: Optional[int] = Field(
         None,

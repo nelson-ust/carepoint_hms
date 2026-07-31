@@ -67,6 +67,60 @@ def register_tenant(
 
 
 @router.post(
+    "/{tenant_id}/provision-s3",
+    response_model=dict,
+    status_code=status.HTTP_200_OK,
+    summary="Provision the tenant's S3 bucket (idempotent, SaaS admin)",
+)
+def provision_tenant_s3(
+    tenant_id: int,
+    _: CurrentSaaSSuperuser,
+    service: Annotated[TenantService, Depends(get_tenant_service)],
+):
+    """
+    Create the tenant's own S3 bucket and record it on the tenant.
+
+    Buckets are normally provisioned during registration approval; use this
+    when a tenant's workspace (database) exists but its bucket does not —
+    e.g. S3 was disabled or failed at approval time. Safe to call repeatedly:
+    an existing bucket is reported, never recreated.
+    """
+    return service.provision_s3_bucket(tenant_id)
+
+
+@router.post(
+    "/{tenant_id}/sync-schema",
+    response_model=dict,
+    status_code=status.HTTP_200_OK,
+    summary="Repair: forward-only schema sync on the tenant database (idempotent)",
+)
+def sync_tenant_schema_repair(
+    tenant_id: int,
+    _: CurrentSaaSSuperuser,
+    service: Annotated[TenantService, Depends(get_tenant_service)],
+):
+    """Targeted infrastructure repair — adds any missing tables/columns/enums
+    to the tenant's database without touching existing data."""
+    return service.sync_tenant_schema_repair(tenant_id)
+
+
+@router.post(
+    "/{tenant_id}/sync-defaults",
+    response_model=dict,
+    status_code=status.HTTP_200_OK,
+    summary="Repair: re-seed roles/permissions/defaults on the tenant database (idempotent)",
+)
+def sync_tenant_defaults_repair(
+    tenant_id: int,
+    _: CurrentSaaSSuperuser,
+    service: Annotated[TenantService, Depends(get_tenant_service)],
+):
+    """Targeted infrastructure repair — re-runs the default seeds. Existing
+    rows are never duplicated; only missing defaults are added."""
+    return service.sync_tenant_defaults_repair(tenant_id)
+
+
+@router.post(
     "/{tenant_id}/approve",
     response_model=dict,
     status_code=status.HTTP_200_OK,
@@ -182,6 +236,40 @@ def update_tenant_status(
     Requires SaaS Superuser access.
     """
     return service.update_tenant_status(tenant_id, new_status=payload.status)
+
+
+@router.get(
+    "/{tenant_id}/provisioning-status",
+    response_model=dict,
+    status_code=status.HTTP_200_OK,
+    summary="Poll provisioning progress for a tenant",
+)
+def get_provisioning_status(
+    tenant_id: int,
+    _: CurrentSaaSAdmin,
+    service: Annotated[TenantService, Depends(get_tenant_service)],
+):
+    """
+    Lightweight polling endpoint for the SaaS console after an approval:
+    returns the tenant's lifecycle status, whether the database is fully
+    provisioned, and the last provisioning error (if the background task
+    failed — in which case the tenant reverts to PENDING for re-approval).
+    """
+    tenant = service.get_tenant(tenant_id)
+    onboarding = tenant.onboarding_data or {}
+    return {
+        "success": True,
+        "tenant_id": tenant.id,
+        "status": tenant.status.value if hasattr(tenant.status, "value") else tenant.status,
+        "is_provisioned": bool(tenant.is_provisioned),
+        "provisioning_error": tenant.provisioning_error,
+        "steps": list(tenant.provisioning_steps or []),
+        "aws_s3_bucket_name": tenant.aws_s3_bucket_name,
+        "registered_at": tenant.date_created.isoformat() if getattr(tenant, "date_created", None) else None,
+        "company_email": tenant.billing_email or onboarding.get("admin_email"),
+        "contact_person": tenant.billing_contact_name or onboarding.get("admin_first_name"),
+        "industry": onboarding.get("industry"),
+    }
 
 
 @router.post(

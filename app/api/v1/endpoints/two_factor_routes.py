@@ -63,7 +63,7 @@ def list_challenges(
     _: AdminUser,
     service: Annotated[TwoFactorService, Depends(get_two_factor_service)],
     skip: int = Query(0, ge=0),
-    limit: int = Query(20, ge=1, le=100),
+    limit: int = Query(20, ge=1, le=1000),
     user_id: Optional[int] = Query(None, description="Filter by user ID."),
     purpose: Optional[str] = Query(
         None,

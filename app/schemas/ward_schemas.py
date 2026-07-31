@@ -47,7 +47,7 @@ is_active because they are not present in the current Ward model.
 from datetime import datetime
 from typing import Optional
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
 
 
 # ============================================================
@@ -252,15 +252,20 @@ class WardReadSchema(BaseModel):
     Standard ward read schema.
     """
 
-    model_config = ConfigDict(from_attributes=True)
+    model_config = ConfigDict(from_attributes=True, populate_by_name=True)
 
     id: int
     name: str
     code: str
     ward_type: Optional[str] = None
     description: Optional[str] = None
-    created_at: Optional[datetime] = None
-    updated_at: Optional[datetime] = None
+    # ORM base columns are date_created / date_updated.
+    created_at: Optional[datetime] = Field(
+        None, validation_alias=AliasChoices("created_at", "date_created")
+    )
+    updated_at: Optional[datetime] = Field(
+        None, validation_alias=AliasChoices("updated_at", "date_updated")
+    )
 
 
 class WardDetailedReadSchema(BaseModel):
@@ -271,15 +276,20 @@ class WardDetailedReadSchema(BaseModel):
     aggregated operational values such as bed and admission counts.
     """
 
-    model_config = ConfigDict(from_attributes=True)
+    model_config = ConfigDict(from_attributes=True, populate_by_name=True)
 
     id: int
     name: str
     code: str
     ward_type: Optional[str] = None
     description: Optional[str] = None
-    created_at: Optional[datetime] = None
-    updated_at: Optional[datetime] = None
+    # ORM base columns are date_created / date_updated.
+    created_at: Optional[datetime] = Field(
+        None, validation_alias=AliasChoices("created_at", "date_created")
+    )
+    updated_at: Optional[datetime] = Field(
+        None, validation_alias=AliasChoices("updated_at", "date_updated")
+    )
 
     total_beds: int = 0
     available_beds: int = 0

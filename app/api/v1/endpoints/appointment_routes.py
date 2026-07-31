@@ -77,7 +77,7 @@ def list_appointments(
     _: Annotated[User, Depends(require_permission("APPOINTMENT_READ"))],
     service: Annotated[AppointmentService, Depends(get_appointment_service)],
     skip: int = Query(0, ge=0),
-    limit: int = Query(50, ge=1, le=200),
+    limit: int = Query(50, ge=1, le=1000),
     patient_id: Optional[int] = Query(None),
     staff_profile_id: Optional[int] = Query(None),
     service_delivery_point_id: Optional[int] = Query(None),

@@ -131,14 +131,82 @@ engine: Engine = create_engine(DATABASE_URL, **_engine_kwargs)
 SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
 
 
-# Cache for tenant engines
-_tenant_engines: dict[str, Engine] = {DATABASE_URL: engine}
+# ---------------------------------------------------------------------------
+# Tenant engine cache — LEAN pools + bounded LRU
+#
+# One engine exists per tenant database URL. The big master-sized pool
+# (DB_POOL_SIZE/DB_MAX_OVERFLOW) multiplied across every tenant is a memory
+# and connection-count amplifier, so tenant engines use a small dedicated
+# pool, and the cache is LRU-bounded: engines for tenants that haven't been
+# touched recently are disposed (closing their pooled connections) instead of
+# accumulating for the life of the process. The default and master engines
+# are pinned and never evicted.
+# ---------------------------------------------------------------------------
+
+import threading
+from collections import OrderedDict
+
+TENANT_DB_POOL_SIZE: int = int(getattr(settings, "TENANT_DB_POOL_SIZE", 3)) if settings else 3
+TENANT_DB_MAX_OVERFLOW: int = int(getattr(settings, "TENANT_DB_MAX_OVERFLOW", 5)) if settings else 5
+TENANT_ENGINE_CACHE_SIZE: int = int(getattr(settings, "TENANT_ENGINE_CACHE_SIZE", 24)) if settings else 24
+
+_tenant_engine_kwargs: dict = {
+    "echo": SQLALCHEMY_ECHO,
+    "future": True,
+    "pool_pre_ping": DB_POOL_PRE_PING,
+}
+if DB_POOL_SIZE == 0:
+    _tenant_engine_kwargs["poolclass"] = NullPool
+else:
+    _tenant_engine_kwargs.update({
+        "pool_size": TENANT_DB_POOL_SIZE,
+        "max_overflow": TENANT_DB_MAX_OVERFLOW,
+        "pool_timeout": DB_POOL_TIMEOUT,
+        "pool_recycle": DB_POOL_RECYCLE,
+    })
+if DB_ISOLATION_LEVEL:
+    _tenant_engine_kwargs["isolation_level"] = DB_ISOLATION_LEVEL
+
+
+def _pinned_urls() -> set[str]:
+    pinned = {DATABASE_URL}
+    master = getattr(settings, "MASTER_DATABASE_URL", None) if settings else None
+    if master:
+        pinned.add(master)
+    return pinned
+
+
+_tenant_engines: "OrderedDict[str, Engine]" = OrderedDict({DATABASE_URL: engine})
+_tenant_engines_lock = threading.Lock()
+
 
 def get_engine_for_url(url: str) -> Engine:
-    """Return a cached engine for a given database URL."""
-    if url not in _tenant_engines:
-        _tenant_engines[url] = create_engine(url, **_engine_kwargs)
-    return _tenant_engines[url]
+    """Return a cached engine for a database URL (LRU-bounded for tenants)."""
+    evicted: list[Engine] = []
+    pinned = _pinned_urls()
+    with _tenant_engines_lock:
+        eng = _tenant_engines.get(url)
+        if eng is not None:
+            _tenant_engines.move_to_end(url)
+        else:
+            kwargs = _engine_kwargs if url in pinned else _tenant_engine_kwargs
+            eng = create_engine(url, **kwargs)
+            _tenant_engines[url] = eng
+            # Evict least-recently-used tenant engines beyond the cap.
+            while True:
+                evictable = [u for u in _tenant_engines if u not in pinned]
+                if len(evictable) <= TENANT_ENGINE_CACHE_SIZE:
+                    break
+                victim = evictable[0]  # OrderedDict preserves LRU order
+                evicted.append(_tenant_engines.pop(victim))
+    # Dispose outside the lock — closes the evicted engines' pooled
+    # connections so their memory is actually reclaimed.
+    for old_engine in evicted:
+        try:
+            old_engine.dispose()
+        except Exception:
+            pass
+    return eng
 
 def get_master_engine() -> Engine:
     """Return the master database engine."""
@@ -161,6 +229,34 @@ def get_master_db_context() -> Generator[Session, None, None]:
 def get_master_db() -> Generator[Session, None, None]:
     """FastAPI dependency providing a session to the master database."""
     engine = get_master_engine()
+    session_factory = sessionmaker(bind=engine, expire_on_commit=False)
+    db = session_factory()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+@contextmanager
+def get_tenant_db_context(tenant_id: int) -> Generator[Session, None, None]:
+    """
+    Provide a session bound to a *specific* tenant's database, looked up by
+    tenant id in the master registry. Used for cross-tenant operations (e.g.
+    generating a patient-record export from the hospital that holds the data).
+    """
+    from app.core.cryptography import decrypt_string
+    from app.models.all_models import Tenant
+
+    with get_master_db_context() as master_db:
+        tenant = master_db.query(Tenant).filter(Tenant.id == tenant_id).first()
+        if tenant is None or not tenant.db_connection_string:
+            raise ValueError(f"Tenant {tenant_id} has no reachable database.")
+        try:
+            url = decrypt_string(tenant.db_connection_string)
+        except Exception:
+            url = tenant.db_connection_string
+
+    engine = get_engine_for_url(url)
     session_factory = sessionmaker(bind=engine, expire_on_commit=False)
     db = session_factory()
     try:

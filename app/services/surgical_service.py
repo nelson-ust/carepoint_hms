@@ -86,7 +86,7 @@ from app.schemas.surgical_schemas import (
 )
 from app.utils.charge_capture import (
     add_charge,
-    find_billable_service,
+    resolve_billable_service,
     get_or_create_open_billing,
 )
 from app.utils.security_event_util import record_security_event
@@ -611,8 +611,13 @@ class SurgicalCaseService:
                 case.procedure_catalog_id
             )
             billing = get_or_create_open_billing(self.db, visit=visit)
-            billable = find_billable_service(
-                self.db, code=f"SUR-{catalog.code}"
+            billable = resolve_billable_service(
+                self.db,
+                code=f"SUR-{catalog.code}",
+                name=f"Surgery: {catalog.name}",
+                default_price=Decimal(catalog.default_price or 0),
+                category="SURGERY",
+                domain="SURGERY",
             )
             add_charge(
                 self.db,
@@ -621,7 +626,7 @@ class SurgicalCaseService:
                 service_code=f"SUR-{catalog.code}",
                 unit_price=Decimal(catalog.default_price or 0),
                 quantity=Decimal("1"),
-                billable_service_id=billable.id if billable else None,
+                billable_service_id=billable.id,
                 source_reference=f"SURGICAL_CASE:{case.id}",
             )
             # Hand-off the visit to the recovery / ward SDP if asked.

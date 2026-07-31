@@ -43,8 +43,17 @@ def _hash_token(token: str) -> str:
 
 
 def _build_accept_url(base_url: str, token: str) -> str:
+    """Build the public accept link, embedding the tenant code so the
+    anonymous invitee's browser can send X-Tenant-Code (the accept endpoint
+    operates on the tenant database and needs the context)."""
+    from app.core.multitenancy import get_current_tenant_code
+
     base = (base_url or "").rstrip("/")
-    qs = urlencode({"token": token})
+    params = {"token": token}
+    tenant_code = get_current_tenant_code()
+    if tenant_code:
+        params["tenant"] = tenant_code
+    qs = urlencode(params)
     return f"{base}/invitations/accept?{qs}"
 
 

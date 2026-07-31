@@ -118,9 +118,11 @@ class TestGenerateDailyLog:
         tmp_handle.name = "/tmp/y.json"
         mock_tmp.return_value.__enter__.return_value = tmp_handle
         s3.s3_client.upload_fileobj.side_effect = RuntimeError("boom")
+        # An S3 upload failure now rolls back AND re-raises to signal failure to
+        # the caller, rather than swallowing the error and returning None.
         with patch("builtins.open", new=MagicMock()):
-            out = svc.generate_daily_log(date(2025, 1, 5))
-        assert out is None
+            with pytest.raises(RuntimeError, match="boom"):
+                svc.generate_daily_log(date(2025, 1, 5))
         db.rollback.assert_called_once()
 
 
@@ -141,6 +143,9 @@ class TestGetDownloadUrl:
         svc, db, s3 = _make_svc()
         rec = SimpleNamespace(id=1, s3_key="k")
         db.get.return_value = rec
+        # The bucket is now resolved via the tenant's provisioned bucket
+        # (S3Service.ensure_tenant_bucket) rather than a hard-coded name.
+        s3.ensure_tenant_bucket.return_value = "carepoint-hms-acme-dev"
         s3.generate_presigned_url.return_value = "https://signed"
         assert svc.get_download_url(1) == "https://signed"
         s3.generate_presigned_url.assert_called_once_with(

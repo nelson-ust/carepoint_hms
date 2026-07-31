@@ -10,7 +10,7 @@ from decimal import Decimal
 from typing import Optional
 
 from sqlalchemy import func, or_
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from app.core.enums import InventoryItemType
 from app.core.exceptions import AlreadyExistsError, NotFoundError
@@ -111,6 +111,7 @@ class InventoryStockItemRepository:
         """Fetch a stock item by its primary key if not deleted."""
         return (
             self.db.query(InventoryStockItem)
+            .options(joinedload(InventoryStockItem.drug))
             .filter(InventoryStockItem.id == item_id, InventoryStockItem.is_deleted.is_(False))
             .first()
         )
@@ -179,7 +180,8 @@ class InventoryStockItemRepository:
 
         total = query.with_entities(func.count(InventoryStockItem.id)).scalar() or 0
         items = (
-            query.order_by(InventoryStockItem.item_name.asc(), InventoryStockItem.id.asc())
+            query.options(joinedload(InventoryStockItem.drug))
+            .order_by(InventoryStockItem.item_name.asc(), InventoryStockItem.id.asc())
             .offset(skip)
             .limit(limit)
             .all()

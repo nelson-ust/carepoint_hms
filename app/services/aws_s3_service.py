@@ -1,5 +1,6 @@
 import os
 import boto3
+from botocore.config import Config
 from botocore.exceptions import ClientError
 from fastapi import UploadFile
 from typing import Optional
@@ -16,10 +17,16 @@ class S3Service:
             aws_access_key_id=settings.AWS_ACCESS_KEY_ID.get_secret_value() if settings.AWS_ACCESS_KEY_ID else None,
             aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY.get_secret_value() if settings.AWS_SECRET_ACCESS_KEY else None,
             region_name=settings.AWS_DEFAULT_REGION or "us-east-1",
-            endpoint_url=settings.AWS_ENDPOINT_URL
+            endpoint_url=settings.AWS_ENDPOINT_URL,
+            # SigV4 is mandatory: botocore silently downgrades presigned URLs
+            # to legacy SigV2 otherwise, which newer buckets reject with
+            # "Please use AWS4-HMAC-SHA256" — images then never render.
+            config=Config(signature_version="s3v4"),
         )
         self.region = settings.AWS_DEFAULT_REGION or "us-east-1"
         self.is_enabled = settings.S3_ENABLED
+        #: Human-readable reason for the most recent failed operation.
+        self.last_error: Optional[str] = None
 
     def create_tenant_bucket(self, tenant_code: str) -> Optional[str]:
         """
@@ -42,13 +49,89 @@ class S3Service:
                     Bucket=bucket_name,
                     CreateBucketConfiguration={'LocationConstraint': self.region}
                 )
-            
+
             # Optionally configure CORS or Bucket Policies here if needed
             logger.info(f"Successfully provisioned S3 bucket: {bucket_name}")
+            self.last_error = None
             return bucket_name
         except ClientError as e:
+            code = (e.response or {}).get("Error", {}).get("Code", "")
+            message = (e.response or {}).get("Error", {}).get("Message", str(e))
+            if code == "BucketAlreadyOwnedByYou":
+                # Idempotent: the bucket exists in OUR account — that's success
+                # (e.g. a previous attempt created it but persisting failed).
+                logger.info(f"S3 bucket {bucket_name} already owned by us — reusing.")
+                self.last_error = None
+                return bucket_name
+            if code == "BucketAlreadyExists":
+                self.last_error = (
+                    f"The bucket name '{bucket_name}' is already taken by another "
+                    "AWS account (S3 names are global). Choose a different tenant code "
+                    "or bucket naming scheme."
+                )
+            elif code in ("InvalidAccessKeyId", "SignatureDoesNotMatch"):
+                self.last_error = (
+                    f"AWS rejected the platform credentials ({code}). Check "
+                    "AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY in the environment."
+                )
+            elif code == "AccessDenied":
+                # IAM denies the CreateBucket ACTION before checking whether the
+                # bucket exists — so probe for a manually-created bucket and
+                # adopt it when it's reachable with these credentials.
+                if self._bucket_usable(bucket_name):
+                    logger.info(f"S3 bucket {bucket_name} exists and is accessible — adopting it.")
+                    self.last_error = None
+                    return bucket_name
+                self.last_error = (
+                    "AccessDenied — the platform IAM user lacks the s3:CreateBucket "
+                    "permission. Either grant it, or create the bucket "
+                    f"'{bucket_name}' manually in the AWS console AND allow this "
+                    "IAM user object read/write on it, then retry."
+                )
+            else:
+                self.last_error = f"{code or 'S3 error'}: {message}"
             logger.error(f"Failed to create S3 bucket {bucket_name}: {e}")
             return None
+        except Exception as e:  # network/endpoint problems
+            self.last_error = f"Could not reach S3: {e}"
+            logger.error(f"Failed to create S3 bucket {bucket_name}: {e}")
+            return None
+
+    def ensure_tenant_bucket(self, master_db, tenant) -> Optional[str]:
+        """
+        Return the tenant's bucket, provisioning + persisting it on demand.
+
+        Central policy: every tenant stores uploads in its OWN bucket; the
+        platform (SaaS) bucket from the environment is never used for tenant
+        data. Tenants created before bucket provisioning existed self-heal
+        here on first upload.
+        """
+        if tenant is None:
+            return None
+        if tenant.aws_s3_bucket_name:
+            return tenant.aws_s3_bucket_name
+        if not self.is_enabled:
+            return None
+        bucket_name = self.create_tenant_bucket(tenant.code)
+        if bucket_name:
+            try:
+                tenant.aws_s3_bucket_name = bucket_name
+                master_db.add(tenant)
+                master_db.commit()
+                logger.info("Provisioned + persisted bucket %s for tenant %s", bucket_name, tenant.code)
+            except Exception as exc:  # pragma: no cover - defensive
+                master_db.rollback()
+                logger.error("Bucket %s created but could not be persisted for %s: %s",
+                             bucket_name, tenant.code, exc)
+        return bucket_name
+
+    def _bucket_usable(self, bucket_name: str) -> bool:
+        """True when the bucket exists and these credentials can use it."""
+        try:
+            self.s3_client.head_bucket(Bucket=bucket_name)
+            return True
+        except Exception:
+            return False
 
     def upload_file(self, bucket_name: str, file_obj: UploadFile, s3_key: str) -> str:
         """
@@ -63,12 +146,12 @@ class S3Service:
         try:
             # Reset file pointer to start just in case
             file_obj.file.seek(0)
-            
+
             self.s3_client.upload_fileobj(
-                file_obj.file, 
-                bucket_name, 
+                file_obj.file,
+                bucket_name,
                 s3_key,
-                ExtraArgs={'ContentType': file_obj.content_type}
+                ExtraArgs={'ContentType': file_obj.content_type or "application/octet-stream"}
             )
             
             # Construct the public URL
@@ -83,8 +166,21 @@ class S3Service:
             logger.info(f"Successfully uploaded file to Storage: {url}")
             return url
         except ClientError as e:
+            code = (e.response or {}).get("Error", {}).get("Code", "")
+            if code == "AccessDenied":
+                self.last_error = (
+                    f"AccessDenied — the platform IAM user lacks s3:PutObject on bucket '{bucket_name}'."
+                )
+            elif code in ("NoSuchBucket",):
+                self.last_error = f"Bucket '{bucket_name}' does not exist. Re-provision the tenant's S3 bucket."
+            else:
+                self.last_error = f"{code or 'S3 error'}: {(e.response or {}).get('Error', {}).get('Message', str(e))}"
             logger.error(f"Failed to upload file to S3: {e}")
-            raise RuntimeError(f"S3 upload failure: {e}")
+            raise RuntimeError(f"S3 upload failure: {self.last_error}")
+        except Exception as e:
+            self.last_error = f"Could not reach S3: {e}"
+            logger.error(f"Failed to upload file to S3: {e}")
+            raise RuntimeError(f"S3 upload failure: {self.last_error}")
 
     def generate_presigned_url(self, bucket_name: str, s3_key: str, expires_in: int = 3600) -> Optional[str]:
         """

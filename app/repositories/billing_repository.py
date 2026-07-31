@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session, selectinload
 from app.core.enums import BillingStatus
 from app.core.exceptions import AlreadyExistsError, NotFoundError
 from app.models.all_models import (
+    Account,
     BillableService,
     Billing,
     BillingItem,
@@ -53,13 +54,19 @@ class BillableServiceRepository:
         search: Optional[str] = None,
         category: Optional[str] = None,
     ) -> tuple[list[BillableService], int]:
-        query = self.db.query(BillableService).filter(BillableService.is_deleted.is_(False))
+        query = (
+            self.db.query(BillableService)
+            .options(selectinload(BillableService.account))
+            .filter(BillableService.is_deleted.is_(False))
+        )
         if category:
             query = query.filter(BillableService.category == category)
         if search:
             term = f"%{search.strip().lower()}%"
             query = query.filter(
-                func.lower(BillableService.name).like(term),
+                func.lower(BillableService.name).like(term)
+                | func.lower(BillableService.code).like(term)
+                | func.lower(func.coalesce(BillableService.category, "")).like(term)
             )
         total = query.with_entities(func.count(BillableService.id)).scalar() or 0
         items = query.order_by(BillableService.name.asc()).offset(skip).limit(limit).all()
@@ -182,10 +189,38 @@ class BillingRepository:
         discount_amount: Decimal,
         billable_service_id: Optional[int],
         source_reference: Optional[str],
+        account_code: Optional[str] = None,
+        account_name: Optional[str] = None,
+        service_delivery_point_id: Optional[int] = None,
+        rendered_by_user_id: Optional[int] = None,
     ) -> BillingItem:
         line_total = (Decimal(unit_price) * Decimal(quantity)) - Decimal(discount_amount)
         if line_total < 0:
             line_total = Decimal("0")
+        # Stamp the ledger account so every charge line is postable. When the
+        # caller only supplies a service_code (manual/cashier charge), link it
+        # to the matching catalog entry so it inherits that account too.
+        if billable_service_id is None and service_code:
+            match = (
+                self.db.query(BillableService)
+                .filter(
+                    BillableService.code == service_code.strip().upper(),
+                    BillableService.is_deleted.is_(False),
+                )
+                .first()
+            )
+            if match is not None:
+                billable_service_id = match.id
+        if (account_code is None or account_name is None) and billable_service_id is not None:
+            svc = (
+                self.db.query(BillableService)
+                .filter(BillableService.id == billable_service_id)
+                .first()
+            )
+            acct = getattr(svc, "account", None) if svc is not None else None
+            if acct is not None:
+                account_code = account_code or acct.code
+                account_name = account_name or acct.name
         item = BillingItem(
             billing_id=billing.id,
             billable_service_id=billable_service_id,
@@ -196,6 +231,10 @@ class BillingRepository:
             discount_amount=discount_amount,
             line_total=line_total,
             source_reference=source_reference,
+            account_code=account_code,
+            account_name=account_name,
+            service_delivery_point_id=service_delivery_point_id,
+            rendered_by_user_id=rendered_by_user_id,
         )
         self.db.add(item)
         self.db.flush()

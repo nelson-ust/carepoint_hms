@@ -26,9 +26,11 @@ class TenantLogService:
         
         with get_master_db_context() as master_db:
             tenant = master_db.query(Tenant).filter(Tenant.code == self.tenant_code).first()
-            if not tenant or not tenant.aws_s3_bucket_name:
+            # Tenant bucket only — provisioned on demand.
+            bucket = self.s3_service.ensure_tenant_bucket(master_db, tenant)
+            if not bucket:
                 raise RuntimeError(f"S3 bucket not provisioned for tenant {self.tenant_code}")
-            return tenant.aws_s3_bucket_name
+            return bucket
 
     def generate_daily_log(self, log_date: date) -> Optional[TenantLog]:
         """

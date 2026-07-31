@@ -205,6 +205,9 @@ ALL_PERMISSIONS: list[dict] = [
     {"code": "TEMPLATE_READ", "name": "Read templates", "module": "TEMPLATE"},
     {"code": "TEMPLATE_CREATE", "name": "Create templates", "module": "TEMPLATE"},
 
+    # Patient Portal
+    {"code": "PORTAL_MESSAGE_READ", "name": "Read patient portal messages", "module": "PORTAL"},
+
     # Backup & SaaS Admin
     {"code": "BACKUP_READ", "name": "Read backups", "module": "BACKUP"},
     {"code": "BACKUP_CREATE", "name": "Create backups", "module": "BACKUP"},
@@ -246,6 +249,7 @@ ROLE_PERMISSIONS: dict[str, list[str]] = {
         "TEMPLATE_READ", "TEMPLATE_CREATE", "INTEGRATION_READ", "INTEGRATION_UPDATE",
         "PATIENT_READ", "PATIENT_CREATE", "PATIENT_UPDATE", "APPOINTMENT_READ",
         "VISIT_READ", "BILLING_READ", "AUDIT_READ", "SECURITY_EVENT_READ",
+        "PORTAL_MESSAGE_READ",
     ],
     "DOCTOR": [
         "PATIENT_READ", "PATIENT_UPDATE", "VISIT_READ", "VISIT_ROUTE", "CONSULTATION_READ",
@@ -279,6 +283,7 @@ ROLE_PERMISSIONS: dict[str, list[str]] = {
     "RECEPTIONIST": [
         "PATIENT_READ", "PATIENT_CREATE", "PATIENT_UPDATE", "APPOINTMENT_READ", "APPOINTMENT_CREATE",
         "APPOINTMENT_UPDATE", "APPOINTMENT_CANCEL", "VISIT_INITIATE", "QUEUE_MANAGE", "REFERRAL_READ", "REFERRAL_CREATE",
+        "PORTAL_MESSAGE_READ",
     ],
     "HR_MANAGER": [
         "USER_READ", "USER_CREATE", "USER_UPDATE", "USER_MANAGE_STATUS", "ROLE_READ",

@@ -104,6 +104,23 @@ class AmbulanceActionResponseSchema(BaseModel):
     ambulance: AmbulanceReadSchema
 
 
+class AmbulanceStatsResponseSchema(BaseModel):
+    """
+    Fleet-wide aggregates for the ambulance dashboard.
+
+    Every figure is derived from live rows (fleet, drivers, maintenance) —
+    nothing is estimated or interpolated.
+    """
+
+    success: bool = True
+    message: str = "Fleet statistics computed successfully."
+    fleet_total: int
+    by_status: dict[str, int] = Field(default_factory=dict)
+    ready_count: int
+    drivers_total: int
+    maintenance_open: int
+
+
 class AmbulanceReadinessResponseSchema(BaseModel):
     """
     Readiness summary for an ambulance.

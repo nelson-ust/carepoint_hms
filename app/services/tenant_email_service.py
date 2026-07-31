@@ -753,7 +753,12 @@ def send_tenant_email(
         return False
 
     try:
-        send_email(subject=subject, recipients=recipients_list, body_text=body_text)
+        send_email(
+            subject=subject,
+            recipients=recipients_list,
+            body_text=body_text,
+            body_html=body_html,
+        )
         return True
     except Exception as exc:
         logger.warning("Platform send_email failed: %s", exc)

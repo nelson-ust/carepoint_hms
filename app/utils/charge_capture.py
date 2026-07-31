@@ -21,8 +21,9 @@ from typing import Optional
 
 from sqlalchemy.orm import Session
 
-from app.core.enums import BillingStatus
+from app.core.enums import AccountType, BillingStatus
 from app.models.all_models import (
+    Account,
     Admission,
     Bed,
     BillableService,
@@ -110,6 +111,20 @@ def add_charge(
     if line_total < 0:
         line_total = Decimal("0")
 
+    # Stamp the ledger account so the captured charge is postable to finance.
+    account_code = None
+    account_name = None
+    if billable_service_id is not None:
+        svc = (
+            db.query(BillableService)
+            .filter(BillableService.id == billable_service_id)
+            .first()
+        )
+        acct = getattr(svc, "account", None) if svc is not None else None
+        if acct is not None:
+            account_code = acct.code
+            account_name = acct.name
+
     item = BillingItem(
         billing_id=billing.id,
         billable_service_id=billable_service_id,
@@ -120,6 +135,8 @@ def add_charge(
         discount_amount=discount_amount,
         line_total=line_total,
         source_reference=source_reference,
+        account_code=account_code,
+        account_name=account_name,
     )
     db.add(item)
     db.flush()
@@ -134,6 +151,26 @@ def add_charge(
     return item
 
 
+def summarize_purpose(service_names, *, max_items: int = 3, fallback: str = "Hospital services") -> str:
+    """
+    Build a short, human-readable payment purpose from a list of charge/line
+    service names, e.g. ["Consultation", "Full Blood Count", "Paracetamol"]
+    → "Consultation, Full Blood Count, Paracetamol". De-duplicates while
+    preserving order and caps the count with a "+N more" suffix.
+    """
+    seen: list[str] = []
+    for name in service_names or []:
+        clean = (name or "").strip()
+        if clean and clean not in seen:
+            seen.append(clean)
+    if not seen:
+        return fallback
+    if len(seen) <= max_items:
+        return ", ".join(seen)
+    remaining = len(seen) - max_items
+    return ", ".join(seen[:max_items]) + f" +{remaining} more"
+
+
 def find_billable_service(db: Session, *, code: Optional[str]) -> Optional[BillableService]:
     if not code:
         return None
@@ -145,6 +182,238 @@ def find_billable_service(db: Session, *, code: Optional[str]) -> Optional[Billa
         )
         .first()
     )
+
+
+def get_or_create_billable_service(
+    db: Session,
+    *,
+    code: str,
+    name: str,
+    default_price: Decimal = Decimal("0"),
+    category: Optional[str] = None,
+) -> BillableService:
+    """
+    Return the billable service for ``code`` or create it with a sensible
+    default price. Lets clinical charges (e.g. the consultation fee) always
+    resolve a catalog entry, which admins can re-price afterwards.
+    """
+    normalized = code.strip().upper()
+    existing = find_billable_service(db, code=normalized)
+    if existing is not None:
+        return existing
+    svc = BillableService(
+        code=normalized,
+        name=name,
+        category=category,
+        default_price=Decimal(str(default_price or 0)),
+    )
+    db.add(svc)
+    db.flush()
+    db.refresh(svc)
+    return svc
+
+
+# ---------------------------------------------------------------------------
+# Automatic mapping: clinical service -> billable service -> revenue account
+# ---------------------------------------------------------------------------
+
+#: Keyword hints used to auto-pick the revenue account for each clinical
+#: domain. Matched (case-insensitively, first hit wins) against the *name* of
+#: existing REVENUE accounts, so a tenant's own chart of accounts is honoured
+#: (e.g. "Laboratory Revenue" is picked for LAB) without hard-coding codes.
+_DOMAIN_REVENUE_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "CONSULTATION": ("consultation", "consult"),
+    "LAB": ("laborat",),
+    "RADIOLOGY": ("radiolog", "imaging"),
+    "PHARMACY": ("pharmacy", "drug", "medication", "dispens"),
+    "PROCEDURE": ("nursing", "procedure", "treatment"),
+    "SURGERY": ("surg", "theatre", "operat"),
+    "BED": ("admission", "bed", "ward", "in-patient", "inpatient", "accommodation"),
+    "MATERNITY": ("maternity", "delivery", "antenatal"),
+    "MEALS": ("meal", "feeding", "dietary", "catering", "other operating"),
+    "OTHER": ("other clinical", "clinical revenue", "patient service"),
+}
+
+#: Fallback revenue account, auto-seeded once per tenant when no domain match
+#: exists, so a charge is never left without a ledger code.
+_FALLBACK_REVENUE_CODE = "REV-PATIENT-SERVICES"
+_FALLBACK_REVENUE_NAME = "Patient Services Revenue"
+
+
+def resolve_revenue_account(db: Session, *, domain: Optional[str]) -> Optional[Account]:
+    """
+    Best-effort: return the REVENUE account a given clinical ``domain`` should
+    post to. Prefers an existing account whose name matches the domain
+    keywords; otherwise get-or-creates a generic "Patient Services Revenue"
+    account. Never raises — charge capture must not be blocked by mapping.
+    """
+    try:
+        revenue_accounts = (
+            db.query(Account)
+            .filter(
+                Account.is_deleted.is_(False),
+                Account.account_type == AccountType.REVENUE,
+            )
+            .all()
+        )
+        keywords = _DOMAIN_REVENUE_KEYWORDS.get((domain or "").upper(), ())
+        for kw in keywords:
+            for acct in revenue_accounts:
+                if kw in (acct.name or "").lower():
+                    return acct
+        # Fallback: reuse or seed the generic patient-services revenue account.
+        existing = (
+            db.query(Account)
+            .filter(Account.code == _FALLBACK_REVENUE_CODE)
+            .first()
+        )
+        if existing is not None:
+            if existing.is_deleted:
+                existing.is_deleted = False
+                db.add(existing)
+                db.flush()
+            return existing
+        acct = Account(
+            code=_FALLBACK_REVENUE_CODE,
+            name=_FALLBACK_REVENUE_NAME,
+            account_type=AccountType.REVENUE,
+            description="Auto-created default revenue account for patient services awaiting a specific mapping.",
+        )
+        db.add(acct)
+        db.flush()
+        db.refresh(acct)
+        return acct
+    except Exception:  # pragma: no cover - mapping is best-effort
+        return None
+
+
+#: Payment-method -> asset-account keyword hints. Matched against the names of
+#: existing ASSET accounts so a receipt posts to the right cash/bank ledger.
+_METHOD_ASSET_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "CASH": ("cash - main", "main till", "collections", "cash on hand", "cash till", "petty cash", "cash "),
+    "POS": ("pos", "card settlement", "card"),
+    "CARD": ("pos", "card settlement", "card"),
+    "TRANSFER": ("transfer", "bank - current", "bank current", "bank"),
+    "BANK_TRANSFER": ("transfer", "bank - current", "bank current", "bank"),
+    "BANK": ("bank - current", "bank current", "bank"),
+    "CHEQUE": ("bank - current", "bank"),
+    "CHECK": ("bank - current", "bank"),
+    "MOBILE_MONEY": ("mobile", "transfer", "bank"),
+    "USSD": ("transfer", "bank"),
+    "MEMBERSHIP_CARD": ("membership", "card", "receivable"),
+    "WALLET": ("wallet", "membership", "card"),
+}
+
+#: Fallback asset account, seeded once per tenant so no receipt is unaccounted.
+_FALLBACK_ASSET_CODE = "AST-CASH-BANK"
+_FALLBACK_ASSET_NAME = "Cash & Bank"
+
+
+def resolve_cash_account(db: Session, *, payment_method: Optional[str]) -> Optional[Account]:
+    """
+    Best-effort: return the ASSET (cash/bank) account a receipt taken via
+    ``payment_method`` should post to. Prefers an existing asset account whose
+    name matches the method; otherwise get-or-creates a generic "Cash & Bank"
+    asset account. Never raises — recording a payment must not be blocked.
+    """
+    try:
+        method = (payment_method or "").strip().upper()
+        asset_accounts = (
+            db.query(Account)
+            .filter(
+                Account.is_deleted.is_(False),
+                Account.account_type == AccountType.ASSET,
+            )
+            .all()
+        )
+        keywords = _METHOD_ASSET_KEYWORDS.get(method, ())
+        for kw in keywords:
+            for acct in asset_accounts:
+                if kw in (acct.name or "").lower():
+                    return acct
+        existing = (
+            db.query(Account)
+            .filter(Account.code == _FALLBACK_ASSET_CODE)
+            .first()
+        )
+        if existing is not None:
+            if existing.is_deleted:
+                existing.is_deleted = False
+                db.add(existing)
+                db.flush()
+            return existing
+        acct = Account(
+            code=_FALLBACK_ASSET_CODE,
+            name=_FALLBACK_ASSET_NAME,
+            account_type=AccountType.ASSET,
+            description="Auto-created default cash/bank account for receipts awaiting a specific mapping.",
+        )
+        db.add(acct)
+        db.flush()
+        db.refresh(acct)
+        return acct
+    except Exception:  # pragma: no cover - mapping is best-effort
+        return None
+
+
+def resolve_billable_service(
+    db: Session,
+    *,
+    code: str,
+    name: str,
+    default_price: Decimal = Decimal("0"),
+    category: Optional[str] = None,
+    domain: Optional[str] = None,
+) -> BillableService:
+    """
+    Return the billable-service catalog entry for ``code``, creating it if it
+    does not yet exist so *every* rendered clinical service maps to a catalog
+    row (and therefore a ledger account). This is the bridge that lets billing
+    line items reconcile against the billable-services catalog.
+
+    - Existing (even soft-deleted) rows are reused/reactivated to respect the
+      unique ``code`` index.
+    - New rows are seeded with the domain price and, when a ``domain`` is
+      supplied, auto-mapped to the matching REVENUE account. Admins can
+      re-price or re-map afterwards in the Billable Services catalog; existing
+      account assignments are never overwritten here.
+    - The unique ``name`` constraint is guarded by suffixing the code when a
+      different service already owns the name.
+    """
+    normalized = code.strip().upper()
+    svc = (
+        db.query(BillableService)
+        .filter(BillableService.code == normalized)
+        .first()
+    )
+    if svc is not None:
+        if svc.is_deleted:
+            svc.is_deleted = False
+            db.add(svc)
+            db.flush()
+        return svc
+
+    final_name = name
+    clash = (
+        db.query(BillableService)
+        .filter(BillableService.name == final_name)
+        .first()
+    )
+    if clash is not None:
+        final_name = f"{name} [{normalized}]"
+
+    account = resolve_revenue_account(db, domain=domain) if domain else None
+    svc = BillableService(
+        code=normalized,
+        name=final_name,
+        category=category,
+        default_price=Decimal(str(default_price or 0)),
+        account_id=account.id if account is not None else None,
+    )
+    db.add(svc)
+    db.flush()
+    db.refresh(svc)
+    return svc
 
 
 def has_outstanding_charges(db: Session, *, visit_id: int, source_prefix: Optional[str] = None) -> bool:
@@ -323,6 +592,24 @@ def capture_bed_day_charges_for_admission(
     service_name = f"Bed-day: {ward_label}" + (f" / Bed {bed_label}" if bed_label else "")
     service_code = f"BED-DAY-{ward.code}" if ward and ward.code else "BED-DAY"
 
+    # Guarantee a billable-service mapping for the bed-day charge. Wards can be
+    # linked explicitly (ward.billable_service_id); when they are not, auto-map
+    # one so admissions still reconcile to the ledger — and remember it on the
+    # ward for next time.
+    if billable is None:
+        billable = resolve_billable_service(
+            db,
+            code=service_code,
+            name=f"Bed-day: {ward_label}",
+            default_price=unit_price,
+            category="ADMISSION",
+            domain="BED",
+        )
+        if ward is not None and ward.billable_service_id is None:
+            ward.billable_service_id = billable.id
+            db.add(ward)
+            db.flush()
+
     # Walk every date in the inclusive range. Each insert is keyed by its
     # source_reference, so existing lines are silently reused.
     for d in _iter_dates_inclusive(admitted_date, through_date):
@@ -336,7 +623,7 @@ def capture_bed_day_charges_for_admission(
             quantity=Decimal("1"),
             billable_service_id=billable.id if billable else None,
             source_reference=source_reference,
-        )
+        )  # billable is guaranteed non-None above; guard kept for safety.
         # add_charge returns the existing item if the source_reference was
         # already present. Detect "newly inserted" via creation timestamp
         # being within this transaction; the simpler proxy is whether the

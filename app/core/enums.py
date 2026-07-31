@@ -144,6 +144,7 @@ class PaymentGatePolicy(StringEnum):
 class PaymentMethod(StringEnum):
     CASH = "CASH"
     CARD = "CARD"
+    POS = "POS"
     BANK_TRANSFER = "BANK_TRANSFER"
     MOBILE_MONEY = "MOBILE_MONEY"
     INSURANCE = "INSURANCE"
@@ -311,6 +312,9 @@ class NotificationEvent(StringEnum):
     APPROVAL_GRANTED = "approval.granted"
     APPROVAL_REJECTED = "approval.rejected"
 
+    # Messaging / WhatsApp
+    WHATSAPP_MESSAGE_RECEIVED = "whatsapp.message.received"
+
     # System / ops
     SYSTEM_ALERT = "system.alert"
     BACKUP_COMPLETED = "backup.completed"
@@ -353,6 +357,14 @@ class MembershipCardTransactionType(StringEnum):
     DEBIT = "DEBIT"
     REFUND = "REFUND"
     ADJUSTMENT = "ADJUSTMENT"
+
+
+class CardFundingRequestStatus(StringEnum):
+    """Lifecycle of a patient-submitted manual card-funding request."""
+
+    PENDING = "PENDING"
+    APPROVED = "APPROVED"
+    REJECTED = "REJECTED"
 
 
 # ============================================================
@@ -533,6 +545,15 @@ class ReferralStatus(StringEnum):
     CANCELLED = "CANCELLED"
 
 
+class DataExchangeStatus(StringEnum):
+    PENDING = "PENDING"        # request raised, awaiting holding-hospital action
+    APPROVED = "APPROVED"      # consent confirmed + approved; export generated
+    DENIED = "DENIED"
+    FULFILLED = "FULFILLED"    # requester has retrieved the export
+    EXPIRED = "EXPIRED"
+    CANCELLED = "CANCELLED"
+
+
 class ReferralPriority(StringEnum):
     LOW = "LOW"
     NORMAL = "NORMAL"
@@ -651,23 +672,26 @@ class ApprovalStatus(StringEnum):
 
 
 # ============================================================
-# APPROVAL ENGINE
+# APPROVAL ENGINE (generic RequestType / ApprovalFlow / ApprovalStep /
+# ApprovalRequest / ApprovalLog)
 # ============================================================
 #
-# These enums power the tenant-managed approval engine. Each tenant
-# defines `ApprovalFlow` rows (e.g. LEAVE_REQUEST flow, REIMBURSEMENT
-# flow) with ordered `ApprovalFlowStep` rows. Steps can target multiple
-# approver kinds and use a per-step decision rule.
+# A RequestType (e.g. PAYROLL_RUN) has one or more ApprovalFlows; each
+# flow has ordered ApprovalSteps. Submitting a subject creates an
+# ApprovalRequest that walks the flow's steps, and every action taken on
+# a step writes an ApprovalLog row.
 
-class ApprovalSubjectType(StringEnum):
-    """Domain object an approval flow is wired to."""
+
+class RequestTypeCode(StringEnum):
+    """Stable codes for the built-in request types (seeded as RequestType rows)."""
     LEAVE_REQUEST = "LEAVE_REQUEST"
     TIMESHEET = "TIMESHEET"
-    REIMBURSEMENT = "REIMBURSEMENT"
-    STAFF_REQUEST = "STAFF_REQUEST"
     OVERTIME = "OVERTIME"
+    REIMBURSEMENT = "REIMBURSEMENT"
     SALARY_ADVANCE = "SALARY_ADVANCE"
     PROCUREMENT = "PROCUREMENT"
+    STAFF_REQUEST = "STAFF_REQUEST"
+    PAYROLL_RUN = "PAYROLL_RUN"
     GENERIC = "GENERIC"
 
 
@@ -691,7 +715,7 @@ class ApprovalDynamicApprover(StringEnum):
 class ApprovalStepDecisionRule(StringEnum):
     """How a step decides 'this step is approved'."""
     ANY_OF = "ANY_OF"     # any single eligible approver advances the step
-    ALL_OF = "ALL_OF"     # every named approver must approve
+    ALL_OF = "ALL_OF"     # every eligible approver must approve
     N_OF_M = "N_OF_M"     # at least `required_approvals` of the eligible approvers
 
 
@@ -703,10 +727,11 @@ class ApprovalRequestStatus(StringEnum):
     APPROVED = "APPROVED"
     REJECTED = "REJECTED"
     CANCELLED = "CANCELLED"
+    RETURNED = "RETURNED"
     EXPIRED = "EXPIRED"
 
 
-class ApprovalRequestStepStatus(StringEnum):
+class ApprovalStepStatus(StringEnum):
     """Lifecycle of one step inside an in-flight ApprovalRequest."""
     PENDING = "PENDING"
     IN_PROGRESS = "IN_PROGRESS"
@@ -715,12 +740,15 @@ class ApprovalRequestStepStatus(StringEnum):
     SKIPPED = "SKIPPED"
 
 
-class ApprovalDecisionAction(StringEnum):
-    """Action recorded on an ApprovalDecision row."""
+class ApprovalLogAction(StringEnum):
+    """Action recorded on an ApprovalLog row (one per step action)."""
+    SUBMIT = "SUBMIT"
     APPROVE = "APPROVE"
     REJECT = "REJECT"
-    DELEGATE = "DELEGATE"
     COMMENT = "COMMENT"
+    CANCEL = "CANCEL"
+    DELEGATE = "DELEGATE"
+    RETURN = "RETURN"
 
 
 class LoyaltyTransactionType(StringEnum):
@@ -1112,6 +1140,20 @@ class PortalMessageDirection(StringEnum):
     PATIENT_TO_PROVIDER = "PATIENT_TO_PROVIDER"
     PROVIDER_TO_PATIENT = "PROVIDER_TO_PATIENT"
     SYSTEM = "SYSTEM"
+
+
+class PatientBroadcastAudience(StringEnum):
+    """Who a hospital→patient broadcast is addressed to."""
+    SINGLE = "SINGLE"   # one selected patient
+    GROUP = "GROUP"     # an explicitly selected set of patients
+    ALL = "ALL"         # every registered patient
+
+
+class PatientBroadcastStatus(StringEnum):
+    """Delivery outcome of a hospital→patient broadcast."""
+    SENT = "SENT"           # created & (any external) channels dispatched ok
+    PARTIAL = "PARTIAL"     # some external deliveries failed
+    FAILED = "FAILED"       # no recipients / nothing delivered
 
 
 class PortalAppointmentRequestStatus(StringEnum):
@@ -1528,6 +1570,23 @@ class PayrollLineStatus(StringEnum):
     ERROR = "ERROR"
 
 
+class PayrollComponentType(StringEnum):
+    """Kind of pay component in the payroll component catalog."""
+
+    EARNING = "EARNING"
+    DEDUCTION = "DEDUCTION"
+    STATUTORY = "STATUTORY"
+    EMPLOYER_CONTRIBUTION = "EMPLOYER_CONTRIBUTION"
+
+
+class PayrollCalcMethod(StringEnum):
+    """How a payroll component's amount is derived."""
+
+    FIXED_AMOUNT = "FIXED_AMOUNT"
+    PERCENT_OF_BASE = "PERCENT_OF_BASE"
+    PERCENT_OF_GROSS = "PERCENT_OF_GROSS"
+
+
 class OvertimeStatus(StringEnum):
     PENDING = "PENDING"
     APPROVED = "APPROVED"
@@ -1780,3 +1839,178 @@ class MealStatus(StringEnum):
     SERVED = "SERVED"
     CANCELLED = "CANCELLED"
 
+
+
+class AccountType(StringEnum):
+    """Chart-of-accounts classification for a service's ledger account."""
+
+    REVENUE = "REVENUE"
+    ASSET = "ASSET"
+    LIABILITY = "LIABILITY"
+    EXPENSE = "EXPENSE"
+    EQUITY = "EQUITY"
+
+
+# ============================================================
+# DEVELOPER PLATFORM (third-party API access)
+# ============================================================
+
+
+class DeveloperAccountStatus(StringEnum):
+    """Lifecycle of a self-registered third-party developer account."""
+
+    PENDING = "PENDING"        # registered, email not yet verified
+    ACTIVE = "ACTIVE"          # verified; may create apps / API keys
+    SUSPENDED = "SUSPENDED"    # disabled by a platform administrator
+    REJECTED = "REJECTED"
+
+
+class DeveloperAppEnvironment(StringEnum):
+    SANDBOX = "SANDBOX"
+    LIVE = "LIVE"
+
+
+class DeveloperAppStatus(StringEnum):
+    ACTIVE = "ACTIVE"
+    REVOKED = "REVOKED"
+
+
+class DeveloperGrantStatus(StringEnum):
+    """A tenant's decision on a developer app's request to access its data."""
+
+    PENDING = "PENDING"        # developer requested; awaiting tenant approval
+    APPROVED = "APPROVED"      # tenant approved; data access permitted
+    REVOKED = "REVOKED"        # previously approved, now withdrawn
+    DENIED = "DENIED"
+
+
+# ============================================================
+# MEDICAL RECORD ACCESS REQUESTS (consent-gated sharing)
+# ============================================================
+
+
+class MedicalAccessRequesterType(StringEnum):
+    HOSPITAL = "HOSPITAL"
+    DEVELOPER = "DEVELOPER"
+
+
+class MedicalAccessStatus(StringEnum):
+    PENDING = "PENDING"          # awaiting patient and/or hospital decision
+    APPROVED = "APPROVED"        # all required approvals granted; link issued
+    DECLINED = "DECLINED"        # a required approver declined
+    EXPIRED = "EXPIRED"          # access link lapsed unused
+    CANCELLED = "CANCELLED"      # requester withdrew
+    FULFILLED = "FULFILLED"      # one-time link consumed
+
+
+class MedicalAccessDecision(StringEnum):
+    PENDING = "PENDING"
+    APPROVED = "APPROVED"
+    DECLINED = "DECLINED"
+
+
+class MedicalAccessActorType(StringEnum):
+    SYSTEM = "SYSTEM"
+    REQUESTER = "REQUESTER"
+    PATIENT = "PATIENT"
+    HOSPITAL = "HOSPITAL"
+    DEVELOPER = "DEVELOPER"
+
+
+class MedicalAccessAuditEvent(StringEnum):
+    REQUEST_SUBMITTED = "REQUEST_SUBMITTED"
+    NOTIFICATION_SENT = "NOTIFICATION_SENT"
+    PATIENT_APPROVED = "PATIENT_APPROVED"
+    PATIENT_DECLINED = "PATIENT_DECLINED"
+    HOSPITAL_APPROVED = "HOSPITAL_APPROVED"
+    HOSPITAL_DECLINED = "HOSPITAL_DECLINED"
+    LINK_GENERATED = "LINK_GENERATED"
+    LINK_ACCESSED = "LINK_ACCESSED"
+    RECORD_ACCESSED = "RECORD_ACCESSED"
+    LINK_EXPIRED = "LINK_EXPIRED"
+    REQUEST_CANCELLED = "REQUEST_CANCELLED"
+    REQUEST_FULFILLED = "REQUEST_FULFILLED"
+
+
+# ============================================================
+# ACCOUNTING / GENERAL LEDGER
+# ============================================================
+
+
+class JournalEntryStatus(StringEnum):
+    DRAFT = "DRAFT"
+    POSTED = "POSTED"
+    REVERSED = "REVERSED"
+
+
+class JournalSourceType(StringEnum):
+    MANUAL = "MANUAL"
+    BILLING_PAYMENT = "BILLING_PAYMENT"
+    PAYROLL = "PAYROLL"
+    EXPENSE_CLAIM = "EXPENSE_CLAIM"
+    SALARY_ADVANCE = "SALARY_ADVANCE"
+    ADJUSTMENT = "ADJUSTMENT"
+    OPENING_BALANCE = "OPENING_BALANCE"
+
+
+class AccountingPeriodStatus(StringEnum):
+    OPEN = "OPEN"
+    CLOSED = "CLOSED"
+
+
+class VendorBillStatus(StringEnum):
+    OPEN = "OPEN"
+    PARTIALLY_PAID = "PARTIALLY_PAID"
+    PAID = "PAID"
+    CANCELLED = "CANCELLED"
+
+
+class FixedAssetStatus(StringEnum):
+    ACTIVE = "ACTIVE"
+    FULLY_DEPRECIATED = "FULLY_DEPRECIATED"
+    DISPOSED = "DISPOSED"
+
+
+class WhatsAppMessageDirection(StringEnum):
+    INBOUND = "INBOUND"
+    OUTBOUND = "OUTBOUND"
+
+
+class WhatsAppMessageStatus(StringEnum):
+    """Lifecycle of an outbound message as reported back by Meta's statuses
+    webhook (plus ACCEPTED — our local state the moment the Cloud API call
+    is acknowledged)."""
+
+    ACCEPTED = "ACCEPTED"
+    SENT = "SENT"
+    DELIVERED = "DELIVERED"
+    READ = "READ"
+    FAILED = "FAILED"
+    DELETED = "DELETED"
+
+
+class WhatsAppMessageType(StringEnum):
+    TEXT = "TEXT"
+    IMAGE = "IMAGE"
+    AUDIO = "AUDIO"
+    VIDEO = "VIDEO"
+    DOCUMENT = "DOCUMENT"
+    STICKER = "STICKER"
+    LOCATION = "LOCATION"
+    CONTACTS = "CONTACTS"
+    INTERACTIVE = "INTERACTIVE"
+    BUTTON = "BUTTON"
+    REACTION = "REACTION"
+    ORDER = "ORDER"
+    SYSTEM = "SYSTEM"
+    UNSUPPORTED = "UNSUPPORTED"
+    UNKNOWN = "UNKNOWN"
+
+
+class WhatsAppConversationStatus(StringEnum):
+    OPEN = "OPEN"
+    CLOSED = "CLOSED"
+
+
+class DepreciationMethod(StringEnum):
+    STRAIGHT_LINE = "STRAIGHT_LINE"

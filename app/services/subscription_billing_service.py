@@ -84,7 +84,9 @@ def _generate_receipt_number(tenant: Tenant) -> str:
     return f"RCT-{code}-{datetime.utcnow():%Y%m%d}-{suffix}"
 
 
-def _try_send_email(*, subject: str, recipients: list[str], body: str) -> bool:
+def _try_send_email(
+    *, subject: str, recipients: list[str], body: str, body_html: Optional[str] = None
+) -> bool:
     """Best-effort email delivery. Failures are logged, not raised."""
     if not recipients:
         return False
@@ -94,11 +96,37 @@ def _try_send_email(*, subject: str, recipients: list[str], body: str) -> bool:
         logger.warning("send_email helper unavailable; billing email skipped.")
         return False
     try:
-        send_email(subject=subject, recipients=recipients, body_text=body)
+        send_email(
+            subject=subject,
+            recipients=recipients,
+            body_text=body,
+            body_html=body_html,
+        )
         return True
     except Exception as exc:
         logger.warning("Billing email delivery failed: %s", exc)
         return False
+
+
+def _brand_name() -> str:
+    from app.core.config import settings
+
+    return str(getattr(settings, "APP_NAME", None) or "CarePoint HMS")
+
+
+def _billing_portal_url() -> str:
+    """Deep link tenants to the Plan & Billing screen from an email CTA."""
+    from app.core.config import settings
+
+    base = str(getattr(settings, "FRONTEND_URL", None) or "").rstrip("/")
+    return f"{base}/settings/plan" if base else "/settings/plan"
+
+
+def _billing_email_bodies(**kwargs) -> tuple[str, str]:
+    """Render a billing email into (plain_text, html) via the shared template."""
+    from app.utils.email_utils import render_branded_email, render_branded_email_text
+
+    return render_branded_email_text(**kwargs), render_branded_email(**kwargs)
 
 
 def _resolve_billing_recipients(tenant: Tenant) -> list[str]:
@@ -190,13 +218,23 @@ class SubscriptionBillingService:
         if plan is None:
             raise BadRequestError(message="Subscription has no plan attached.")
 
+        # The billing cycle chosen for this subscription (monthly / yearly)
+        # drives both the amount and how far the period runs.
+        from app.services.billing_interval import (
+            effective_price,
+            normalize_interval,
+            period_end_for_interval,
+        )
+
+        interval = normalize_interval(getattr(subscription, "billing_interval", None) or plan.interval)
+
         # Determine the next period.
         now = datetime.now(timezone.utc)
         prev_end = subscription.current_period_end or now
         if prev_end.tzinfo is None:
             prev_end = prev_end.replace(tzinfo=timezone.utc)
         period_start = prev_end if prev_end > now else now
-        period_end = _period_end(plan, period_start)
+        period_end = period_end_for_interval(interval, period_start)
 
         # Idempotency: do we already have an open invoice for this exact period?
         existing = (
@@ -220,12 +258,13 @@ class SubscriptionBillingService:
         if existing is not None:
             return existing
 
-        plan_amount: Decimal = Decimal(plan.price or 0)
+        plan_amount: Decimal = effective_price(plan, interval)
         currency = str(plan.currency or "NGN").upper()
+        cycle_label = "Annual" if interval == "YEARLY" else "Monthly"
 
         line_items = [
             {
-                "description": f"{plan.name} subscription ({plan.interval})",
+                "description": f"{plan.name} subscription ({cycle_label})",
                 "period_start": period_start.isoformat(),
                 "period_end": period_end.isoformat(),
                 "quantity": 1,
@@ -241,7 +280,7 @@ class SubscriptionBillingService:
             invoice_number=_generate_invoice_number(tenant),
             plan_code_snapshot=plan.code,
             plan_name_snapshot=plan.name,
-            plan_interval_snapshot=str(getattr(plan.interval, "value", plan.interval) or "MONTHLY"),
+            plan_interval_snapshot=interval,
             currency=currency,
             subtotal=plan_amount,
             tax_amount=Decimal("0.00"),
@@ -470,22 +509,35 @@ class SubscriptionBillingService:
             f"Invoice {invoice.invoice_number} — {plan.name} subscription "
             f"renewal for {tenant.name}"
         )
-        body = (
-            f"Hello {tenant.billing_contact_name or tenant.name},\n\n"
-            f"Your CarePoint HMS subscription is due for renewal.\n\n"
-            f"Plan:        {plan.name} ({plan.code})\n"
-            f"Interval:    {invoice.plan_interval_snapshot}\n"
-            f"Period:      {invoice.period_start:%Y-%m-%d} to {invoice.period_end:%Y-%m-%d}\n"
-            f"Amount due:  {invoice.currency} {invoice.amount_due:.2f}\n"
-            f"Due date:    {invoice.due_date:%Y-%m-%d}\n\n"
-            f"Invoice number: {invoice.invoice_number}\n\n"
-            f"Please settle the invoice before the due date to avoid any "
-            f"interruption of service. If you have already paid, please "
-            f"disregard this message.\n\n"
-            f"— The CarePoint HMS Team"
+        common = dict(
+            title="Your subscription is due for renewal",
+            intro=f"Hello {tenant.billing_contact_name or tenant.name}, your "
+            f"{_brand_name()} subscription for {tenant.name} is due for renewal. "
+            "A summary of this invoice is below.",
+            highlight_label="Amount due",
+            highlight_value=f"{invoice.currency} {invoice.amount_due:,.2f}",
+            highlight_caption=f"Due by {invoice.due_date:%d %b %Y}",
+            details_heading="Invoice details",
+            details=[
+                ("Invoice number", invoice.invoice_number),
+                ("Plan", f"{plan.name} ({plan.code})"),
+                ("Billing interval", invoice.plan_interval_snapshot),
+                ("Billing period", f"{invoice.period_start:%d %b %Y} – {invoice.period_end:%d %b %Y}"),
+                ("Amount due", f"{invoice.currency} {invoice.amount_due:,.2f}"),
+                ("Due date", f"{invoice.due_date:%d %b %Y}"),
+            ],
+            cta_label="Review & pay invoice",
+            cta_url=_billing_portal_url(),
+            footer_note="Please settle this invoice before the due date to avoid any "
+            "interruption of service. If you've already paid, kindly disregard this message.",
+            preheader=f"Invoice {invoice.invoice_number}: {invoice.currency} "
+            f"{invoice.amount_due:,.2f} due by {invoice.due_date:%d %b %Y}.",
         )
+        body, body_html = _billing_email_bodies(**common)
 
-        sent = _try_send_email(subject=subject, recipients=recipients, body=body)
+        sent = _try_send_email(
+            subject=subject, recipients=recipients, body=body, body_html=body_html
+        )
         invoice.sent_to_email = ", ".join(recipients) if recipients else None
         invoice.sent_at = datetime.now(timezone.utc) if sent else None
         if sent:
@@ -503,20 +555,33 @@ class SubscriptionBillingService:
             f"Receipt {payment.receipt_number} — payment received for "
             f"invoice {invoice.invoice_number}"
         )
-        body = (
-            f"Hello {tenant.billing_contact_name or tenant.name},\n\n"
-            f"We've received your payment. Thank you!\n\n"
-            f"Receipt number:  {payment.receipt_number}\n"
-            f"Invoice number:  {invoice.invoice_number}\n"
-            f"Amount received: {payment.currency} {payment.amount:.2f}\n"
-            f"Method:          {payment.payment_method}\n"
-            f"Paid at:         {payment.paid_at:%Y-%m-%d %H:%M UTC}\n"
-            f"Outstanding:     {invoice.currency} {invoice.amount_due:.2f}\n\n"
-            f"This serves as your official receipt.\n\n"
-            f"— The CarePoint HMS Team"
+        paid_at = payment.paid_at or datetime.now(timezone.utc)
+        common = dict(
+            title="Payment received — thank you",
+            intro=f"Hello {tenant.billing_contact_name or tenant.name}, we've received "
+            "your payment. This email is your official receipt.",
+            highlight_label="Amount received",
+            highlight_value=f"{payment.currency} {payment.amount:,.2f}",
+            highlight_caption=f"Paid on {paid_at:%d %b %Y, %H:%M UTC}",
+            details_heading="Receipt details",
+            details=[
+                ("Receipt number", payment.receipt_number),
+                ("Invoice number", invoice.invoice_number),
+                ("Amount received", f"{payment.currency} {payment.amount:,.2f}"),
+                ("Payment method", (payment.payment_method or "—").replace("_", " ")),
+                ("Paid at", f"{paid_at:%d %b %Y, %H:%M UTC}"),
+                ("Outstanding balance", f"{invoice.currency} {invoice.amount_due:,.2f}"),
+            ],
+            footer_note="Keep this receipt for your records. If anything looks "
+            "incorrect, reply to your account manager or contact support.",
+            preheader=f"Receipt {payment.receipt_number}: {payment.currency} "
+            f"{payment.amount:,.2f} received.",
         )
+        body, body_html = _billing_email_bodies(**common)
 
-        sent = _try_send_email(subject=subject, recipients=recipients, body=body)
+        sent = _try_send_email(
+            subject=subject, recipients=recipients, body=body, body_html=body_html
+        )
         payment.receipt_sent_to_email = ", ".join(recipients) if recipients else None
         payment.receipt_sent_at = datetime.now(timezone.utc) if sent else None
         if sent:
@@ -525,13 +590,317 @@ class SubscriptionBillingService:
     def _dispatch_overdue_email(self, tenant: Tenant, invoice: SubscriptionInvoice) -> None:
         recipients = _resolve_billing_recipients(tenant)
         subject = f"Overdue invoice {invoice.invoice_number} — please settle to avoid interruption"
-        body = (
-            f"Hello {tenant.billing_contact_name or tenant.name},\n\n"
-            f"Invoice {invoice.invoice_number} is now overdue.\n"
-            f"Amount due: {invoice.currency} {invoice.amount_due:.2f}\n"
-            f"Due date:   {invoice.due_date:%Y-%m-%d}\n\n"
-            f"Please settle this invoice as soon as possible to avoid any "
-            f"interruption to your CarePoint HMS subscription.\n\n"
-            f"— The CarePoint HMS Team"
+        common = dict(
+            title="Your invoice is overdue",
+            intro=f"Hello {tenant.billing_contact_name or tenant.name}, invoice "
+            f"{invoice.invoice_number} is now past its due date. Please settle it as "
+            "soon as possible to keep your subscription active.",
+            highlight_label="Amount due",
+            highlight_value=f"{invoice.currency} {invoice.amount_due:,.2f}",
+            highlight_caption=f"Was due on {invoice.due_date:%d %b %Y}",
+            details_heading="Invoice details",
+            details=[
+                ("Invoice number", invoice.invoice_number),
+                ("Amount due", f"{invoice.currency} {invoice.amount_due:,.2f}"),
+                ("Original due date", f"{invoice.due_date:%d %b %Y}"),
+            ],
+            cta_label="Settle invoice now",
+            cta_url=_billing_portal_url(),
+            footer_note="To avoid any interruption to your service, please make payment "
+            "at your earliest convenience. If you've already paid, kindly disregard this notice.",
+            preheader=f"Overdue: {invoice.currency} {invoice.amount_due:,.2f} on "
+            f"invoice {invoice.invoice_number}.",
         )
-        _try_send_email(subject=subject, recipients=recipients, body=body)
+        body, body_html = _billing_email_bodies(**common)
+        _try_send_email(
+            subject=subject, recipients=recipients, body=body, body_html=body_html
+        )
+
+    # ==================================================================
+    # CHECKOUT SUPPORT — ensure there's an invoice to pay
+    # ==================================================================
+
+    def get_active_subscription(self, tenant_id: int) -> Optional[TenantSubscription]:
+        """Return the tenant's current ACTIVE/TRIALING/PENDING/PAST_DUE subscription."""
+        return (
+            self.db.query(TenantSubscription)
+            .filter(
+                TenantSubscription.tenant_id == tenant_id,
+                TenantSubscription.status.in_(
+                    [
+                        SubscriptionStatus.ACTIVE,
+                        SubscriptionStatus.TRIALING,
+                        SubscriptionStatus.PENDING,
+                        SubscriptionStatus.PAST_DUE,
+                    ]
+                ),
+            )
+            .order_by(TenantSubscription.id.desc())
+            .first()
+        )
+
+    def get_or_create_open_invoice(self, tenant_id: int) -> SubscriptionInvoice:
+        """
+        Return an open (payable) invoice for the tenant's current subscription,
+        issuing one if none exists. Used by the checkout + manual-payment flows
+        so the tenant always has something concrete to pay against.
+        """
+        subscription = self.get_active_subscription(tenant_id)
+        if subscription is None:
+            raise BadRequestError(
+                message="No active subscription found. Select a plan before paying."
+            )
+
+        open_invoice = (
+            self.db.query(SubscriptionInvoice)
+            .filter(
+                SubscriptionInvoice.subscription_id == subscription.id,
+                SubscriptionInvoice.status.in_(
+                    [
+                        SubscriptionInvoiceStatus.DRAFT,
+                        SubscriptionInvoiceStatus.ISSUED,
+                        SubscriptionInvoiceStatus.PARTIALLY_PAID,
+                        SubscriptionInvoiceStatus.OVERDUE,
+                    ]
+                ),
+                SubscriptionInvoice.is_deleted.is_(False),
+            )
+            .order_by(SubscriptionInvoice.id.asc())
+            .first()
+        )
+        if open_invoice is not None:
+            return open_invoice
+
+        # No open invoice — issue one for the current period immediately.
+        return self.issue_invoice_for_subscription(subscription, send_email=False)
+
+    # ==================================================================
+    # MANUAL (bank counter / transfer) PAYMENT + SaaS CONFIRMATION
+    # ==================================================================
+
+    def record_manual_payment(
+        self,
+        invoice_id: int,
+        *,
+        amount: float | Decimal,
+        payment_method: str = "BANK_TRANSFER",
+        payer_bank_name: Optional[str] = None,
+        payer_account_name: Optional[str] = None,
+        payer_reference: Optional[str] = None,
+        proof_file_path: Optional[str] = None,
+        proof_file_name: Optional[str] = None,
+        proof_content_type: Optional[str] = None,
+        notes: Optional[str] = None,
+    ) -> SubscriptionPayment:
+        """
+        Record a tenant-submitted manual payment as PENDING (awaiting SaaS
+        confirmation). Unlike :meth:`record_payment`, this does NOT touch the
+        invoice totals or roll the subscription forward — that happens only
+        when a platform admin confirms via :meth:`confirm_manual_payment`.
+        """
+        invoice = self.get_invoice(invoice_id)
+        if invoice.status in {
+            SubscriptionInvoiceStatus.PAID,
+            SubscriptionInvoiceStatus.CANCELLED,
+            SubscriptionInvoiceStatus.REFUNDED,
+        }:
+            raise BadRequestError(
+                message=f"Invoice cannot accept new payments in status {invoice.status}."
+            )
+
+        amount_dec = Decimal(str(amount))
+        if amount_dec <= 0:
+            raise BadRequestError(message="Payment amount must be greater than zero.")
+
+        payment = SubscriptionPayment(
+            invoice_id=invoice.id,
+            tenant_id=invoice.tenant_id,
+            amount=amount_dec,
+            currency=invoice.currency,
+            payment_method=payment_method or "BANK_TRANSFER",
+            provider="MANUAL",
+            status=SubscriptionPaymentStatus.PENDING,
+            paid_at=datetime.now(timezone.utc),
+            payer_bank_name=payer_bank_name,
+            payer_account_name=payer_account_name,
+            payer_reference=payer_reference,
+            proof_file_path=proof_file_path,
+            proof_file_name=proof_file_name,
+            proof_content_type=proof_content_type,
+            notes=notes,
+        )
+        self.db.add(payment)
+        self.db.commit()
+        self.db.refresh(payment)
+        return payment
+
+    def confirm_manual_payment(
+        self, payment_id: int, *, admin_id: Optional[int] = None
+    ) -> SubscriptionPayment:
+        """
+        Promote a PENDING manual payment to SUCCEEDED (SaaS admin action):
+        apply it to the invoice, roll the subscription window forward when the
+        invoice is fully paid, and dispatch a receipt.
+        """
+        payment = (
+            self.db.query(SubscriptionPayment)
+            .filter(SubscriptionPayment.id == payment_id)
+            .first()
+        )
+        if payment is None:
+            raise NotFoundError(message="Payment not found.")
+        if payment.status != SubscriptionPaymentStatus.PENDING:
+            raise BadRequestError(
+                message=f"Only PENDING payments can be confirmed (this one is {payment.status})."
+            )
+
+        invoice = self.get_invoice(payment.invoice_id)
+        tenant = self.db.query(Tenant).filter(Tenant.id == payment.tenant_id).first()
+
+        payment.status = SubscriptionPaymentStatus.SUCCEEDED
+        payment.confirmed_by_admin_id = admin_id
+        payment.confirmed_at = datetime.now(timezone.utc)
+        payment.paid_at = payment.paid_at or datetime.now(timezone.utc)
+        if not payment.receipt_number and tenant is not None:
+            payment.receipt_number = _generate_receipt_number(tenant)
+        self.db.flush()
+
+        # Apply to the invoice.
+        new_paid = (invoice.amount_paid or Decimal("0")) + payment.amount
+        invoice.amount_paid = new_paid
+        invoice.amount_due = max(Decimal("0"), (invoice.total_amount or Decimal("0")) - new_paid)
+        if invoice.amount_due <= Decimal("0"):
+            invoice.status = SubscriptionInvoiceStatus.PAID
+            invoice.paid_at = payment.confirmed_at
+            self._roll_subscription_period_forward(invoice)
+        else:
+            invoice.status = SubscriptionInvoiceStatus.PARTIALLY_PAID
+
+        self.db.commit()
+        self.db.refresh(payment)
+        self.db.refresh(invoice)
+
+        if tenant is not None:
+            self._dispatch_payment_receipt(tenant, invoice, payment)
+        return payment
+
+    def reject_manual_payment(
+        self, payment_id: int, *, admin_id: Optional[int] = None, reason: Optional[str] = None
+    ) -> SubscriptionPayment:
+        """Mark a PENDING manual payment as FAILED with a reason (SaaS action)."""
+        payment = (
+            self.db.query(SubscriptionPayment)
+            .filter(SubscriptionPayment.id == payment_id)
+            .first()
+        )
+        if payment is None:
+            raise NotFoundError(message="Payment not found.")
+        if payment.status != SubscriptionPaymentStatus.PENDING:
+            raise BadRequestError(
+                message=f"Only PENDING payments can be rejected (this one is {payment.status})."
+            )
+        payment.status = SubscriptionPaymentStatus.FAILED
+        payment.confirmed_by_admin_id = admin_id
+        payment.confirmed_at = datetime.now(timezone.utc)
+        payment.rejected_reason = reason or "Rejected by platform administrator."
+        self.db.commit()
+        self.db.refresh(payment)
+        return payment
+
+    def list_pending_payments(self) -> list[SubscriptionPayment]:
+        """All PENDING manual payments across every tenant (SaaS review queue)."""
+        return (
+            self.db.query(SubscriptionPayment)
+            .filter(SubscriptionPayment.status == SubscriptionPaymentStatus.PENDING)
+            .order_by(SubscriptionPayment.id.desc())
+            .all()
+        )
+
+    def list_payments(
+        self,
+        *,
+        status: Optional[str] = None,
+        search: Optional[str] = None,
+        limit: int = 200,
+    ) -> list[SubscriptionPayment]:
+        """
+        List subscription payments across every tenant for the SaaS lookup
+        screen, optionally filtered by status and a free-text search over the
+        tenant name, receipt number, and payer/transaction references.
+        """
+        query = self.db.query(SubscriptionPayment)
+
+        if status:
+            try:
+                query = query.filter(
+                    SubscriptionPayment.status == SubscriptionPaymentStatus(status.upper())
+                )
+            except ValueError:
+                # Unknown status → no rows rather than a 500.
+                return []
+
+        if search:
+            like = f"%{search.strip()}%"
+            # Match tenant name via a subquery of matching tenant ids.
+            tenant_ids = [
+                t.id
+                for t in self.db.query(Tenant.id).filter(Tenant.name.ilike(like)).all()
+            ]
+            conditions = [
+                SubscriptionPayment.receipt_number.ilike(like),
+                SubscriptionPayment.payer_reference.ilike(like),
+                SubscriptionPayment.transaction_reference.ilike(like),
+                SubscriptionPayment.payer_account_name.ilike(like),
+            ]
+            if tenant_ids:
+                conditions.append(SubscriptionPayment.tenant_id.in_(tenant_ids))
+            query = query.filter(or_(*conditions))
+
+        return (
+            query.order_by(SubscriptionPayment.id.desc()).limit(limit).all()
+        )
+
+    def get_payment(self, payment_id: int) -> SubscriptionPayment:
+        payment = (
+            self.db.query(SubscriptionPayment)
+            .filter(SubscriptionPayment.id == payment_id)
+            .first()
+        )
+        if payment is None:
+            raise NotFoundError(message="Payment not found.")
+        return payment
+
+    # ==================================================================
+    # GATEWAY (Flutterwave) PAYMENT — already-verified success path
+    # ==================================================================
+
+    def record_gateway_payment(
+        self,
+        invoice_id: int,
+        *,
+        amount: float | Decimal,
+        provider: str,
+        transaction_reference: str,
+        raw_payload: Optional[dict] = None,
+    ) -> SubscriptionPayment:
+        """
+        Idempotently record a verified gateway payment. If a payment with the
+        same transaction_reference already exists, it is returned unchanged
+        (protects against webhook + callback double-processing).
+        """
+        existing = (
+            self.db.query(SubscriptionPayment)
+            .filter(SubscriptionPayment.transaction_reference == transaction_reference)
+            .first()
+        )
+        if existing is not None:
+            return existing
+        return self.record_payment(
+            invoice_id,
+            amount=amount,
+            payment_method="CARD",
+            provider=provider,
+            transaction_reference=transaction_reference,
+            raw_payload=raw_payload,
+            send_receipt=True,
+        )

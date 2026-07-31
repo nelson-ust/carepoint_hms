@@ -5,8 +5,10 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 from logging.config import fileConfig
+
 from sqlalchemy import engine_from_config
 from sqlalchemy import pool
+
 from alembic import context
 
 from app.core.config import settings
@@ -17,39 +19,46 @@ import app.models.all_models  # Ensure all models are loaded
 # access to the values within the .ini file in use.
 config = context.config
 
-# Set the SQLAlchemy url directly from our settings
-db_url = settings.MASTER_DATABASE_URL or settings.DATABASE_URL
-# Escape % signs in the password for ConfigParser
-escaped_url = db_url.replace("%", "%%")
-config.set_main_option("sqlalchemy.url", escaped_url)
+# ---------------------------------------------------------------------------
+# Target selection (master by default; tenant-aware via -x arguments).
+#
+# Alembic historically pointed at the master database. Tenant tables (the vast
+# majority of the schema — billing, HR, clinical, etc.) live in per-tenant
+# databases, so to run a migration against a tenant you pass its URL:
+#
+#     alembic -x db_url="postgresql://…/tenant_db" upgrade head
+#
+# Combine with app.db_sync.iter_tenant_targets() in a shell loop to migrate the
+# whole fleet with per-tenant isolation. When no -x db_url is given the
+# behaviour is unchanged (master database, master metadata).
+# ---------------------------------------------------------------------------
+_x_args = context.get_x_argument(as_dictionary=True)
+_override_url = _x_args.get("db_url")
+
+db_url = _override_url or settings.MASTER_DATABASE_URL or settings.DATABASE_URL
+# Escape % signs (e.g. in an encoded password) for ConfigParser.
+config.set_main_option("sqlalchemy.url", db_url.replace("%", "%%"))
+
+# Metadata: tenant DBs carry TenantBase tables; the master DB carries
+# MasterBase tables. Default to tenant metadata whenever a tenant URL is
+# supplied, unless the caller overrides with -x metadata=master|tenant.
+_meta_choice = _x_args.get("metadata")
+if _meta_choice == "tenant":
+    target_metadata = TenantBase.metadata
+elif _meta_choice == "master":
+    target_metadata = MasterBase.metadata
+elif _override_url:
+    target_metadata = TenantBase.metadata
+else:
+    target_metadata = MasterBase.metadata
 
 # Interpret the config file for Python logging.
-# This line sets up loggers basically.
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-# add your model's MetaData object here
-# for 'autogenerate' support
-target_metadata = MasterBase.metadata
-
-# other values from the config, defined by the needs of env.py,
-# can be acquired:
-# my_important_option = config.get_main_option("my_important_option")
-# ... etc.
-
 
 def run_migrations_offline() -> None:
-    """Run migrations in 'offline' mode.
-
-    This configures the context with just a URL
-    and not an Engine, though an Engine is acceptable
-    here as well.  By skipping the Engine creation
-    we don't even need a DBAPI to be available.
-
-    Calls to context.execute() here emit the given string to the
-    script output.
-
-    """
+    """Run migrations in 'offline' mode (emit SQL, no DBAPI needed)."""
     url = config.get_main_option("sqlalchemy.url")
     context.configure(
         url=url,
@@ -63,12 +72,7 @@ def run_migrations_offline() -> None:
 
 
 def run_migrations_online() -> None:
-    """Run migrations in 'online' mode.
-
-    In this scenario we need to create an Engine
-    and associate a connection with the context.
-
-    """
+    """Run migrations in 'online' mode against the resolved database."""
     connectable = engine_from_config(
         config.get_section(config.config_ini_section, {}),
         prefix="sqlalchemy.",
@@ -76,9 +80,7 @@ def run_migrations_online() -> None:
     )
 
     with connectable.connect() as connection:
-        context.configure(
-            connection=connection, target_metadata=target_metadata
-        )
+        context.configure(connection=connection, target_metadata=target_metadata)
 
         with context.begin_transaction():
             context.run_migrations()

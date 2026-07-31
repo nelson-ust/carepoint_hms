@@ -231,12 +231,28 @@ def _add_missing_columns_for_table(
 
         sql = f'ALTER TABLE "{table.name}" ADD COLUMN IF NOT EXISTS {col_ddl}'
         logger.info("Schema sync: %s", sql)
-        if conn is not None:
-            conn.execute(text(sql))
-        else:
-            with engine.begin() as own_conn:
-                own_conn.execute(text(sql))
-        added.append(column.name)
+        # Isolate every column so a single failed ALTER can never roll back
+        # the columns already added for this table or any other one. With a
+        # shared connection we wrap each statement in a SAVEPOINT; otherwise
+        # each column gets its own short transaction. A column that genuinely
+        # cannot be added is logged and skipped instead of aborting the whole
+        # schema sync (which previously left many unrelated columns missing).
+        try:
+            if conn is not None:
+                with conn.begin_nested():
+                    conn.execute(text(sql))
+            else:
+                with engine.begin() as own_conn:
+                    own_conn.execute(text(sql))
+            added.append(column.name)
+        except Exception as exc:  # noqa: BLE001 - resilience over strictness
+            logger.exception(
+                "Schema sync: could not add column %s.%s (%s); skipping it "
+                "and continuing with the remaining columns.",
+                table.name,
+                column.name,
+                exc,
+            )
 
     return added
 
@@ -244,6 +260,45 @@ def _add_missing_columns_for_table(
 # ---------------------------------------------------------------------------
 # Public entry points
 # ---------------------------------------------------------------------------
+
+
+def _drop_legacy_approval_tables(engine: Engine) -> list[str]:
+    """
+    One-time migration: the approval engine was rebuilt with a new schema that
+    *reuses* the ``approval_flow`` and ``approval_request`` table names. The
+    forward-only sync can't reshape those, so when we detect the OLD layout
+    (identified by ``approval_flow.subject_type``) we drop the legacy approval
+    tables here and let ``create_all`` recreate the new ones. Idempotent: once
+    migrated, the old marker column is gone and this is a no-op.
+    """
+    legacy = [
+        "approval_comment",
+        "approval_decision",
+        "approval_request_step",
+        "approval_flow_step_approver",
+        "approval_flow_step",
+        "approval_request",
+        "approval_flow",
+    ]
+    dropped: list[str] = []
+    try:
+        with engine.connect() as conn:
+            marker = conn.execute(
+                text(
+                    "SELECT 1 FROM information_schema.columns "
+                    "WHERE table_name = 'approval_flow' AND column_name = 'subject_type' "
+                    "LIMIT 1"
+                )
+            ).first()
+            if not marker:
+                return dropped
+            for tbl in legacy:
+                conn.execute(text(f'DROP TABLE IF EXISTS "{tbl}" CASCADE'))
+                dropped.append(tbl)
+            conn.commit()
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("Legacy approval-table drop skipped: %s", exc)
+    return dropped
 
 
 def sync_schema(
@@ -360,6 +415,11 @@ def sync_schema(
     # ``checkfirst=True`` issues one ``pg_class`` lookup per table —
     # one round trip apiece — which is still much cheaper than the
     # per-table column inspection we eliminate below.
+    # Legacy approval-engine teardown before (re)creating the new schema.
+    _dropped_legacy = _drop_legacy_approval_tables(engine)
+    if _dropped_legacy:
+        summary['dropped:legacy_approval'] = _dropped_legacy
+
     metadata.create_all(bind=engine, checkfirst=True)
 
     # 3d. Skip the column-add loop entirely when the DB was fresh —
@@ -400,14 +460,22 @@ def sync_schema(
             if table.name not in existing_tables:
                 continue  # newly created by step 3c — already complete
             existing_cols = columns_by_table.get(table.name)
-            added = _add_missing_columns_for_table(
-                engine,
-                table,
-                existing_cols=existing_cols,
-                conn=alter_conn,
-            )
-            if added:
-                summary[table.name] = added
+            try:
+                added = _add_missing_columns_for_table(
+                    engine,
+                    table,
+                    existing_cols=existing_cols,
+                    conn=alter_conn,
+                )
+                if added:
+                    summary[table.name] = added
+            except Exception as exc:  # noqa: BLE001 - one table must not abort the rest
+                logger.exception(
+                    "Schema sync: column back-fill failed for table %s (%s); "
+                    "continuing with the remaining tables.",
+                    table.name,
+                    exc,
+                )
 
     return summary
 
@@ -460,6 +528,158 @@ def sync_master_schema(engine: Engine | None = None) -> dict[str, list[str]]:
     return sync_schema(MasterBase.metadata, engine, enum_extensions=enum_extensions)
 
 
+_BUILTIN_REQUEST_TYPES: list[tuple[str, str]] = [
+    ("PAYROLL_RUN", "Payroll Run"),
+    ("LEAVE_REQUEST", "Leave Request"),
+    ("TIMESHEET", "Timesheet"),
+    ("OVERTIME", "Overtime"),
+    ("REIMBURSEMENT", "Reimbursement"),
+    ("SALARY_ADVANCE", "Salary Advance"),
+    ("PROCUREMENT", "Procurement"),
+    ("STAFF_REQUEST", "Staff Request"),
+    ("GENERIC", "Generic Request"),
+]
+
+
+def _seed_builtin_request_types(engine: Engine) -> list[str]:
+    """
+    Idempotently ensure the built-in approval RequestType rows exist. This runs
+    on every tenant schema sync so a freshly-created (or freshly-rebuilt)
+    ``request_type`` table is never empty — the approval-flow UI depends on it.
+    """
+    seeded: list[str] = []
+    try:
+        with engine.connect() as conn:
+            # Skip quietly if the table isn't present yet.
+            exists = conn.execute(
+                text(
+                    "SELECT 1 FROM information_schema.tables "
+                    "WHERE table_name = 'request_type' LIMIT 1"
+                )
+            ).first()
+            if not exists:
+                return seeded
+            for code, name in _BUILTIN_REQUEST_TYPES:
+                res = conn.execute(
+                    text(
+                        "INSERT INTO request_type "
+                        "(code, name, is_active, is_deleted, date_created, date_updated) "
+                        "SELECT :code, :name, true, false, now(), now() "
+                        "WHERE NOT EXISTS ("
+                        "  SELECT 1 FROM request_type WHERE code = :code AND is_deleted = false"
+                        ")"
+                    ),
+                    {"code": code, "name": name},
+                )
+                if res.rowcount:
+                    seeded.append(code)
+            conn.commit()
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("Request-type seeding skipped: %s", exc)
+    return seeded
+
+
+# Default approval flows seeded for the core HR/finance request types.
+# Each entry: request-type code -> (flow name, description, [steps]).
+# A step is (order, name, dynamic_token). All seeded steps use DYNAMIC
+# approvers so they resolve through role fallbacks (HR_HEAD -> HR_MANAGER,
+# FINANCE_HEAD / FACILITY_HEAD -> ADMIN, REQUESTER_MANAGER -> dept head or
+# HR manager) without depending on tenant-specific role IDs.
+_BUILTIN_FLOW_SEEDS: dict[str, tuple[str, str, list[tuple[int, str, str]]]] = {
+    "TIMESHEET": (
+        "Standard Timesheet Flow",
+        "Staff-logged timesheets verified by the line manager, then HR.",
+        [(1, "Manager Approval", "REQUESTER_MANAGER"), (2, "HR Sign-off", "HR_HEAD")],
+    ),
+    "LEAVE_REQUEST": (
+        "Standard Leave Flow",
+        "Leave applications endorsed by the line manager, then approved by HR.",
+        [(1, "Manager Endorsement", "REQUESTER_MANAGER"), (2, "HR Approval", "HR_HEAD")],
+    ),
+    "SALARY_ADVANCE": (
+        "Standard Salary Advance Flow",
+        "Early-salary payout requests reviewed by HR, then approved by Finance.",
+        [(1, "HR Review", "HR_HEAD"), (2, "Finance Approval", "FINANCE_HEAD")],
+    ),
+    "REIMBURSEMENT": (
+        "Standard Expense Claim Flow",
+        "Expense reimbursement claims endorsed by the line manager, then approved by Finance.",
+        [(1, "Manager Endorsement", "REQUESTER_MANAGER"), (2, "Finance Approval", "FINANCE_HEAD")],
+    ),
+}
+
+
+def _seed_builtin_approval_flows(engine: Engine) -> list[str]:
+    """
+    Idempotently seed a default ApprovalFlow (+ ApprovalSteps) for the core
+    request types in ``_BUILTIN_FLOW_SEEDS``.
+
+    Seed-once semantics: a request type is skipped when it already has ANY
+    flow row — including soft-deleted ones — so tenant admins who customise
+    or deliberately remove a flow are never overridden on the next sync.
+    """
+    seeded: list[str] = []
+    try:
+        from sqlalchemy import inspect as sa_inspect
+        from sqlalchemy.orm import Session
+
+        needed = {"request_type", "approval_flow", "approval_step"}
+        have = set(sa_inspect(engine).get_table_names())
+        if not needed.issubset(have):
+            return seeded
+
+        from app.core.enums import (
+            ApprovalApproverKind,
+            ApprovalDynamicApprover,
+            ApprovalStepDecisionRule,
+        )
+        from app.models.all_models import ApprovalFlow, ApprovalStep, RequestType
+
+        with Session(engine) as db:
+            for code, (flow_name, desc, steps) in _BUILTIN_FLOW_SEEDS.items():
+                rt = (
+                    db.query(RequestType)
+                    .filter(RequestType.code == code, RequestType.is_deleted.is_(False))
+                    .first()
+                )
+                if rt is None:
+                    continue  # type not seeded yet; picked up on a later sync
+                touched = (
+                    db.query(ApprovalFlow.id)
+                    .filter(ApprovalFlow.request_type_id == rt.id)
+                    .first()
+                )
+                if touched:
+                    continue  # tenant already has (or had) a flow for this type
+                flow = ApprovalFlow(
+                    request_type_id=rt.id,
+                    code="STANDARD",
+                    name=flow_name,
+                    description=desc,
+                    is_default=True,
+                    is_active=True,
+                )
+                db.add(flow)
+                db.flush()
+                for order, step_name, token in steps:
+                    db.add(ApprovalStep(
+                        flow_id=flow.id,
+                        step_order=order,
+                        name=step_name,
+                        approver_kind=ApprovalApproverKind.DYNAMIC,
+                        dynamic_token=ApprovalDynamicApprover(token),
+                        decision_rule=ApprovalStepDecisionRule.ANY_OF,
+                        required_approvals=1,
+                        allow_self_approval=False,
+                        is_active=True,
+                    ))
+                seeded.append(code)
+            db.commit()
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("Approval-flow seeding skipped: %s", exc)
+    return seeded
+
+
 def sync_tenant_schema(db_url: str) -> dict[str, list[str]]:
     """
     Convenience wrapper that targets the Tenant metadata for ``db_url``.
@@ -484,7 +704,14 @@ def sync_tenant_schema(db_url: str) -> dict[str, list[str]]:
     )
     try:
         enum_extensions = _tenant_enum_extensions()
-        return sync_schema(TenantBase.metadata, engine, enum_extensions=enum_extensions)
+        summary = sync_schema(TenantBase.metadata, engine, enum_extensions=enum_extensions)
+        seeded = _seed_builtin_request_types(engine)
+        if seeded:
+            summary["seeded:request_types"] = seeded
+        seeded_flows = _seed_builtin_approval_flows(engine)
+        if seeded_flows:
+            summary["seeded:approval_flows"] = seeded_flows
+        return summary
     finally:
         engine.dispose()
 
@@ -565,6 +792,50 @@ def _demote_stale_tenant(master_db, tenant, reason: str) -> None:
         )
     except Exception as exc:  # pragma: no cover - defensive
         logger.warning("Could not demote stale tenant %s: %s", tenant.code, exc)
+
+
+def iter_tenant_targets() -> list[tuple[int, str, str]]:
+    """
+    Return ``[(tenant_id, tenant_code, db_url)]`` for every active, provisioned
+    tenant in master, decrypting each stored connection string. Shared by the
+    schema sync, the account back-fill runner, and the Alembic tenant loop so
+    they all target the exact same set of tenant databases.
+    """
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import Session
+
+    from app.core.cryptography import decrypt_string
+    from app.core.database import MASTER_DATABASE_URL
+    from app.models.all_models import Tenant
+
+    if not MASTER_DATABASE_URL:
+        logger.warning("MASTER_DATABASE_URL not set; iter_tenant_targets returns [].")
+        return []
+
+    targets: list[tuple[int, str, str]] = []
+    master_engine = create_engine(MASTER_DATABASE_URL, future=True)
+    try:
+        with Session(master_engine) as master_db:
+            tenants = (
+                master_db.query(Tenant)
+                .filter(
+                    Tenant.is_active.is_(True),
+                    Tenant.is_provisioned.is_(True),
+                    Tenant.is_deleted.is_(False),
+                )
+                .all()
+            )
+            for tenant in tenants:
+                if not tenant.db_connection_string:
+                    continue
+                try:
+                    url = decrypt_string(tenant.db_connection_string)
+                except Exception:
+                    url = tenant.db_connection_string
+                targets.append((tenant.id, tenant.code, url))
+    finally:
+        master_engine.dispose()
+    return targets
 
 
 def sync_tenant_schemas_all() -> dict[str, dict[str, list[str]] | str]:
@@ -768,4 +1039,7 @@ def _tenant_enum_extensions() -> dict[str, list[str]]:
         # PostgreSQL stores enum types in lower-case unless quoted;
         # SQLAlchemy's default naming is the lower-cased class name.
         "paymentmethod": ["FLUTTERWAVE", "STRIPE"],
+        # Approval engine gained "return for correction".
+        "approvallogaction": ["RETURN"],
+        "approvalrequeststatus": ["RETURNED"],
     }

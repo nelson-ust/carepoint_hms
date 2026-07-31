@@ -70,6 +70,7 @@ class TimesheetRepository:
                 weekend_hours=entry_data.weekend_hours,
                 holiday_hours=entry_data.holiday_hours,
                 is_absent=entry_data.is_absent,
+                is_leave=entry_data.is_leave,
                 note=entry_data.note
             )
             self.db.add(entry)
@@ -98,6 +99,7 @@ class TimesheetRepository:
                     weekend_hours=entry_data.weekend_hours,
                     holiday_hours=entry_data.holiday_hours,
                     is_absent=entry_data.is_absent,
+                    is_leave=entry_data.is_leave,
                     note=entry_data.note
                 )
                 self.db.add(entry)

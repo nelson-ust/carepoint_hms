@@ -1,7 +1,12 @@
 """Unit tests for IntegrationService.
 
-Covers CRUD over IntegrationEndpoint, encryption of credential secrets,
-NotFoundError on missing endpoints, and the decrypted-credentials helper.
+The service moved from an ``IntegrationEndpoint`` + per-credential model to an
+``IntegrationPartner`` model (API-key based, stored in the master DB). The old
+``get_endpoints`` / ``get_endpoint`` / ``create_endpoint`` / ``update_endpoint``
+/ ``delete_endpoint`` / ``get_decrypted_credentials`` methods were replaced by
+``list_partners`` / ``create_partner`` / ``update_partner`` / ``rotate_key`` /
+``revoke_partner`` (all operating over the master DB via
+``get_master_db_context``). These tests exercise that current API.
 """
 from __future__ import annotations
 
@@ -13,128 +18,135 @@ import pytest
 from app.core.exceptions import NotFoundError
 from app.services.integration_service import IntegrationService
 
-
-def _make_svc():
-    db = MagicMock()
-    return IntegrationService(db), db
-
-
-class TestGetEndpoints:
-    def test_returns_all(self):
-        svc, db = _make_svc()
-        db.query.return_value.all.return_value = ["e1", "e2"]
-        assert svc.get_endpoints() == ["e1", "e2"]
-
-    def test_get_endpoint_returns_record(self):
-        svc, db = _make_svc()
-        e = SimpleNamespace(id=1, code="HL7")
-        db.query.return_value.filter.return_value.first.return_value = e
-        assert svc.get_endpoint(1) is e
-
-    def test_get_endpoint_raises_not_found(self):
-        svc, db = _make_svc()
-        db.query.return_value.filter.return_value.first.return_value = None
-        with pytest.raises(NotFoundError, match="Integration endpoint not found"):
-            svc.get_endpoint(99)
+_CTX = "app.services.integration_service.get_master_db_context"
+_KEYGEN = "app.services.integration_service.generate_api_key"
+_ENCRYPT = "app.services.integration_service.encrypt_string"
 
 
-class TestCreateEndpoint:
-    @patch("app.services.integration_service.encrypt_string")
-    def test_creates_without_credentials(self, mock_encrypt):
-        svc, db = _make_svc()
-        payload = MagicMock()
-        payload.code = "EP"
-        payload.name = "EP1"
-        payload.base_url = "https://x"
-        payload.protocol = "HTTP"
-        payload.provider_type = "PROVIDER"
-        payload.direction = "OUTBOUND"
-        payload.is_active = True
-        payload.credentials = []
-        svc.create_endpoint(payload)
-        # Endpoint added once, no credentials added
-        assert db.add.call_count == 1
-        db.flush.assert_called_once()
-        db.commit.assert_called_once()
-        mock_encrypt.assert_not_called()
-
-    @patch("app.services.integration_service.encrypt_string")
-    def test_encrypts_each_credential(self, mock_encrypt):
-        svc, db = _make_svc()
-        mock_encrypt.side_effect = lambda raw: f"ENC({raw})"
-        cred1 = MagicMock()
-        cred1.credential_type = "API_KEY"
-        cred1.secret_reference = "key1"
-        cred2 = MagicMock()
-        cred2.credential_type = "PASSWORD"
-        cred2.secret_reference = "pw"
-        payload = MagicMock()
-        payload.code = "EP"
-        payload.name = "n"
-        payload.base_url = "u"
-        payload.protocol = "p"
-        payload.provider_type = "x"
-        payload.direction = "OUT"
-        payload.is_active = True
-        payload.credentials = [cred1, cred2]
-        svc.create_endpoint(payload)
-        # 1 endpoint + 2 credentials
-        assert db.add.call_count == 3
-        # Both credentials encrypted
-        assert mock_encrypt.call_count == 2
-        mock_encrypt.assert_any_call("key1")
-        mock_encrypt.assert_any_call("pw")
-        db.commit.assert_called_once()
+def _master_ctx(mdb):
+    """A stand-in for the ``get_master_db_context()`` context manager."""
+    ctx = MagicMock()
+    ctx.__enter__.return_value = mdb
+    ctx.__exit__.return_value = False
+    return ctx
 
 
-class TestUpdateEndpoint:
-    def test_rejects_missing_endpoint(self):
-        svc, db = _make_svc()
-        db.query.return_value.filter.return_value.first.return_value = None
-        with pytest.raises(NotFoundError):
-            svc.update_endpoint(1, MagicMock())
-
-    def test_applies_update(self):
-        svc, db = _make_svc()
-        e = SimpleNamespace(id=1, name="old", base_url="x")
-        db.query.return_value.filter.return_value.first.return_value = e
-        payload = MagicMock()
-        payload.model_dump.return_value = {"name": "new"}
-        svc.update_endpoint(1, payload)
-        assert e.name == "new"
-        db.commit.assert_called_once()
-
-
-class TestDeleteEndpoint:
-    def test_deletes_existing(self):
-        svc, db = _make_svc()
-        e = SimpleNamespace(id=1)
-        db.query.return_value.filter.return_value.first.return_value = e
-        svc.delete_endpoint(1)
-        db.delete.assert_called_once_with(e)
-        db.commit.assert_called_once()
-
-    def test_raises_when_missing(self):
-        svc, db = _make_svc()
-        db.query.return_value.filter.return_value.first.return_value = None
-        with pytest.raises(NotFoundError):
-            svc.delete_endpoint(99)
+def _partner_row(**overrides):
+    """Object shaped like an ``IntegrationPartner`` row for ``_partner_read``."""
+    base = dict(
+        id=1,
+        name="Alpha",
+        description=None,
+        is_active=True,
+        key_prefix="chp_pref",
+        key_hash="hash",
+        scopes="READ",
+        expires_at=None,
+        last_used_at=None,
+        base_url=None,
+        auth_header="X-API-Key",
+        auth_secret_encrypted=None,
+        created_at=None,
+    )
+    base.update(overrides)
+    return SimpleNamespace(**base)
 
 
-class TestGetDecryptedCredentials:
-    @patch("app.services.integration_service.decrypt_string")
-    def test_returns_dict(self, mock_decrypt):
-        svc, db = _make_svc()
-        mock_decrypt.side_effect = lambda v: v.replace("ENC", "PLAIN")
-        cred1 = SimpleNamespace(credential_type="API_KEY", secret_reference="ENC1")
-        cred2 = SimpleNamespace(credential_type="PASSWORD", secret_reference="ENC2")
-        endpoint = SimpleNamespace(id=1, credentials=[cred1, cred2])
-        db.query.return_value.filter.return_value.first.return_value = endpoint
-        out = svc.get_decrypted_credentials(1)
-        assert out == {"API_KEY": "PLAIN1", "PASSWORD": "PLAIN2"}
+class TestCreatePartner:
+    @patch(_KEYGEN, return_value=("chp_full_key", "chp_pref", "hashval"))
+    def test_creates_and_returns_full_key(self, mock_keygen):
+        mdb = MagicMock()
+        with patch(_CTX, return_value=_master_ctx(mdb)):
+            svc = IntegrationService()
+            info, full_key = svc.create_partner(
+                tenant_id=1, name="Partner A", description=None, scopes=["READ"],
+                expiry_days=None, base_url=None, auth_header=None,
+                auth_secret=None, created_by_user_id=7,
+            )
+        assert full_key == "chp_full_key"
+        assert info["name"] == "Partner A"
+        mdb.add.assert_called_once()
+        mdb.commit.assert_called_once()
 
-    def test_raises_when_endpoint_missing(self):
-        svc, db = _make_svc()
-        db.query.return_value.filter.return_value.first.return_value = None
-        with pytest.raises(NotFoundError):
-            svc.get_decrypted_credentials(404)
+    @patch(_KEYGEN, return_value=("k", "p", "h"))
+    @patch(_ENCRYPT, return_value="ENC")
+    def test_encrypts_auth_secret(self, mock_encrypt, mock_keygen):
+        mdb = MagicMock()
+        with patch(_CTX, return_value=_master_ctx(mdb)):
+            svc = IntegrationService()
+            info, _ = svc.create_partner(
+                tenant_id=1, name="P", description=None, scopes=None,
+                expiry_days=None, base_url="https://x", auth_header="X-Key",
+                auth_secret="s3cret", created_by_user_id=None,
+            )
+        mock_encrypt.assert_called_once_with("s3cret")
+        assert info["has_outbound_secret"] is True
+
+
+class TestListPartners:
+    def test_returns_partner_dicts(self):
+        mdb = MagicMock()
+        rows = [_partner_row(id=1, name="Alpha"), _partner_row(id=2, name="Beta")]
+        mdb.query.return_value.filter.return_value.order_by.return_value.all.return_value = rows
+        with patch(_CTX, return_value=_master_ctx(mdb)):
+            svc = IntegrationService()
+            out = svc.list_partners(tenant_id=1)
+        assert [r["name"] for r in out] == ["Alpha", "Beta"]
+
+
+class TestUpdatePartner:
+    def test_rejects_missing_partner(self):
+        mdb = MagicMock()
+        mdb.query.return_value.filter.return_value.first.return_value = None
+        with patch(_CTX, return_value=_master_ctx(mdb)):
+            svc = IntegrationService()
+            with pytest.raises(NotFoundError, match="Integration partner not found"):
+                svc.update_partner(partner_id=1, tenant_id=1, changes={"name": "x"})
+
+    def test_applies_name_change(self):
+        mdb = MagicMock()
+        p = _partner_row(id=1, name="old")
+        mdb.query.return_value.filter.return_value.first.return_value = p
+        with patch(_CTX, return_value=_master_ctx(mdb)):
+            svc = IntegrationService()
+            out = svc.update_partner(partner_id=1, tenant_id=1, changes={"name": "new"})
+        assert p.name == "new"
+        assert out["name"] == "new"
+        mdb.commit.assert_called_once()
+
+
+class TestRotateKey:
+    @patch(_KEYGEN, return_value=("newfull", "newpref", "newhash"))
+    def test_rotates_and_returns_new_key(self, mock_keygen):
+        mdb = MagicMock()
+        p = _partner_row(id=1, key_prefix="oldpref", key_hash="oldhash")
+        mdb.query.return_value.filter.return_value.first.return_value = p
+        with patch(_CTX, return_value=_master_ctx(mdb)):
+            svc = IntegrationService()
+            info, full_key = svc.rotate_key(partner_id=1, tenant_id=1)
+        assert full_key == "newfull"
+        assert p.key_prefix == "newpref"
+        assert p.key_hash == "newhash"
+        assert info["key_prefix"] == "newpref"
+        mdb.commit.assert_called_once()
+
+
+class TestRevokePartner:
+    def test_marks_inactive(self):
+        mdb = MagicMock()
+        p = _partner_row(id=1, is_active=True)
+        mdb.query.return_value.filter.return_value.first.return_value = p
+        with patch(_CTX, return_value=_master_ctx(mdb)):
+            svc = IntegrationService()
+            out = svc.revoke_partner(partner_id=1, tenant_id=1)
+        assert p.is_active is False
+        assert out["is_active"] is False
+        mdb.commit.assert_called_once()
+
+    def test_rejects_missing_partner(self):
+        mdb = MagicMock()
+        mdb.query.return_value.filter.return_value.first.return_value = None
+        with patch(_CTX, return_value=_master_ctx(mdb)):
+            svc = IntegrationService()
+            with pytest.raises(NotFoundError):
+                svc.revoke_partner(partner_id=99, tenant_id=1)

@@ -338,6 +338,163 @@ class LabResultService:
     # READS
     # ============================================================
 
+    def get_order_report_data(self, order_id: int, *,
+                              restrict_patient_id: Optional[int] = None) -> dict:
+        """Everything the branded lab-report PDF needs, for RELEASED results
+        only. When ``restrict_patient_id`` is given (patient-portal calls),
+        the order must belong to that patient."""
+        from app.core.enums import LabResultStatus as _LRS
+        from app.models.all_models import (
+            LabOrder, Patient, StaffProfile, User, Visit,
+        )
+        from app.utils.lab_report_pdf import verification_code
+
+        order = (
+            self.db.query(LabOrder)
+            .filter(LabOrder.id == order_id, LabOrder.is_deleted.is_(False))
+            .first()
+        )
+        if order is None:
+            raise NotFoundError(message="Lab order not found.")
+
+        visit = self.db.query(Visit).filter(Visit.id == order.visit_id).first()
+        patient = (
+            self.db.query(Patient).filter(Patient.id == visit.patient_id).first()
+            if visit else None
+        )
+        if restrict_patient_id is not None and (
+            patient is None or patient.id != restrict_patient_id
+        ):
+            raise NotFoundError(message="Lab order not found.")
+
+        rows: list[dict] = []
+        interpretations: list[str] = []
+        scientist_ids: set[int] = set()
+        approver_ids: set[int] = set()
+        reported_at = None
+        for item in (order.items or []):
+            result = getattr(item, "result", None)
+            if result is None or getattr(result, "released_at", None) is None:
+                continue
+            if getattr(result, "result_status", None) not in (
+                _LRS.RELEASED, getattr(_LRS, "VERIFIED", None),
+            ):
+                # released_at stamped is authoritative; keep row regardless of
+                # enum spelling differences.
+                pass
+            catalog = getattr(item, "lab_test_catalog", None)
+            rows.append({
+                "test": getattr(catalog, "name", None) or f"Test #{item.lab_test_catalog_id}",
+                "result": result.result_value or result.result_text or "-",
+                "unit": result.unit_of_measure
+                or getattr(catalog, "unit_of_measure", None) or "",
+                "reference_range": result.reference_range
+                or getattr(catalog, "reference_range", None) or "",
+                "specimen": item.specimen_id
+                or getattr(catalog, "sample_type", None) or "",
+                "collected_at": item.sample_collected_at,
+            })
+            if result.interpretation:
+                interpretations.append(result.interpretation)
+            if result.entered_by_staff_id:
+                scientist_ids.add(result.entered_by_staff_id)
+            if result.verified_by_staff_id:
+                approver_ids.add(result.verified_by_staff_id)
+            if result.released_at and (reported_at is None or result.released_at > reported_at):
+                reported_at = result.released_at
+
+        if not rows:
+            raise BadRequestError(
+                message="No released results on this order yet — the report "
+                        "becomes available once the laboratory releases results."
+            )
+
+        def _staff_display(ids: set[int]) -> Optional[str]:
+            if not ids:
+                return None
+            pairs = (
+                self.db.query(StaffProfile, User)
+                .outerjoin(User, User.id == StaffProfile.user_id)
+                .filter(StaffProfile.id.in_(ids)).all()
+            )
+            names = []
+            for sp, u in pairs:
+                n = (f"{getattr(u, 'first_name', '') or ''} "
+                     f"{getattr(u, 'last_name', '') or ''}").strip()
+                names.append(n or sp.staff_no)
+            return ", ".join(sorted(set(names))) or None
+
+        patient_name = ""
+        if patient is not None:
+            patient_name = " ".join(
+                x for x in (patient.first_name, getattr(patient, "middle_name", None),
+                            getattr(patient, "last_name", None)) if x
+            )
+
+        def _ev(v):
+            return getattr(v, "value", v)
+
+        return {
+            "order": order,
+            "order_no": order.order_no,
+            "visit_number": getattr(visit, "visit_number", None) if visit else None,
+            "ordered_at": order.ordered_at,
+            "reported_at": reported_at,
+            "patient": {
+                "id": getattr(patient, "id", None),
+                "name": patient_name or "-",
+                "hospital_number": getattr(patient, "hospital_number", None),
+                "date_of_birth": str(getattr(patient, "date_of_birth", "") or "") or None,
+                "gender": str(_ev(getattr(patient, "gender", "")) or "") or None,
+                "blood_group": str(_ev(getattr(patient, "blood_group", "")) or "") or None,
+                "genotype": str(_ev(getattr(patient, "genotype", "")) or "") or None,
+            },
+            "rows": rows,
+            "interpretation": "\n".join(interpretations) or None,
+            "scientist_name": _staff_display(scientist_ids),
+            "approved_by": _staff_display(approver_ids),
+            "verify_code": verification_code(order.order_no,
+                                             salt=str(reported_at or "")),
+        }
+
+    def list_released_orders_for_patient(self, patient_id: int) -> list[dict]:
+        """Patient-portal listing: released lab orders with per-test rows."""
+        from app.models.all_models import LabOrder, Visit
+
+        orders = (
+            self.db.query(LabOrder)
+            .join(Visit, Visit.id == LabOrder.visit_id)
+            .filter(Visit.patient_id == patient_id,
+                    LabOrder.is_deleted.is_(False))
+            .order_by(LabOrder.ordered_at.desc())
+            .all()
+        )
+        out: list[dict] = []
+        for order in orders:
+            released = []
+            for item in (order.items or []):
+                result = getattr(item, "result", None)
+                if result is None or getattr(result, "released_at", None) is None:
+                    continue
+                catalog = getattr(item, "lab_test_catalog", None)
+                released.append({
+                    "test": getattr(catalog, "name", None) or "Test",
+                    "result": result.result_value or result.result_text or "-",
+                    "unit": result.unit_of_measure or getattr(catalog, "unit_of_measure", None),
+                    "reference_range": result.reference_range
+                    or getattr(catalog, "reference_range", None),
+                    "released_at": result.released_at,
+                })
+            if released:
+                out.append({
+                    "order_id": order.id,
+                    "order_no": order.order_no,
+                    "ordered_at": order.ordered_at,
+                    "visit_id": order.visit_id,
+                    "results": released,
+                })
+        return out
+
     def get(self, result_id: int) -> LabResult:
         return self.repository.get_required_by_id(result_id)
 

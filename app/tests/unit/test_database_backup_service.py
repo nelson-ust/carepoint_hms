@@ -1,386 +1,159 @@
-"""Unit tests for DatabaseBackupService.
+"""Unit tests for TenantBackupService and the backup read schemas.
 
-External dependencies (subprocess.run, S3Service, decrypt_string,
-get_master_db_context, tempfile and os.path) are all patched so the
-tests never touch a real database, network or filesystem.
+These cover the ORM ↔ schema field-name bridge (``file_name`` → ``filename``,
+``format`` → ``pg_dump_format``, ``started_at``/``completed_at`` →
+``backup_started_at``/``backup_finished_at``) and the ``SUCCESS`` →
+``COMPLETED`` status normalization that the dashboard endpoint relies on.
+
+External dependencies are patched — no database, network, or filesystem.
 """
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
-from unittest.mock import MagicMock, mock_open, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
-from app.core.exceptions import BadRequestError, NotFoundError
-from app.services.database_backup_service import DatabaseBackupService
+from app.schemas.database_backup_schemas import (
+    BackupListResponseSchema,
+    DatabaseBackupReadSchema,
+)
+from app.services.tenant_backup_service import TenantBackupService
 
 
-def _make_svc(tenant_code="ACME"):
-    db = MagicMock()
-    return DatabaseBackupService(db, tenant_code), db
+NOW = datetime(2026, 7, 16, 10, 0, tzinfo=timezone.utc)
 
 
-class TestGetBackups:
-    def test_lists_ordered(self):
-        svc, db = _make_svc()
-        db.query.return_value.order_by.return_value.all.return_value = ["b1", "b2"]
-        assert svc.get_backups() == ["b1", "b2"]
+def _orm_row(**overrides):
+    """Build an object shaped like the real ``DatabaseBackup`` ORM model."""
+    base = dict(
+        id=1,
+        file_name="backup_ACME_20260716_100000.dump.enc",
+        s3_url="https://bucket.s3.eu-west-1.amazonaws.com/backups/x.enc",
+        s3_key="backups/x.enc",
+        size_bytes=1024 * 1024,
+        status="SUCCESS",
+        storage_location="S3",
+        error_message=None,
+        is_encrypted=True,
+        encryption_algo="FERNET_AES128",
+        checksum_sha256="ab" * 32,
+        format="custom",
+        schema_only=False,
+        retention_days=30,
+        note=None,
+        started_at=NOW,
+        completed_at=NOW + timedelta(minutes=1),
+        duration_ms=60_000,
+        backup_type="FULL",
+        triggered_by="MANUAL",
+        retention_until=NOW + timedelta(days=30),
+        date_created=NOW,
+    )
+    base.update(overrides)
+    return SimpleNamespace(**base)
 
 
-class TestGetBackupById:
-    def test_returns_record(self):
-        svc, db = _make_svc()
-        rec = SimpleNamespace(id=1)
-        db.query.return_value.filter.return_value.first.return_value = rec
-        assert svc.get_backup_by_id(1) is rec
+class TestDatabaseBackupReadSchema:
+    def test_maps_orm_attribute_names(self):
+        m = DatabaseBackupReadSchema.model_validate(_orm_row(), from_attributes=True)
+        assert m.filename == "backup_ACME_20260716_100000.dump.enc"
+        assert m.pg_dump_format == "custom"
+        assert m.backup_started_at == NOW
+        assert m.backup_finished_at == NOW + timedelta(minutes=1)
 
-    def test_raises_when_missing(self):
-        svc, db = _make_svc()
-        db.query.return_value.filter.return_value.first.return_value = None
-        with pytest.raises(NotFoundError, match="Backup record not found"):
-            svc.get_backup_by_id(99)
+    def test_normalizes_success_to_completed(self):
+        m = DatabaseBackupReadSchema.model_validate(_orm_row(status="SUCCESS"), from_attributes=True)
+        assert m.status == "COMPLETED"
 
-
-# ── prepare_download_file ────────────────────────────────────────────
-
-class TestPrepareDownloadFile:
-    def test_raises_when_backup_not_found(self):
-        svc, db = _make_svc()
-        db.query.return_value.filter.return_value.first.return_value = None
-        with pytest.raises(NotFoundError, match="Backup record not found"):
-            svc.prepare_download_file(99)
-
-    def test_raises_when_backup_not_completed(self):
-        svc, db = _make_svc()
-        backup = SimpleNamespace(id=1, status="PENDING", filename="x.dump")
-        db.query.return_value.filter.return_value.first.return_value = backup
-        with pytest.raises(BadRequestError, match="not completed"):
-            svc.prepare_download_file(1)
-
-    @patch("app.services.database_backup_service.os.path.getsize", return_value=2048)
-    @patch("app.services.database_backup_service.os.path.exists", return_value=True)
-    @patch("app.services.database_backup_service.tempfile.gettempdir", return_value="/tmp")
-    @patch("app.services.database_backup_service.S3Service")
-    @patch("app.services.database_backup_service.get_master_db_context")
-    def test_downloads_unencrypted_backup(
-        self, mock_ctx, mock_s3_cls, mock_tempdir, mock_exists, mock_getsize,
-    ):
-        """Unencrypted backup is served directly without decryption."""
-        svc, db = _make_svc()
-        backup = SimpleNamespace(
-            id=1,
-            status="COMPLETED",
-            filename="backup_ACME.dump",
-            s3_key="backups/backup_ACME.dump",
-            is_encrypted=False,
-            checksum_sha256="sha256hash",
+    def test_accepts_api_field_names(self):
+        m = DatabaseBackupReadSchema.model_validate(
+            {"id": 3, "filename": "b.dump", "status": "COMPLETED", "date_created": NOW}
         )
-        db.query.return_value.filter.return_value.first.return_value = backup
+        assert m.filename == "b.dump"
+        assert m.status == "COMPLETED"
 
-        master = MagicMock()
-        mock_ctx.return_value.__enter__.return_value = master
-        tenant = SimpleNamespace(
-            id=1, code="ACME", db_connection_string="ENC", aws_s3_bucket_name="bkt",
+    def test_tolerates_null_legacy_columns(self):
+        row = _orm_row(
+            file_name=None, status=None, storage_location=None,
+            backup_type=None, format=None, triggered_by=None,
         )
-        master.query.return_value.filter.return_value.first.return_value = tenant
-
-        s3_inst = MagicMock()
-        s3_inst.is_enabled = True
-        mock_s3_cls.return_value = s3_inst
-
-        result = svc.prepare_download_file(1)
-
-        assert result["file_path"] == "/tmp/dl_1_backup_ACME.dump"
-        assert result["filename"] == "backup_ACME.dump"
-        assert result["size_bytes"] == 2048
-        assert result["checksum_sha256"] == "sha256hash"
-        assert result["media_type"] == "application/octet-stream"
-        assert "/tmp/dl_1_backup_ACME.dump" in result["cleanup_paths"]
-        s3_inst.s3_client.download_file.assert_called_once_with(
-            "bkt", "backups/backup_ACME.dump", "/tmp/dl_1_backup_ACME.dump",
-        )
-
-    @patch("app.services.database_backup_service.os.path.getsize", return_value=1024)
-    @patch("app.services.database_backup_service.os.path.exists", return_value=True)
-    @patch("app.services.database_backup_service.tempfile.gettempdir", return_value="/tmp")
-    @patch("app.services.database_backup_service.S3Service")
-    @patch("app.services.database_backup_service.get_master_db_context")
-    def test_decrypts_encrypted_backup(
-        self, mock_ctx, mock_s3_cls, mock_tempdir, mock_exists, mock_getsize,
-    ):
-        """Encrypted backup is decrypted before being served."""
-        svc, db = _make_svc()
-        backup = SimpleNamespace(
-            id=2,
-            status="COMPLETED",
-            filename="backup_ACME.dump.enc",
-            s3_key="backups/backup_ACME.dump.enc",
-            is_encrypted=True,
-            checksum_sha256="origchecksum",
-        )
-        db.query.return_value.filter.return_value.first.return_value = backup
-
-        master = MagicMock()
-        mock_ctx.return_value.__enter__.return_value = master
-        tenant = SimpleNamespace(
-            id=1, code="ACME", db_connection_string="ENC", aws_s3_bucket_name="bkt",
-        )
-        master.query.return_value.filter.return_value.first.return_value = tenant
-
-        s3_inst = MagicMock()
-        s3_inst.is_enabled = True
-        mock_s3_cls.return_value = s3_inst
-
-        fake_encrypted = b"ENCRYPTED_BYTES"
-        fake_decrypted = b"DECRYPTED_BYTES"
-        m_open = mock_open(read_data=fake_encrypted)
-
-        with patch("builtins.open", m_open), \
-             patch(
-                 "app.core.cryptography.decrypt_bytes",
-                 return_value=fake_decrypted,
-             ) as mock_decrypt:
-            result = svc.prepare_download_file(2)
-
-        # decrypt_bytes was called with the encrypted content
-        mock_decrypt.assert_called_once_with(fake_encrypted)
-        # The .enc suffix is stripped from the download filename
-        assert result["filename"] == "backup_ACME.dump"
-        # The serve path is the .dec file
-        assert result["file_path"] == "/tmp/dl_2_backup_ACME.dump.enc.dec"
-        # Both temp files are in cleanup list
-        assert "/tmp/dl_2_backup_ACME.dump.enc" in result["cleanup_paths"]
-        assert "/tmp/dl_2_backup_ACME.dump.enc.dec" in result["cleanup_paths"]
-
-    @patch("app.services.database_backup_service.os.path.exists", return_value=False)
-    @patch("app.services.database_backup_service.tempfile.gettempdir", return_value="/tmp")
-    @patch("app.services.database_backup_service.S3Service")
-    @patch("app.services.database_backup_service.get_master_db_context")
-    def test_raises_when_s3_disabled_and_local_missing(
-        self, mock_ctx, mock_s3_cls, mock_tempdir, mock_exists,
-    ):
-        """S3 disabled and no local copy raises BadRequestError."""
-        svc, db = _make_svc()
-        backup = SimpleNamespace(
-            id=3, status="COMPLETED", filename="b.dump",
-            s3_key="backups/b.dump", is_encrypted=False, checksum_sha256=None,
-        )
-        db.query.return_value.filter.return_value.first.return_value = backup
-
-        master = MagicMock()
-        mock_ctx.return_value.__enter__.return_value = master
-        tenant = SimpleNamespace(
-            id=1, code="ACME", db_connection_string="ENC", aws_s3_bucket_name="bkt",
-        )
-        master.query.return_value.filter.return_value.first.return_value = tenant
-
-        s3_inst = MagicMock()
-        s3_inst.is_enabled = False
-        mock_s3_cls.return_value = s3_inst
-
-        with pytest.raises(BadRequestError, match="could not be retrieved"):
-            svc.prepare_download_file(3)
+        m = DatabaseBackupReadSchema.model_validate(row, from_attributes=True)
+        assert m.filename is None
+        assert m.status == "PENDING"
+        assert m.storage_location == "LOCAL"
+        assert m.backup_type == "FULL"
+        assert m.pg_dump_format == "custom"
+        assert m.triggered_by == "MANUAL"
 
 
-# ── Trigger / Restore (existing tests) ───────────────────────────────
+class TestGetBackupDashboardData:
+    def _svc(self):
+        return TenantBackupService(MagicMock(), tenant_code="ACME")
 
-class TestTriggerBackup:
-    @patch("app.services.database_backup_service.get_master_db_context")
-    def test_raises_when_tenant_missing(self, mock_ctx):
-        svc, db = _make_svc()
-        master = MagicMock()
-        mock_ctx.return_value.__enter__.return_value = master
-        master.query.return_value.filter.return_value.first.return_value = None
-        with pytest.raises(NotFoundError, match="Tenant not found"):
-            svc.trigger_backup()
+    def test_counts_success_rows_as_recovery_points(self):
+        rows = [
+            _orm_row(id=2, status="SUCCESS", size_bytes=2 * 1024**3, completed_at=NOW),
+            _orm_row(id=1, status="FAILED", size_bytes=None),
+        ]
+        with patch(
+            "app.services.tenant_backup_service.DatabaseBackupRepository"
+        ) as repo_cls:
+            repo_cls.return_value.get_all.return_value = rows
+            data = self._svc().get_backup_dashboard_data()
 
-    @patch("app.services.database_backup_service.os.remove")
-    @patch("app.services.database_backup_service.os.path.exists", return_value=False)
-    @patch("app.services.database_backup_service.os.path.getsize", return_value=4096)
-    @patch("app.services.database_backup_service.tempfile.gettempdir", return_value="/tmp")
-    @patch("app.services.database_backup_service.S3Service")
-    @patch("app.services.database_backup_service.subprocess.run")
-    @patch("app.services.database_backup_service.decrypt_string",
-           return_value="postgresql+psycopg2://u:p@h/db")
-    @patch("app.services.database_backup_service.get_master_db_context")
-    def test_records_failed_status_when_pg_dump_fails(
-        self, mock_ctx, mock_decrypt, mock_run, mock_s3_cls,
-        mock_tempdir, mock_size, mock_exists, mock_remove
-    ):
-        svc, db = _make_svc()
-        master = MagicMock()
-        mock_ctx.return_value.__enter__.return_value = master
-        tenant = SimpleNamespace(
-            id=1,
-            code="ACME",
-            db_connection_string="ENC",
-            aws_s3_bucket_name="bkt",
-        )
-        master.query.return_value.filter.return_value.first.return_value = tenant
-        # pg_dump returns non-zero
-        mock_run.return_value = SimpleNamespace(returncode=1, stderr="explosion")
-        result = svc.trigger_backup()
-        assert result.status == "FAILED"
-        assert "explosion" in (result.error_message or "")
-        # S3 never reached
-        mock_s3_cls.return_value.s3_client.upload_fileobj.assert_not_called()
+        assert data["summary"]["recovery_points_count"] == 1
+        assert data["summary"]["storage_usage_gb"] == 2.0
+        assert data["summary"]["last_backup_at"] == NOW
+        assert data["summary"]["health_status"] == "Degraded"
 
-    @patch("app.services.database_backup_service.os.remove")
-    @patch("app.services.database_backup_service.os.path.exists", return_value=True)
-    @patch("app.services.database_backup_service.os.path.getsize", return_value=4096)
-    @patch("app.services.database_backup_service.tempfile.gettempdir", return_value="/tmp")
-    @patch("app.services.database_backup_service.S3Service")
-    @patch("app.services.database_backup_service.subprocess.run")
-    @patch("app.services.database_backup_service.decrypt_string",
-           return_value="postgresql+psycopg2://u:p@h/db")
-    @patch("app.services.database_backup_service.get_master_db_context")
-    def test_happy_path_uploads_to_s3(
-        self, mock_ctx, mock_decrypt, mock_run, mock_s3_cls,
-        mock_tempdir, mock_size, mock_exists, mock_remove
-    ):
-        svc, db = _make_svc()
-        master = MagicMock()
-        mock_ctx.return_value.__enter__.return_value = master
-        tenant = SimpleNamespace(
-            id=1,
-            code="ACME",
-            db_connection_string="ENC",
-            aws_s3_bucket_name="bkt",
-        )
-        master.query.return_value.filter.return_value.first.return_value = tenant
-        mock_run.return_value = SimpleNamespace(returncode=0, stderr="")
-        s3_inst = MagicMock()
-        s3_inst.is_enabled = True
-        s3_inst.region = "us-east-1"
-        mock_s3_cls.return_value = s3_inst
-        with patch("builtins.open", new=MagicMock()):
-            result = svc.trigger_backup()
-        assert result.status == "COMPLETED"
-        assert result.size_bytes == 4096
-        assert "https://bkt.s3.us-east-1.amazonaws.com/backups/" in result.s3_url
-        s3_inst.s3_client.upload_fileobj.assert_called_once()
+    def test_serializes_end_to_end(self):
+        rows = [_orm_row()]
+        with patch(
+            "app.services.tenant_backup_service.DatabaseBackupRepository"
+        ) as repo_cls:
+            repo_cls.return_value.get_all.return_value = rows
+            data = self._svc().get_backup_dashboard_data()
 
-    @patch("app.services.database_backup_service.os.remove")
-    @patch("app.services.database_backup_service.os.path.exists", return_value=True)
-    @patch("app.services.database_backup_service.os.path.getsize", return_value=512)
-    @patch("app.services.database_backup_service.tempfile.gettempdir", return_value="/tmp")
-    @patch("app.services.database_backup_service.S3Service")
-    @patch("app.services.database_backup_service.subprocess.run")
-    @patch("app.services.database_backup_service.decrypt_string",
-           return_value="postgresql+psycopg2://u:p@h/db")
-    @patch("app.services.database_backup_service.get_master_db_context")
-    def test_disabled_s3_uses_mocked_url(
-        self, mock_ctx, mock_decrypt, mock_run, mock_s3_cls,
-        mock_tempdir, mock_size, mock_exists, mock_remove
-    ):
-        svc, db = _make_svc()
-        master = MagicMock()
-        mock_ctx.return_value.__enter__.return_value = master
-        tenant = SimpleNamespace(
-            id=1,
-            code="ACME",
-            db_connection_string="ENC",
-            aws_s3_bucket_name=None,
-        )
-        master.query.return_value.filter.return_value.first.return_value = tenant
-        mock_run.return_value = SimpleNamespace(returncode=0, stderr="")
-        s3_inst = MagicMock()
-        s3_inst.is_enabled = False
-        mock_s3_cls.return_value = s3_inst
-        result = svc.trigger_backup()
-        assert result.status == "COMPLETED"
-        assert "mocked-s3-bucket" in result.s3_url
-        s3_inst.s3_client.upload_fileobj.assert_not_called()
+        # This is exactly what the /backups/dashboard response_model does.
+        envelope = BackupListResponseSchema.model_validate(data, from_attributes=True)
+        assert envelope.backups[0].filename == rows[0].file_name
+        assert envelope.backups[0].status == "COMPLETED"
+
+    def test_degrades_gracefully_when_query_fails(self):
+        with patch(
+            "app.services.tenant_backup_service.DatabaseBackupRepository"
+        ) as repo_cls:
+            repo_cls.return_value.get_all.side_effect = RuntimeError("no table")
+            data = self._svc().get_backup_dashboard_data()
+
+        assert data["backups"] == []
+        assert data["summary"]["health_status"] == "Unknown"
 
 
-class TestRestoreBackup:
-    @patch("app.services.database_backup_service.get_master_db_context")
-    def test_rejects_non_completed_backup(self, mock_ctx):
-        svc, db = _make_svc()
-        backup = SimpleNamespace(id=1, status="FAILED", filename="x.dump")
-        db.query.return_value.filter.return_value.first.return_value = backup
-        with pytest.raises(BadRequestError, match="failed or pending"):
-            svc.restore_backup(1)
+class TestGetDownloadLink:
+    def test_accepts_success_status(self):
+        svc = TenantBackupService(MagicMock(), tenant_code="ACME")
+        record = _orm_row(status="SUCCESS")
+        svc.tenant_db.query.return_value.filter.return_value.first.return_value = record
 
-    @patch("app.services.database_backup_service.os.remove")
-    @patch("app.services.database_backup_service.os.path.exists", return_value=False)
-    @patch("app.services.database_backup_service.tempfile.gettempdir", return_value="/tmp")
-    @patch("app.services.database_backup_service.S3Service")
-    @patch("app.services.database_backup_service.decrypt_string",
-           return_value="postgresql+psycopg2://u:p@h/db")
-    @patch("app.services.database_backup_service.get_master_db_context")
-    def test_returns_simulated_when_s3_disabled_and_local_missing(
-        self, mock_ctx, mock_decrypt, mock_s3_cls, mock_tempdir, mock_exists, mock_remove
-    ):
-        svc, db = _make_svc()
-        backup = SimpleNamespace(id=1, status="COMPLETED", filename="x.dump")
-        db.query.return_value.filter.return_value.first.return_value = backup
-        master = MagicMock()
-        mock_ctx.return_value.__enter__.return_value = master
-        tenant = SimpleNamespace(
-            id=1, code="ACME", db_connection_string="ENC", aws_s3_bucket_name="bkt"
-        )
-        master.query.return_value.filter.return_value.first.return_value = tenant
-        s3_inst = MagicMock()
-        s3_inst.is_enabled = False
-        mock_s3_cls.return_value = s3_inst
-        out = svc.restore_backup(1)
+        tenant = SimpleNamespace(aws_s3_bucket_name="bucket")
+        master_ctx = MagicMock()
+        master_ctx.__enter__.return_value.query.return_value.filter.return_value.first.return_value = tenant
+
+        with patch("app.services.tenant_backup_service.get_master_db_context", return_value=master_ctx), \
+             patch("app.services.aws_s3_service.S3Service") as s3_cls:
+            s3_cls.return_value.generate_presigned_url.return_value = "https://signed"
+            out = svc.get_download_link(1)
+
         assert out["success"] is True
-        assert "simulated" in out["message"].lower()
+        assert out["filename"] == record.file_name
 
-    @patch("app.services.database_backup_service.os.remove")
-    @patch("app.services.database_backup_service.os.path.exists", return_value=True)
-    @patch("app.services.database_backup_service.tempfile.gettempdir", return_value="/tmp")
-    @patch("app.services.database_backup_service.subprocess.run")
-    @patch("app.services.database_backup_service.S3Service")
-    @patch("app.services.database_backup_service.decrypt_string",
-           return_value="postgresql+psycopg2://u:p@h/db")
-    @patch("app.services.database_backup_service.get_master_db_context")
-    def test_pg_restore_failure_raises_bad_request(
-        self, mock_ctx, mock_decrypt, mock_s3_cls, mock_run,
-        mock_tempdir, mock_exists, mock_remove
-    ):
-        svc, db = _make_svc()
-        backup = SimpleNamespace(id=1, status="COMPLETED", filename="x.dump")
-        db.query.return_value.filter.return_value.first.return_value = backup
-        master = MagicMock()
-        mock_ctx.return_value.__enter__.return_value = master
-        tenant = SimpleNamespace(
-            id=1, code="ACME", db_connection_string="ENC", aws_s3_bucket_name="bkt"
-        )
-        master.query.return_value.filter.return_value.first.return_value = tenant
-        s3_inst = MagicMock()
-        s3_inst.is_enabled = True
-        mock_s3_cls.return_value = s3_inst
-        mock_run.return_value = SimpleNamespace(returncode=1, stderr="boom")
-        with pytest.raises(BadRequestError, match="Restore"):
-            svc.restore_backup(1)
+    def test_rejects_pending_status(self):
+        from app.core.exceptions import BadRequestError
 
-    @patch("app.services.database_backup_service.os.remove")
-    @patch("app.services.database_backup_service.os.path.exists", return_value=True)
-    @patch("app.services.database_backup_service.tempfile.gettempdir", return_value="/tmp")
-    @patch("app.services.database_backup_service.subprocess.run")
-    @patch("app.services.database_backup_service.S3Service")
-    @patch("app.services.database_backup_service.decrypt_string",
-           return_value="postgresql+psycopg2://u:p@h/db")
-    @patch("app.services.database_backup_service.get_master_db_context")
-    def test_happy_restore(
-        self, mock_ctx, mock_decrypt, mock_s3_cls, mock_run,
-        mock_tempdir, mock_exists, mock_remove
-    ):
-        svc, db = _make_svc()
-        backup = SimpleNamespace(id=1, status="COMPLETED", filename="x.dump")
-        db.query.return_value.filter.return_value.first.return_value = backup
-        master = MagicMock()
-        mock_ctx.return_value.__enter__.return_value = master
-        tenant = SimpleNamespace(
-            id=1, code="ACME", db_connection_string="ENC", aws_s3_bucket_name="bkt"
-        )
-        master.query.return_value.filter.return_value.first.return_value = tenant
-        s3_inst = MagicMock()
-        s3_inst.is_enabled = True
-        mock_s3_cls.return_value = s3_inst
-        mock_run.return_value = SimpleNamespace(returncode=0, stderr="")
-        out = svc.restore_backup(1)
-        assert out["success"] is True
-        s3_inst.s3_client.download_file.assert_called_once()
+        svc = TenantBackupService(MagicMock(), tenant_code="ACME")
+        svc.tenant_db.query.return_value.filter.return_value.first.return_value = _orm_row(status="PENDING")
+        with pytest.raises(BadRequestError, match="not downloadable"):
+            svc.get_download_link(1)

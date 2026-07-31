@@ -1,7 +1,7 @@
 from typing import List, Optional, Tuple
 
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from app.models.all_models import ReimbursementRequest
 from app.schemas.reimbursement_schemas import ReimbursementCreateSchema, ReimbursementUpdateSchema
@@ -11,12 +11,16 @@ class ReimbursementRepository:
         self.db = db
 
     def get_by_id(self, request_id: int) -> Optional[ReimbursementRequest]:
-        return self.db.scalars(select(ReimbursementRequest).where(ReimbursementRequest.id == request_id)).first()
+        return self.db.scalars(
+            select(ReimbursementRequest)
+            .options(selectinload(ReimbursementRequest.account))
+            .where(ReimbursementRequest.id == request_id)
+        ).first()
 
     def list_requests(
         self, staff_profile_id: Optional[int] = None, skip: int = 0, limit: int = 100
     ) -> Tuple[List[ReimbursementRequest], int]:
-        stmt = select(ReimbursementRequest)
+        stmt = select(ReimbursementRequest).options(selectinload(ReimbursementRequest.account))
         if staff_profile_id:
             stmt = stmt.where(ReimbursementRequest.staff_profile_id == staff_profile_id)
         
@@ -33,7 +37,8 @@ class ReimbursementRepository:
             amount=data.amount,
             category=data.category,
             description=data.description,
-            receipt_url=data.receipt_url
+            receipt_url=data.receipt_url,
+            account_id=data.account_id,
         )
         self.db.add(req)
         self.db.commit()
@@ -51,6 +56,8 @@ class ReimbursementRepository:
             req.description = data.description
         if data.receipt_url is not None:
             req.receipt_url = data.receipt_url
+        if data.account_id is not None:
+            req.account_id = data.account_id
             
         self.db.commit()
         self.db.refresh(req)

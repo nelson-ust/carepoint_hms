@@ -9,7 +9,8 @@ from app.schemas.timesheet_schemas import (
     TimesheetCreateSchema,
     TimesheetReadSchema,
     TimesheetUpdateSchema,
-    TimesheetSubmitSchema
+    TimesheetSubmitSchema,
+    TimesheetSelfCreateSchema,
 )
 from app.services.timesheet_service import TimesheetService
 
@@ -59,6 +60,74 @@ def list_timesheets(
         "total": total,
         "items": [TimesheetReadSchema.model_validate(t) for t in items],
     }
+
+@router.get(
+    "/me",
+    response_model=dict[str, Any],
+    status_code=status.HTTP_200_OK,
+    summary="List my own timesheets",
+)
+def list_my_timesheets(
+    service: Annotated[TimesheetService, Depends(get_timesheet_service)],
+    current_user: CurrentActiveUser,
+    skip: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=1000),
+):
+    items, total = service.list_my_timesheets(user_id=current_user.id, skip=skip, limit=limit)
+    return {
+        "success": True,
+        "total": total,
+        "items": [TimesheetReadSchema.model_validate(t) for t in items],
+    }
+
+@router.post(
+    "/me",
+    response_model=dict[str, Any],
+    status_code=status.HTTP_201_CREATED,
+    summary="Create my own timesheet",
+)
+def create_my_timesheet(
+    payload: TimesheetSelfCreateSchema,
+    service: Annotated[TimesheetService, Depends(get_timesheet_service)],
+    current_user: CurrentActiveUser,
+):
+    timesheet = service.create_my_timesheet(payload, user_id=current_user.id)
+    return {
+        "success": True,
+        "message": "Timesheet created successfully.",
+        "timesheet": TimesheetReadSchema.model_validate(timesheet),
+    }
+
+@router.post(
+    "/me/{timesheet_id}/submit",
+    response_model=dict[str, Any],
+    status_code=status.HTTP_200_OK,
+    summary="Submit my own timesheet for approval",
+)
+def submit_my_timesheet(
+    timesheet_id: int,
+    payload: TimesheetSubmitSchema,
+    service: Annotated[TimesheetService, Depends(get_timesheet_service)],
+    current_user: CurrentActiveUser,
+):
+    timesheet = service.submit_my_timesheet(timesheet_id, payload, user_id=current_user.id)
+    return {
+        "success": True,
+        "message": "Timesheet submitted for approval.",
+        "timesheet": TimesheetReadSchema.model_validate(timesheet),
+    }
+
+@router.delete(
+    "/me/{timesheet_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Delete my own draft timesheet",
+)
+def delete_my_timesheet(
+    timesheet_id: int,
+    service: Annotated[TimesheetService, Depends(get_timesheet_service)],
+    current_user: CurrentActiveUser,
+):
+    service.delete_my_timesheet(timesheet_id, user_id=current_user.id)
 
 @router.get(
     "/{timesheet_id}",

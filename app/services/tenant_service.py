@@ -49,6 +49,15 @@ except ImportError:
     send_email = None
 
 try:
+    from app.utils.email_utils import (
+        render_branded_email,
+        render_branded_email_text,
+    )
+except ImportError:  # pragma: no cover - renderer is optional
+    render_branded_email = None
+    render_branded_email_text = None
+
+try:
     from app.utils.sms_util import send_sms
 except ImportError:
     send_sms = None
@@ -293,27 +302,57 @@ class TenantService:
             or tenant.billing_contact_name
             or tenant.name
         )
+        details = [
+            ("Organisation", tenant.name),
+            ("Tenant code", tenant.code),
+            ("Primary domain", tenant.domain_url),
+            ("Subscription plan", payload.plan_code),
+            ("Admin username", payload.admin_username),
+            ("Admin email", payload.admin_email),
+        ]
+        paragraphs = [
+            f"Hello {applicant_name},",
+            f"Thank you for registering {tenant.name} with CarePoint HMS. Your "
+            f"application has been received and is now being reviewed by our "
+            f"administration team.",
+            "We've summarised the details you submitted below for your records. "
+            "You'll receive a follow-up email the moment your registration is "
+            "approved and your workspace is provisioned — at which point you can "
+            f"sign in at https://{tenant.domain_url} with the username above and "
+            "the password you chose during registration.",
+        ]
+        footer_note = (
+            "If you did not initiate this registration, or you need to make "
+            "changes before approval, simply reply to this email."
+        )
+        _kw = dict(
+            title="Registration received",
+            body_paragraphs=paragraphs,
+            details=details,
+            details_heading="Your registration",
+            highlight_label="Application status",
+            highlight_value="Pending approval",
+            highlight_caption="No action is needed from you right now.",
+            footer_note=footer_note,
+            preheader=f"We've received your CarePoint HMS registration for {tenant.name}.",
+        )
         body = (
-            f"Hello {applicant_name},\n\n"
-            f"Thank you for registering {tenant.name} with CarePoint HMS.\n\n"
-            f"Your application has been received and is currently being "
-            f"reviewed by our SaaS administration team. The information "
-            f"you submitted is summarised below for your records:\n\n"
-            f"  Tenant name:     {tenant.name}\n"
-            f"  Tenant code:     {tenant.code}\n"
-            f"  Primary domain:  {tenant.domain_url}\n"
-            f"  Subscription:    {payload.plan_code}\n"
-            f"  Admin email:     {payload.admin_email}\n"
-            f"\n"
-            f"You will receive a follow-up email as soon as your "
-            f"registration is approved and your tenant environment is "
-            f"provisioned. At that point you'll be able to sign in at "
-            f"https://{tenant.domain_url} with the username "
-            f"'{payload.admin_username}' and the password you supplied "
-            f"during registration.\n\n"
-            f"If you did not initiate this registration, or you need to "
-            f"make changes before approval, please reply to this email.\n\n"
-            f"— The CarePoint HMS Team"
+            render_branded_email_text(**_kw)
+            if render_branded_email_text is not None
+            else (
+                f"Hello {applicant_name},\n\n"
+                f"Thank you for registering {tenant.name} with CarePoint HMS. "
+                f"Your application is being reviewed.\n\n"
+                f"  Tenant code:     {tenant.code}\n"
+                f"  Primary domain:  {tenant.domain_url}\n"
+                f"  Subscription:    {payload.plan_code}\n"
+                f"  Admin username:  {payload.admin_username}\n\n"
+                f"You'll be notified once your workspace is provisioned.\n\n"
+                f"— The CarePoint HMS Team"
+            )
+        )
+        body_html = (
+            render_branded_email(**_kw) if render_branded_email is not None else None
         )
 
         if send_email is None:
@@ -330,6 +369,7 @@ class TenantService:
                     subject=subject,
                     recipients=[recipient],
                     body_text=body,
+                    body_html=body_html,
                 )
                 logger.info(
                     "Registration acknowledgement sent to %s for tenant %s.",
@@ -386,23 +426,53 @@ class TenantService:
             )
 
         subject = f"Your CarePoint HMS tenant is now active — {tenant.name}"
+        sign_in_url = f"https://{tenant.domain_url}"
+        details = [
+            ("Tenant code", tenant.code),
+            ("Admin username", admin_username),
+            ("Sign-in URL", sign_in_url),
+        ]
+        paragraphs = [
+            f"Hello {admin_first_name},",
+            f"Great news — your CarePoint HMS registration for {tenant.name} has "
+            "been approved and your workspace is now live.",
+            "Use the password you supplied during registration to sign in. For "
+            "your security, we recommend updating it on first sign-in and enabling "
+            "two-factor authentication from your profile.",
+        ]
+        footer_note = (
+            "Invoices, payment receipts and renewal reminders will be sent to your "
+            "billing contact"
+            f"{(' at ' + tenant.billing_email) if tenant.billing_email else ''}."
+        )
+        _kw = dict(
+            title="Your workspace is live",
+            intro=f"{tenant.name} is ready on CarePoint HMS.",
+            body_paragraphs=paragraphs,
+            details=details,
+            details_heading="Sign-in details",
+            cta_label="Sign in to CarePoint HMS",
+            cta_url=sign_in_url,
+            footer_note=footer_note,
+            preheader=f"Your CarePoint HMS workspace for {tenant.name} is now live.",
+        )
         body = (
-            f"Hello {admin_first_name},\n\n"
-            f"Great news — your CarePoint HMS registration for "
-            f"{tenant.name} has been approved and your tenant environment "
-            f"is now live.\n\n"
-            f"  Sign-in URL:   https://{tenant.domain_url}\n"
-            f"  Tenant code:   {tenant.code}\n"
-            f"  Admin user:    {admin_username}\n"
-            f"\n"
-            f"Use the password you supplied during registration to sign "
-            f"in. We strongly recommend updating it on first use, and "
-            f"enabling two-factor authentication from your profile.\n\n"
-            f"Invoices, payment receipts, and renewal reminders will be "
-            f"sent to your billing contact"
-            f"{(' at ' + tenant.billing_email) if tenant.billing_email else ''}.\n\n"
-            f"Welcome aboard.\n\n"
-            f"— The CarePoint HMS Team"
+            render_branded_email_text(**_kw)
+            if render_branded_email_text is not None
+            else (
+                f"Hello {admin_first_name},\n\n"
+                f"Your CarePoint HMS registration for {tenant.name} has been "
+                f"approved and your workspace is now live.\n\n"
+                f"  Sign-in URL:   {sign_in_url}\n"
+                f"  Tenant code:   {tenant.code}\n"
+                f"  Admin user:    {admin_username}\n\n"
+                f"Use the password you supplied during registration to sign in.\n\n"
+                f"Welcome aboard.\n\n"
+                f"— The CarePoint HMS Team"
+            )
+        )
+        body_html = (
+            render_branded_email(**_kw) if render_branded_email is not None else None
         )
 
         if send_email is None:
@@ -419,6 +489,7 @@ class TenantService:
                     subject=subject,
                     recipients=[recipient],
                     body_text=body,
+                    body_html=body_html,
                 )
                 logger.info(
                     "Approval notification sent to %s for tenant %s.",
@@ -479,6 +550,32 @@ class TenantService:
 
         self.db.commit()
 
+    def _record_step(self, tenant: Tenant, step: str, detail: str = "",
+                     step_status: str = "COMPLETED", *, reset: bool = False) -> None:
+        """Append an entry to the tenant's provisioning-step log (shown in the
+        SaaS console modal). Best-effort — never fails provisioning itself."""
+        from datetime import datetime, timezone
+        try:
+            steps = [] if reset else list(tenant.provisioning_steps or [])
+            steps.append({
+                "step": step,
+                "detail": detail,
+                "status": step_status,
+                "at": datetime.now(timezone.utc).isoformat(),
+            })
+            tenant.provisioning_steps = steps
+            try:
+                from sqlalchemy.orm.attributes import flag_modified
+                flag_modified(tenant, "provisioning_steps")
+            except Exception:
+                pass
+            self.db.commit()
+        except Exception:
+            try:
+                self.db.rollback()
+            except Exception:
+                pass
+
     def provision_tenant(
         self,
         tenant_id: int,
@@ -514,6 +611,11 @@ class TenantService:
         if tenant.is_provisioned:
             return tenant
 
+        self._record_step(tenant, "Provisioning Started",
+                          f"Approval accepted for {tenant.name}", reset=True)
+        self._record_step(tenant, "Create Database",
+                          f"Creating {tenant.db_name}", "IN_PROGRESS")
+
         # 1. Physically create the database (or schema fallback on managed PG).
         # ``create_new_database`` already handles the privilege-error
         # cascade — it tries CREATE DATABASE and falls back to CREATE
@@ -527,9 +629,11 @@ class TenantService:
                 "Tenant database provisioning failed for %s",
                 tenant.code,
             )
+            self._record_step(tenant, "Create Database", str(e)[:300], "FAILED")
             raise BadRequestError(
                 message=f"Failed to create tenant database: {str(e)}"
             )
+        self._record_step(tenant, "Create Database", f"Database {tenant.db_name} ready")
 
         # 2. Initialize Tenant Database (Tables + Seeds)
         # Re-derive the correct URL at provision time using the current
@@ -545,6 +649,7 @@ class TenantService:
         tenant.db_connection_string = _enc(db_url)
         self.db.commit()  # Save the new URL early
 
+        self._record_step(tenant, "Run Migrations", "Creating tables and syncing schema", "IN_PROGRESS")
         try:
             run_tenant_initialization(db_url, create_default_admin=False)
         except Exception as e:
@@ -552,27 +657,38 @@ class TenantService:
                 "Tenant initialization failed for %s",
                 tenant.code,
             )
+            self._record_step(tenant, "Run Migrations", str(e)[:300], "FAILED")
             raise BadRequestError(
                 message=f"Failed to initialize tenant database: {str(e)}"
             )
+        self._record_step(tenant, "Run Migrations", "Schema created")
+        self._record_step(tenant, "Seed Defaults", "Roles, permissions and defaults created")
 
         # 3. Create Admin User in the new Tenant Database
-        if admin_payload:
-            self._create_tenant_admin(db_url, admin_payload=admin_payload)
-        elif tenant.onboarding_data:
-            self._create_tenant_admin(db_url, onboarding_data=tenant.onboarding_data)
-        else:
-            raise BadRequestError(message="No admin user details found for provisioning.")
+        try:
+            if admin_payload:
+                self._create_tenant_admin(db_url, admin_payload=admin_payload)
+            elif tenant.onboarding_data:
+                self._create_tenant_admin(db_url, onboarding_data=tenant.onboarding_data)
+            else:
+                raise BadRequestError(message="No admin user details found for provisioning.")
+        except Exception as e:
+            self._record_step(tenant, "Create Admin User", str(e)[:300], "FAILED")
+            raise
+        self._record_step(tenant, "Create Admin User", "Tenant administrator account created")
 
         # 4. Bootstrap TenantSetting (branding/regional defaults) in the tenant DB.
         try:
             self._bootstrap_tenant_settings(db_url)
+            self._record_step(tenant, "Bootstrap Settings", "Branding and regional defaults applied")
         except Exception as exc:
             logger.warning(f"Failed to bootstrap TenantSetting for {tenant.code}: {exc}")
+            self._record_step(tenant, "Bootstrap Settings", str(exc)[:300], "SKIPPED")
 
         # 5. Update Status in Master DB
         tenant.status = UserStatus.ACTIVE
         tenant.is_provisioned = True
+        self._record_step(tenant, "Activate Tenant", "Tenant marked ACTIVE and provisioned")
 
         # 6. Update subscription status. Preserve TRIALING state so the trial
         # window keeps running; only PENDING subscriptions become ACTIVE.
@@ -588,26 +704,70 @@ class TenantService:
             bucket_name = s3_service.create_tenant_bucket(tenant.code)
             if bucket_name:
                 tenant.aws_s3_bucket_name = bucket_name
+                self._record_step(tenant, "Provision S3 Bucket", f"Bucket {bucket_name} ready")
+            else:
+                self._record_step(tenant, "Provision S3 Bucket",
+                                  s3_service.last_error or "S3 disabled in this environment", "SKIPPED")
         except Exception as exc:
             logger.warning(f"S3 bucket provisioning skipped for {tenant.code}: {exc}")
+            self._record_step(tenant, "Provision S3 Bucket", str(exc)[:300], "SKIPPED")
 
         # 8. Notify the applicant. We do this BEFORE clearing
         # ``onboarding_data`` because the approval email re-uses the
         # admin username/first name we captured at registration.
         try:
             self._notify_applicant_approved(tenant)
+            self._record_step(tenant, "Notify Applicant", "Approval email sent")
         except Exception as exc:
             logger.warning(
                 "Could not send approval notification for tenant %s: %s",
                 tenant.code,
                 exc,
             )
+            self._record_step(tenant, "Notify Applicant", str(exc)[:300], "SKIPPED")
 
         # Clear onboarding data only after the email is dispatched.
         tenant.onboarding_data = None
 
         self.db.commit()
         return tenant
+
+    def provision_s3_bucket(self, tenant_id: int) -> dict:
+        """
+        Provision the tenant's S3 bucket on demand (SaaS admin action).
+
+        Normally the bucket is created during registration approval
+        (``provision_tenant`` step 7, best-effort). This covers the cases
+        where that step was skipped or failed (S3 disabled at the time,
+        transient AWS error): idempotent — an existing bucket is reported,
+        never recreated.
+        """
+        tenant = self.get_tenant(tenant_id)
+        if tenant.aws_s3_bucket_name:
+            return {
+                "success": True,
+                "already_provisioned": True,
+                "bucket_name": tenant.aws_s3_bucket_name,
+                "message": f"S3 bucket '{tenant.aws_s3_bucket_name}' is already provisioned for {tenant.name}.",
+            }
+
+        s3_service = S3Service()
+        if not s3_service.is_enabled:
+            raise BadRequestError(
+                message="S3 storage is disabled on the platform (S3_ENABLED=false). Enable it before provisioning buckets."
+            )
+        bucket_name = s3_service.ensure_tenant_bucket(self.db, tenant)
+        if not bucket_name:
+            reason = s3_service.last_error or "unknown error — check the backend logs"
+            raise BadRequestError(
+                message=f"Could not provision an S3 bucket for {tenant.name}: {reason}"
+            )
+        return {
+            "success": True,
+            "already_provisioned": False,
+            "bucket_name": bucket_name,
+            "message": f"S3 bucket '{bucket_name}' provisioned for {tenant.name}.",
+        }
 
     # ------------------------------------------------------------------
     # ------------------------------------------------------------------
@@ -835,6 +995,53 @@ class TenantService:
             raise NotFoundError(message="Tenant not found.")
         return tenant
 
+    def _tenant_db_url_for(self, tenant: Tenant) -> str:
+        """Decrypt (or derive) this tenant's database URL for repair actions."""
+        if tenant.db_connection_string:
+            try:
+                return decrypt_string(tenant.db_connection_string)
+            except Exception:
+                pass
+        return self._build_tenant_db_url(tenant.db_name)
+
+    def sync_tenant_schema_repair(self, tenant_id: int) -> dict:
+        """Targeted, idempotent repair: forward-only schema sync (adds any
+        missing tables/columns/enums) on this tenant's database."""
+        tenant = self.db.query(Tenant).filter(Tenant.id == tenant_id).first()
+        if not tenant:
+            raise NotFoundError(message="Tenant not found.")
+        if not tenant.is_provisioned:
+            raise BadRequestError(message="Tenant is not provisioned yet — approve it first.")
+        from app.db_sync import sync_tenant_schema
+        db_url = self._tenant_db_url_for(tenant)
+        try:
+            summary = sync_tenant_schema(db_url)
+        except Exception as e:
+            self._record_step(tenant, "Sync DB Schema", str(e)[:300], "FAILED")
+            raise BadRequestError(message=f"Schema sync failed: {e}")
+        changes = sum(len(v) for v in (summary or {}).values() if isinstance(v, list))
+        detail = f"{changes} change(s) applied" if changes else "Schema already up to date"
+        self._record_step(tenant, "Sync DB Schema", detail)
+        return {"success": True, "message": detail, "summary": summary}
+
+    def sync_tenant_defaults_repair(self, tenant_id: int) -> dict:
+        """Targeted, idempotent repair: re-run tenant initialization (tables +
+        role/permission/default seeds). Existing rows are never duplicated."""
+        tenant = self.db.query(Tenant).filter(Tenant.id == tenant_id).first()
+        if not tenant:
+            raise NotFoundError(message="Tenant not found.")
+        if not tenant.is_provisioned:
+            raise BadRequestError(message="Tenant is not provisioned yet — approve it first.")
+        db_url = self._tenant_db_url_for(tenant)
+        try:
+            run_tenant_initialization(db_url, create_default_admin=False)
+        except Exception as e:
+            self._record_step(tenant, "Sync Defaults", str(e)[:300], "FAILED")
+            raise BadRequestError(message=f"Defaults sync failed: {e}")
+        detail = "Roles, permissions and defaults re-seeded (idempotent)"
+        self._record_step(tenant, "Sync Defaults", detail)
+        return {"success": True, "message": detail}
+
     def update_tenant_status(self, tenant_id: int, new_status: str) -> Tenant:
         tenant = self.get_tenant(tenant_id)
         
@@ -854,17 +1061,105 @@ class TenantService:
         self.db.commit()
         return tenant
 
-    def change_subscription_plan(self, tenant_id: int, plan_code: str) -> TenantSubscription:
+    def start_trial(
+        self,
+        tenant_id: int,
+        plan_code: str,
+        trial_days: int = 14,
+        billing_interval: str = "MONTHLY",
+    ) -> TenantSubscription:
+        """
+        Start a free trial on ``plan_code`` for the tenant.
+
+        Any current active/pending subscription is cancelled and a new
+        TRIALING subscription is created whose ``trial_end_date`` and billing
+        window both close ``trial_days`` from now. The tenant gets full access
+        to the plan's modules during the trial; when the trial ends the billing
+        scheduler issues the first real invoice.
+
+        Guardrail: a tenant may only trial a given plan once — if a trial for
+        the same plan already exists, a BadRequestError is raised so the trial
+        cannot be abused as a rolling free tier.
+        """
+        tenant = self.get_tenant(tenant_id)
+
+        new_plan = self.db.query(SubscriptionPlan).filter(
+            SubscriptionPlan.code == plan_code.upper().strip(),
+            SubscriptionPlan.is_active == True,  # noqa: E712
+        ).first()
+        if not new_plan:
+            raise NotFoundError(message=f"Active subscription plan '{plan_code}' not found.")
+
+        prior_trial = self.db.query(TenantSubscription).filter(
+            TenantSubscription.tenant_id == tenant.id,
+            TenantSubscription.plan_id == new_plan.id,
+            TenantSubscription.trial_end_date.isnot(None),
+        ).first()
+        if prior_trial is not None:
+            raise BadRequestError(
+                message=f"A trial for the '{new_plan.name}' plan has already been used."
+            )
+
+        now = datetime.now(timezone.utc)
+        trial_end = now + timedelta(days=max(1, int(trial_days)))
+
+        current_sub = self.db.query(TenantSubscription).filter(
+            TenantSubscription.tenant_id == tenant.id,
+            TenantSubscription.status.in_(
+                [SubscriptionStatus.ACTIVE, SubscriptionStatus.TRIALING, SubscriptionStatus.PENDING]
+            ),
+        ).first()
+        if current_sub is not None:
+            if current_sub.plan_id == new_plan.id and current_sub.status == SubscriptionStatus.TRIALING:
+                return current_sub
+            current_sub.status = SubscriptionStatus.CANCELLED
+            current_sub.end_date = now
+            current_sub.auto_renew = False
+
+        from app.services.billing_interval import normalize_interval
+
+        trial_sub = TenantSubscription(
+            tenant_id=tenant.id,
+            plan_id=new_plan.id,
+            status=SubscriptionStatus.TRIALING,
+            billing_interval=normalize_interval(billing_interval),
+            start_date=now,
+            trial_end_date=trial_end,
+            current_period_start=now,
+            current_period_end=trial_end,
+            next_invoice_at=trial_end,
+            auto_renew=True,
+        )
+        self.db.add(trial_sub)
+        self.db.commit()
+        self.db.refresh(trial_sub)
+
+        logger.info(f"Tenant {tenant.code} started a {trial_days}-day trial on {new_plan.code}")
+        return trial_sub
+
+    def change_subscription_plan(
+        self,
+        tenant_id: int,
+        plan_code: str,
+        billing_interval: str = "MONTHLY",
+    ) -> TenantSubscription:
         """
         Transition a tenant to a different subscription plan.
 
         This method:
         1. Validates the tenant and the new plan.
         2. Cancels the currently active subscription.
-        3. Creates a new active subscription for the target plan.
+        3. Creates a new active subscription for the target plan on the chosen
+           billing cycle (monthly or yearly).
         4. (Optional) In a real billing system, this would trigger proration
            calculations and an immediate invoice.
         """
+        from app.services.billing_interval import (
+            normalize_interval,
+            period_end_for_interval,
+        )
+
+        interval = normalize_interval(billing_interval)
         tenant = self.get_tenant(tenant_id)
 
         # 1. Resolve target plan
@@ -885,8 +1180,8 @@ class TenantService:
         now = datetime.now(timezone.utc)
 
         if current_sub:
-            if current_sub.plan_id == new_plan.id:
-                 # Already on this plan
+            if current_sub.plan_id == new_plan.id and current_sub.billing_interval == interval:
+                 # Already on this plan and billing cycle
                  return current_sub
 
             current_sub.status = SubscriptionStatus.CANCELLED
@@ -894,13 +1189,14 @@ class TenantService:
             current_sub.auto_renew = False
 
         # 3. Create new subscription
-        # New period starts now
-        period_end = _period_end_for_plan(new_plan, now)
+        # New period starts now; its length depends on the chosen billing cycle.
+        period_end = period_end_for_interval(interval, now)
 
         new_sub = TenantSubscription(
             tenant_id=tenant.id,
             plan_id=new_plan.id,
             status=SubscriptionStatus.ACTIVE,
+            billing_interval=interval,
             start_date=now,
             current_period_start=now,
             current_period_end=period_end,
@@ -995,8 +1291,25 @@ def provision_tenant_background_task(tenant_id: int) -> None:
             # 3. Execute the heavy lifting: physical database creation, Alembic 
             # migrations, seeding roles/settings, and sending the confirmation email.
             service.provision_tenant(tenant_id)
+            # Clear any stale failure marker from a previous attempt.
+            tenant = db.query(Tenant).filter(Tenant.id == tenant_id).first()
+            if tenant and tenant.provisioning_error:
+                tenant.provisioning_error = None
+                db.commit()
             logger.info(f"Successfully provisioned tenant_id {tenant_id}")
         except Exception as e:
             # 4. Catch and log all exceptions. Unhandled exceptions in background 
             # tasks are silently swallowed by FastAPI, so explicit logging is critical.
             logger.exception(f"Background provisioning failed for tenant_id {tenant_id}: {e}")
+            # 5. Persist the failure so the SaaS console can surface it and the
+            #    admin can retry approval, instead of the tenant being stuck in
+            #    a silent PROVISIONING state forever.
+            try:
+                tenant = db.query(Tenant).filter(Tenant.id == tenant_id).first()
+                if tenant is not None:
+                    tenant.provisioning_error = f"{type(e).__name__}: {e}"[:2000]
+                    if not tenant.is_provisioned:
+                        tenant.status = UserStatus.PENDING  # allow re-approval
+                    db.commit()
+            except Exception:
+                logger.exception("Failed to record provisioning error for tenant_id %s", tenant_id)

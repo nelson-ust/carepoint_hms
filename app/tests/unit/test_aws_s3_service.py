@@ -22,6 +22,8 @@ def service():
             mock_settings.AWS_ACCESS_KEY_ID.get_secret_value.return_value = "key"
             mock_settings.AWS_SECRET_ACCESS_KEY.get_secret_value.return_value = "secret"
             mock_settings.AWS_DEFAULT_REGION = "us-east-1"
+            # No custom endpoint => canonical AWS S3 URL format is used.
+            mock_settings.AWS_ENDPOINT_URL = None
             mock_settings.S3_ENABLED = True
             mock_settings.is_development = True
 
@@ -68,5 +70,8 @@ class TestS3Service:
     def test_skips_when_disabled(self, service):
         service.is_enabled = False
         assert service.create_tenant_bucket("abc") is None
-        assert service.upload_file("bucket", MagicMock(), "key") is None
+        # upload_file now hard-fails when S3 is disabled (uploads are mandatory)
+        # rather than silently returning None.
+        with pytest.raises(RuntimeError):
+            service.upload_file("bucket", MagicMock(), "key")
         assert service.generate_presigned_url("bucket", "key") is None

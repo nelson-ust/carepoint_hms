@@ -42,6 +42,9 @@ class TestAdmit:
     @patch("app.services.admission_service.capture_bed_day_charges_for_admission")
     def test_rejects_missing_ward(self, mock_capture, mock_event):
         svc = _make_svc()
+        # Admit now checks for a pre-existing active admission first; make that
+        # lookup return None so execution reaches the ward-validation branch.
+        svc.repository.get_active_for_patient.return_value = None
         svc.repository.get_ward.return_value = None
         payload = MagicMock(ward_id=99, bed_id=None, visit_id=None)
         with pytest.raises(NotFoundError, match="Ward not found"):
@@ -51,6 +54,7 @@ class TestAdmit:
     @patch("app.services.admission_service.capture_bed_day_charges_for_admission")
     def test_rejects_unavailable_bed(self, mock_capture, mock_event):
         svc = _make_svc()
+        svc.repository.get_active_for_patient.return_value = None
         ward = SimpleNamespace(id=1)
         svc.repository.get_ward.return_value = ward
         bed = SimpleNamespace(id=5, ward_id=1, bed_status=BedStatus.OCCUPIED)
@@ -63,6 +67,7 @@ class TestAdmit:
     @patch("app.services.admission_service.capture_bed_day_charges_for_admission")
     def test_rejects_no_available_beds(self, mock_capture, mock_event):
         svc = _make_svc()
+        svc.repository.get_active_for_patient.return_value = None
         ward = SimpleNamespace(id=1)
         svc.repository.get_ward.return_value = ward
         svc.repository.first_available_bed.return_value = None
@@ -74,6 +79,7 @@ class TestAdmit:
     @patch("app.services.admission_service.capture_bed_day_charges_for_admission")
     def test_rejects_closed_visit(self, mock_capture, mock_event):
         svc = _make_svc()
+        svc.repository.get_active_for_patient.return_value = None
         ward = SimpleNamespace(id=1)
         bed = SimpleNamespace(id=5, ward_id=1, bed_status=BedStatus.AVAILABLE)
         svc.repository.get_ward.return_value = ward

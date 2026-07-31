@@ -23,6 +23,14 @@ router = APIRouter(
     dependencies=[Depends(require_plan_feature("inventory"))]
 )
 
+
+def _requisition_dict(req, dept_map: dict, staff_map: dict) -> dict:
+    """Serialize a requisition and attach human-readable department/requester."""
+    data = PurchaseRequisitionReadSchema.model_validate(req).model_dump()
+    data["department_name"] = dept_map.get(req.department_id)
+    data["requested_by_name"] = staff_map.get(req.requested_by_staff_id)
+    return data
+
 # ... existing requisition routes ...
 
 # ── RFQ Routes ────────────────────────────────────────────────────────
@@ -64,12 +72,21 @@ def create_requisition(
     current_user: User = Depends(get_current_user)
 ):
     service = ProcurementService(db)
-    requisition = service.create_requisition(payload)
+    requisition = service.create_requisition(payload, requested_by_user_id=current_user.id)
     return {
         "success": True,
         "message": "Procurement requisition created successfully",
         "requisition": PurchaseRequisitionReadSchema.model_validate(requisition).model_dump()
     }
+
+@router.get("/stats", response_model=dict)
+def procurement_stats(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    service = ProcurementService(db)
+    return {"success": True, **service.get_stats()}
+
 
 @router.get("/requisitions", response_model=dict)
 def list_requisitions(
@@ -81,10 +98,13 @@ def list_requisitions(
 ):
     service = ProcurementService(db)
     items, total = service.list_requisitions(department_id, skip, limit)
+    dept_map = service.department_name_map()
+    staff_map = service.staff_name_map()
     return {
         "success": True,
-        "items": [PurchaseRequisitionReadSchema.model_validate(i).model_dump() for i in items],
-        "count": total
+        "items": [_requisition_dict(i, dept_map, staff_map) for i in items],
+        "count": total,
+        "meta": {"total": total, "skip": skip, "limit": limit},
     }
 
 @router.get("/requisitions/{requisition_id}", response_model=dict)

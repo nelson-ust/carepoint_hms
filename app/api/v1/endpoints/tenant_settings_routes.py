@@ -61,3 +61,68 @@ def upload_logo(
     Requires SETTING_UPDATE permission.
     """
     return service.upload_logo(file)
+
+
+# ---------------------------------------------------------------------------
+# Hospital Membership Number configuration (configurable numbering scheme)
+# ---------------------------------------------------------------------------
+
+from pydantic import BaseModel, Field  # noqa: E402
+from typing import Optional  # noqa: E402
+
+
+class HospitalNumberConfigSchema(BaseModel):
+    prefix: Optional[str] = Field(None, max_length=24)
+    suffix: Optional[str] = Field(None, max_length=24)
+    branch_code: Optional[str] = Field(None, max_length=24)
+    separator: Optional[str] = Field(None, max_length=4)
+    include_year: Optional[bool] = None
+    year_format: Optional[str] = None  # "YYYY" | "YY"
+    include_month: Optional[bool] = None
+    min_digits: Optional[int] = Field(None, ge=1, le=12)
+    reset_mode: Optional[str] = None  # CONTINUOUS | ANNUAL | MONTHLY
+    next_sequence: Optional[int] = Field(None, ge=1)
+    is_active: Optional[bool] = None
+
+
+@router.get(
+    "/hospital-number-config",
+    summary="Get the tenant's Hospital Membership Number numbering scheme",
+)
+def get_hospital_number_config(
+    _: Annotated[bool, Depends(require_permission("SETTING"))],
+    db: Annotated[Session, Depends(get_db)],
+):
+    from app.services.hospital_number_service import HospitalNumberService
+    svc = HospitalNumberService(db)
+    cfg = svc.get_or_create_config()
+    db.commit()
+    return {"success": True, "config": svc.to_dict(cfg)}
+
+
+@router.put(
+    "/hospital-number-config",
+    summary="Update the tenant's Hospital Membership Number numbering scheme",
+)
+def update_hospital_number_config(
+    payload: HospitalNumberConfigSchema,
+    _: Annotated[bool, Depends(require_permission("SETTING_UPDATE"))],
+    db: Annotated[Session, Depends(get_db)],
+):
+    from app.services.hospital_number_service import HospitalNumberService
+    svc = HospitalNumberService(db)
+    cfg = svc.update_config(payload.model_dump(exclude_unset=True))
+    return {"success": True, "message": "Numbering scheme updated.",
+            "config": svc.to_dict(cfg)}
+
+
+@router.get(
+    "/hospital-number-config/preview",
+    summary="Preview the next Hospital Membership Number for the current scheme",
+)
+def preview_hospital_number(
+    _: Annotated[bool, Depends(require_permission("SETTING"))],
+    db: Annotated[Session, Depends(get_db)],
+):
+    from app.services.hospital_number_service import HospitalNumberService
+    return {"success": True, "sample": HospitalNumberService(db).preview()}

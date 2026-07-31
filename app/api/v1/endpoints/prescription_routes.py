@@ -46,7 +46,7 @@ def list_for_visit(
     _: Annotated[User, Depends(require_permission("PRESCRIPTION_WRITE", "PRESCRIPTION_DISPENSE", "VISIT_READ"))],
     service: Annotated[PrescriptionService, Depends(get_prescription_service)],
     skip: int = Query(0, ge=0),
-    limit: int = Query(50, ge=1, le=200),
+    limit: int = Query(50, ge=1, le=1000),
 ):
     items, total = service.list_for_visit(visit_id, skip=skip, limit=limit)
     return paginate_response(

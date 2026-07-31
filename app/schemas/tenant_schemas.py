@@ -28,8 +28,10 @@ class TenantReadSchema(BaseModel):
     id: int
     name: str
     code: str
-    db_connection_string: Optional[str] = None
     status: str
+    is_provisioned: bool = False
+    provisioning_error: Optional[str] = None
+    aws_s3_bucket_name: Optional[str] = None
 
     domain_url: Optional[str] = None
     custom_domain: Optional[str] = None

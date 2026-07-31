@@ -29,7 +29,7 @@ class TestClinicianService:
         items, total = service.list_clinicians(skip=10, limit=5, specialty="Cardiology")
 
         service.repository.list_clinicians.assert_called_once_with(
-            skip=10, limit=5, specialty="Cardiology"
+            skip=10, limit=5, specialty="Cardiology", search=None
         )
         assert items == []
         assert total == 0

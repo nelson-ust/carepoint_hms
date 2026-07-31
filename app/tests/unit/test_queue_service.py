@@ -57,11 +57,14 @@ class TestQueueService:
         mock_db.commit.assert_called_once()
 
     def test_get_my_worklist_fails_if_no_sdp(self, service):
-        user = MagicMock(staff_profile=MagicMock(service_delivery_point_id=None))
-        
+        # The worklist is now keyed off the staff profile's assigned SDP ids.
+        # Requesting a specific SDP the user is not assigned to is rejected.
+        user = MagicMock()
+        user.staff_profile.assigned_sdp_ids = [1, 2]
+
         with pytest.raises(BadRequestError) as excinfo:
-            service.get_my_worklist(user)
-        assert "not assigned to any service delivery point" in str(excinfo.value)
+            service.get_my_worklist(user, sdp_id=99)
+        assert "not assigned to the requested service delivery point" in str(excinfo.value)
 
     def test_complete_and_route_to_blocks_same_sdp(self, service):
         ticket = MagicMock(id=1, status=QueueStatus.SERVING, service_delivery_point_id=10)
@@ -87,14 +90,16 @@ class TestQueueService:
         mock_sdp = MagicMock()
         mock_sdp.name = "Triage Clinic"
         prev_ticket = MagicMock(
-            id=99, 
+            id=99,
+            visit_id=50,
             status=QueueStatus.SERVED,
             service_delivery_point_id=5,
             service_delivery_point=mock_sdp,
             service_started_at=datetime.now(timezone.utc),
             service_ended_at=datetime.now(timezone.utc)
         )
-        service.repository.get_previous_tickets_for_visit.return_value = [prev_ticket]
+        # History is now fetched via a single batched query keyed by visit.
+        service.repository.get_batch_previous_tickets.return_value = [prev_ticket]
         
         service._populate_history([ticket])
         

@@ -61,7 +61,7 @@ from app.schemas.radiology_schemas import (
 )
 from app.utils.charge_capture import (
     add_charge,
-    find_billable_service,
+    resolve_billable_service,
     get_or_create_open_billing,
 )
 from app.utils.payment_policy import requires_pre_payment
@@ -199,7 +199,14 @@ class RadiologyOrderService:
                 notes=entry.notes,
             )
             if billing is not None:
-                billable = find_billable_service(self.db, code=f"RAD-{cat.code}")
+                billable = resolve_billable_service(
+                    self.db,
+                    code=f"RAD-{cat.code}",
+                    name=f"Radiology: {cat.name}",
+                    default_price=Decimal(cat.default_price or 0),
+                    category="RADIOLOGY",
+                    domain="RADIOLOGY",
+                )
                 add_charge(
                     self.db,
                     billing=billing,
@@ -207,7 +214,7 @@ class RadiologyOrderService:
                     service_code=f"RAD-{cat.code}",
                     unit_price=Decimal(cat.default_price or 0),
                     quantity=Decimal("1"),
-                    billable_service_id=billable.id if billable else None,
+                    billable_service_id=billable.id,
                     source_reference=f"RAD_ORDER_ITEM:{item.id}",
                 )
 

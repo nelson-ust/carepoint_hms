@@ -424,6 +424,7 @@ class PatientService:
         patient_type=None,
         payer_type: Optional[str] = None,
         national_identifier: Optional[str] = None,
+        search: Optional[str] = None,
         skip: int = 0,
         limit: int = 20,
     ):
@@ -438,6 +439,7 @@ class PatientService:
             patient_type=patient_type,
             payer_type=payer_type,
             national_identifier=national_identifier,
+            search=search,
             skip=skip,
             limit=limit,
         )
@@ -822,12 +824,18 @@ class PatientService:
 
     def _generate_next_hospital_number(self) -> str:
         """
-        Generate the next patient MRN / hospital number.
-
-        Current approach uses a timestamp fallback.
-        Replace later with facility/config-driven sequencing if needed.
+        Generate the next Hospital Membership Number (Hospital Number) using the
+        tenant's configurable numbering scheme (prefix/suffix/branch/year/
+        sequence/reset). Falls back to a timestamp-based MRN if the numbering
+        engine is unavailable, so registration never blocks.
         """
-        return f"MRN-{datetime.utcnow().strftime('%Y%m%d%H%M%S%f')}"
+        try:
+            from app.services.hospital_number_service import HospitalNumberService
+            return HospitalNumberService(self.db).allocate_next(
+                uniqueness_check=self.repository.hospital_number_exists
+            )
+        except Exception:
+            return f"MRN-{datetime.utcnow().strftime('%Y%m%d%H%M%S%f')}"
 
     def _generate_loyalty_membership_no(self, patient_id: int) -> str:
         """

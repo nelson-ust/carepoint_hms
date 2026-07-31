@@ -70,7 +70,10 @@ class TestMealService:
         # 2. Setup mock billing
         mock_billing = Billing(id=50, status="OPEN")
         self.service.billing_repository.get_active_billing_for_visit = MagicMock(return_value=mock_billing)
-        
+        # Serving now posts the charge and asks the billing repository to
+        # recompute the invoice totals — stub that hook so we can assert on it.
+        self.service.billing_repository.recompute_totals = MagicMock()
+
         # 3. Serve the meal
         order = self.service.serve_meal(101, actor_staff_id=9)
         

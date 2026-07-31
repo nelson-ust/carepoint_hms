@@ -121,6 +121,76 @@ class ServiceDeliveryService:
             )
         return record
 
+    def queue_stats(self) -> dict:
+        """
+        Live queue metrics per service delivery point: how many tickets are
+        currently WAITING / CALLED / SERVING, plus how many were issued today.
+        Powers the operational counters on the Service Points page.
+        """
+        from datetime import datetime, timezone
+
+        from sqlalchemy import Date, cast, func
+
+        from app.core.enums import QueueStatus
+        from app.models.all_models import QueueTicket
+
+        today = datetime.now(timezone.utc).date()
+
+        def _val(st) -> str:
+            return st.value if hasattr(st, "value") else str(st)
+
+        points: dict[int, dict] = {}
+
+        status_rows = (
+            self.db.query(
+                QueueTicket.service_delivery_point_id,
+                QueueTicket.status,
+                func.count(QueueTicket.id),
+            )
+            .filter(QueueTicket.is_deleted.is_(False))
+            .group_by(QueueTicket.service_delivery_point_id, QueueTicket.status)
+            .all()
+        )
+        for sdp_id, st, cnt in status_rows:
+            p = points.setdefault(
+                sdp_id,
+                {"service_delivery_point_id": sdp_id, "waiting": 0, "called": 0, "serving": 0, "total_today": 0},
+            )
+            v = _val(st)
+            if v == QueueStatus.WAITING.value:
+                p["waiting"] += int(cnt)
+            elif v == QueueStatus.CALLED.value:
+                p["called"] += int(cnt)
+            elif v == QueueStatus.SERVING.value:
+                p["serving"] += int(cnt)
+
+        total_today = 0
+        today_rows = (
+            self.db.query(
+                QueueTicket.service_delivery_point_id,
+                func.count(QueueTicket.id),
+            )
+            .filter(
+                QueueTicket.is_deleted.is_(False),
+                cast(QueueTicket.date_created, Date) == today,
+            )
+            .group_by(QueueTicket.service_delivery_point_id)
+            .all()
+        )
+        for sdp_id, cnt in today_rows:
+            p = points.setdefault(
+                sdp_id,
+                {"service_delivery_point_id": sdp_id, "waiting": 0, "called": 0, "serving": 0, "total_today": 0},
+            )
+            p["total_today"] = int(cnt)
+            total_today += int(cnt)
+
+        return {
+            "success": True,
+            "total_today": total_today,
+            "points": list(points.values()),
+        }
+
     def list_service_delivery_points(
         self,
         *,

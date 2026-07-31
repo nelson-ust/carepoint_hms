@@ -4,7 +4,9 @@ from app.repositories.hr_payroll_repository import HRPayrollRepository
 from app.schemas.hr_payroll_schemas import (
     AllowanceTypeCreateSchema,
     DeductionTypeCreateSchema,
-    StatutoryDeductionConfigCreateSchema
+    SalaryGradeCreateSchema,
+    SalaryStepCreateSchema,
+    StatutoryDeductionConfigCreateSchema,
 )
 
 class HRPayrollService:
@@ -24,5 +26,15 @@ class HRPayrollService:
 
     def create_statutory_config(self, data: StatutoryDeductionConfigCreateSchema):
         item = self.repository.create_statutory_config(data)
+        self.db.commit()
+        return item
+
+    def create_salary_grade(self, data: SalaryGradeCreateSchema):
+        item = self.repository.create_salary_grade(data)
+        self.db.commit()
+        return item
+
+    def create_salary_step(self, data: SalaryStepCreateSchema):
+        item = self.repository.create_salary_step(data)
         self.db.commit()
         return item

@@ -85,6 +85,52 @@ class PaystackService:
         self.db.refresh(tx)
         return tx
 
+    async def initialize_checkout(
+        self,
+        *,
+        email: str,
+        amount: Decimal | float,
+        reference: str,
+        callback_url: str,
+        currency: str = "NGN",
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Initialize a generic Paystack hosted checkout (used for SaaS
+        subscription payments) and return the raw ``data`` object which contains
+        ``authorization_url``, ``access_code`` and ``reference``.
+
+        Unlike :meth:`initialize_transaction` (which is tied to a patient's
+        membership card), this does not persist a domain row — subscription
+        payments are recorded by the billing service on verification.
+        """
+        amount_minor = int(Decimal(str(amount)) * 100)  # Paystack expects the minor unit (kobo)
+        base_url = (getattr(settings, "PAYSTACK_BASE_URL", None) or self.BASE_URL).rstrip("/")
+        payload = {
+            "email": email,
+            "amount": amount_minor,
+            "reference": reference,
+            "currency": (currency or "NGN").upper(),
+            "callback_url": callback_url,
+            "metadata": metadata or {},
+        }
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"{base_url}/transaction/initialize",
+                json=payload,
+                headers=self._get_headers(),
+                timeout=30.0,
+            )
+        if response.status_code != 200:
+            try:
+                error_data = response.json()
+            except Exception:
+                error_data = {}
+            raise BadRequestError(
+                f"Paystack initialization failed: {error_data.get('message', 'Unknown error')}"
+            )
+        return response.json()["data"]
+
     async def verify_transaction(self, reference: str) -> Dict[str, Any]:
         """
         Verify a transaction with Paystack.

@@ -46,7 +46,7 @@ def list_for_visit(
     _: Annotated[User, Depends(require_permission("VITAL_SIGN_RECORD", "VISIT_READ"))],
     service: Annotated[VitalSignService, Depends(get_vital_sign_service)],
     skip: int = Query(0, ge=0),
-    limit: int = Query(50, ge=1, le=200),
+    limit: int = Query(50, ge=1, le=1000),
 ):
     items, total = service.list_for_visit(visit_id, skip=skip, limit=limit)
     return paginate_response(

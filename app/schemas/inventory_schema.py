@@ -5,7 +5,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Optional
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 # --- STORE ---
@@ -54,7 +54,7 @@ class InventoryStockItemCreateSchema(BaseModel):
     store_id: int = Field(..., description="The store where this stock item is held")
     drug_id: Optional[int] = Field(None, description="Link to the drug master record if this is a medication")
     item_type: str = Field(default="DRUG", description="DRUG, CONSUMABLE, EQUIPMENT, etc.")
-    item_name: str = Field(..., min_length=1, max_length=255, description="Specific name for this batch/item")
+    item_name: Optional[str] = Field(None, max_length=255, description="Specific name; optional when a drug is linked (inherited from the drug).")
     sku: Optional[str] = Field(None, max_length=100, description="Stock Keeping Unit")
     unit_of_measure: Optional[str] = Field(None, max_length=50, description="e.g., Tablet, Vial, Pack")
     quantity_on_hand: Decimal = Field(Decimal("0"), description="Starting balance")
@@ -85,6 +85,21 @@ class InventoryStockItemUpdateSchema(BaseModel):
     batch_no: Optional[str] = Field(None, max_length=100)
 
 
+class StockItemDrugRefSchema(BaseModel):
+    """Compact view of the linked formulary drug (single source of truth)."""
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    generic_name: Optional[str] = None
+    strength: Optional[str] = None
+    dosage_form: Optional[str] = None
+    sku: Optional[str] = None
+    unit_price: Optional[Decimal] = None
+    reorder_level: Optional[Decimal] = None
+    is_controlled: bool = False
+
+
 class InventoryStockItemReadSchema(BaseModel):
     """Output schema for stock item details including current balance."""
     model_config = ConfigDict(from_attributes=True)
@@ -101,8 +116,20 @@ class InventoryStockItemReadSchema(BaseModel):
     unit_cost: Optional[Decimal] = None
     expiry_date: Optional[date] = None
     batch_no: Optional[str] = None
+    drug: Optional[StockItemDrugRefSchema] = None
+    effective_reorder_level: Optional[Decimal] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
+
+    @model_validator(mode="after")
+    def _compute_effective_reorder(self):
+        # Store-level override wins; otherwise fall back to the drug default.
+        if self.effective_reorder_level is None:
+            if self.reorder_level is not None:
+                self.effective_reorder_level = self.reorder_level
+            elif self.drug is not None:
+                self.effective_reorder_level = self.drug.reorder_level
+        return self
 
 
 class InventoryStockItemListResponseSchema(BaseModel):
@@ -135,6 +162,22 @@ class InventoryStockItemActionResponseSchema(BaseModel):
     success: bool = True
     message: str
     stock_item: InventoryStockItemReadSchema
+
+
+class StockItemBulkUploadRowErrorSchema(BaseModel):
+    """A single row that failed during bulk import."""
+    row: Optional[int] = Field(None, description="1-based row number in the uploaded sheet")
+    message: str = Field(..., description="Why the row was rejected")
+
+
+class StockItemBulkUploadResultSchema(BaseModel):
+    """Summary of a bulk stock-item import."""
+    success: bool = True
+    message: str
+    total_rows: int = 0
+    created: int = 0
+    failed: int = 0
+    errors: list[StockItemBulkUploadRowErrorSchema] = Field(default_factory=list)
 
 
 # --- STOCK MOVEMENT ---

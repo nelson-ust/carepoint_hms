@@ -131,3 +131,110 @@ class ServicePointWorklistResponseSchema(BaseModel):
     serving: list[QueueTicketReadSchema] = Field(default_factory=list)
     served_today: int = 0
     cancelled_today: int = 0
+
+
+# ============================================================
+# ACTION PAYLOADS (composite hand-off actions)
+# ============================================================
+
+class QueueTicketCompleteAndRouteSchema(BaseModel):
+    """Complete the current ticket and queue the patient at the next SDP."""
+
+    target_service_delivery_point_id: int = Field(
+        ..., description="SDP the patient should be queued at next."
+    )
+    notes: Optional[str] = Field(None, max_length=500)
+
+
+class QueueTicketCompleteAndEndVisitSchema(BaseModel):
+    """Complete the current ticket and close the visit."""
+
+    note: Optional[str] = Field(None, max_length=2000)
+
+
+# ============================================================
+# ANALYTICS
+# ============================================================
+
+class ServicePointQueueStatsSchema(BaseModel):
+    """Aggregated queue statistics for one service delivery point."""
+
+    service_delivery_point_id: int
+    service_delivery_point_name: str
+    service_delivery_point_code: Optional[str] = None
+
+    waiting_now: int = 0
+    called_now: int = 0
+    serving_now: int = 0
+
+    issued: int = 0
+    served: int = 0
+    missed: int = 0
+    cancelled: int = 0
+    transferred: int = 0
+
+    avg_wait_minutes: Optional[float] = Field(
+        None, description="Mean minutes from ticket creation to service start."
+    )
+    avg_service_minutes: Optional[float] = Field(
+        None, description="Mean minutes from service start to service end."
+    )
+    no_show_rate: Optional[float] = Field(
+        None, description="MISSED / (SERVED + MISSED), 0..1."
+    )
+
+
+class QueueStatsTotalsSchema(BaseModel):
+    """Whole-facility totals for the requested window."""
+
+    waiting_now: int = 0
+    called_now: int = 0
+    serving_now: int = 0
+    issued: int = 0
+    served: int = 0
+    missed: int = 0
+    cancelled: int = 0
+    transferred: int = 0
+    avg_wait_minutes: Optional[float] = None
+    avg_service_minutes: Optional[float] = None
+    no_show_rate: Optional[float] = None
+
+
+class QueueStatsResponseSchema(BaseModel):
+    success: bool = True
+    message: str = "Queue statistics computed successfully."
+    date_from: datetime
+    date_to: datetime
+    totals: QueueStatsTotalsSchema
+    service_points: list[ServicePointQueueStatsSchema] = Field(default_factory=list)
+
+
+# ============================================================
+# WAITING-ROOM DISPLAY BOARD
+# ============================================================
+
+class DisplayBoardTicketSchema(BaseModel):
+    """Minimal, privacy-safe ticket projection for public displays."""
+
+    queue_number: str
+    status: str
+    called_at: Optional[datetime] = None
+
+
+class DisplayBoardEntrySchema(BaseModel):
+    """Now-serving snapshot for one service delivery point."""
+
+    service_delivery_point_id: int
+    service_delivery_point_name: str
+    service_delivery_point_code: Optional[str] = None
+    now_serving: list[DisplayBoardTicketSchema] = Field(default_factory=list)
+    now_called: list[DisplayBoardTicketSchema] = Field(default_factory=list)
+    next_waiting: list[DisplayBoardTicketSchema] = Field(default_factory=list)
+    waiting_count: int = 0
+
+
+class QueueDisplayBoardResponseSchema(BaseModel):
+    success: bool = True
+    message: str = "Display board fetched successfully."
+    generated_at: datetime
+    service_points: list[DisplayBoardEntrySchema] = Field(default_factory=list)

@@ -1,12 +1,15 @@
 # app/services/inventory_service.py
 from __future__ import annotations
 
-from typing import Optional
+from typing import Any, Optional
 
+from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
 from app.core.enums import InventoryItemType
+from app.core.exceptions import BadRequestError
 from app.models.all_models import InventoryStockItem, InventoryStore, StockMovement
+from app.repositories.drug_repository import DrugRepository
 from app.repositories.inventory_repository import (
     InventoryStockItemRepository,
     InventoryStoreRepository,
@@ -70,6 +73,7 @@ class InventoryStockItemService:
         self.db = db
         self.repository = InventoryStockItemRepository(db)
         self.store_repository = InventoryStoreRepository(db)
+        self.drug_repository = DrugRepository(db)
 
     def list(
         self,
@@ -97,12 +101,39 @@ class InventoryStockItemService:
         return self.repository.get_required_by_id(item_id)
 
     def create(self, payload: InventoryStockItemCreateSchema) -> InventoryStockItem:
-        """Register a new stock item in a specific store."""
+        """Register a new stock item in a specific store.
+
+        When a drug is linked, the descriptive fields (name / SKU / unit /
+        default reorder level) are inherited from the formulary drug so the
+        catalogue stays the single source of truth.
+        """
         # Ensure the store exists before adding stock to it.
         self.store_repository.get_required_by_id(payload.store_id)
-        i = self.repository.create(**payload.model_dump(exclude_unset=True))
+        data = self._apply_drug_link(payload.model_dump(exclude_unset=True))
+        if not str(data.get("item_name") or "").strip():
+            raise BadRequestError(message="Item name is required (or link a drug to inherit it).")
+        i = self.repository.create(**data)
         self.db.commit()
         return self.repository.get_required_by_id(i.id)
+
+    def _apply_drug_link(self, data: dict[str, Any]) -> dict[str, Any]:
+        """Fill missing descriptive fields from the linked drug (single source)."""
+        drug_id = data.get("drug_id")
+        if not drug_id:
+            return data
+        drug = self.drug_repository.get_by_id(drug_id)
+        if drug is None:
+            raise BadRequestError(message=f"Linked drug (id {drug_id}) was not found.")
+        data.setdefault("item_type", "DRUG")
+        if not str(data.get("item_name") or "").strip():
+            data["item_name"] = drug.name
+        if not str(data.get("sku") or "").strip() and drug.sku:
+            data["sku"] = drug.sku
+        if not str(data.get("unit_of_measure") or "").strip() and drug.dosage_form:
+            data["unit_of_measure"] = drug.dosage_form
+        if data.get("reorder_level") in (None, "") and drug.reorder_level is not None:
+            data["reorder_level"] = drug.reorder_level
+        return data
 
     def update(self, item_id: int, payload: InventoryStockItemUpdateSchema) -> InventoryStockItem:
         """Update stock item metadata (non-quantity fields)."""
@@ -117,6 +148,151 @@ class InventoryStockItemService:
         deleted = self.repository.soft_delete(i)
         self.db.commit()
         return deleted
+
+    # ------------------------------------------------------------------
+    # Bulk import
+    # ------------------------------------------------------------------
+
+    def build_import_template(self) -> bytes:
+        """Generate the .xlsx template, seeded with this tenant's stores and drugs."""
+        from app.utils.inventory_import import build_stock_item_template
+
+        stores, _ = self.store_repository.list_stores(skip=0, limit=100_000)
+        store_rows = [(s.code, s.name) for s in stores]
+        drugs, _ = self.drug_repository.list_drugs(skip=0, limit=100_000)
+        drug_rows = [(d.name, d.sku or "") for d in drugs]
+        return build_stock_item_template(store_rows, drug_rows)
+
+    def bulk_create(self, rows: list[dict[str, Any]]) -> dict[str, Any]:
+        """
+        Create stock items from parsed template rows.
+
+        Each row is validated and inserted inside its own savepoint so one bad
+        row never aborts the rest. Returns a per-row result summary.
+        """
+        errors: list[dict[str, Any]] = []
+        created = 0
+
+        # Resolve store codes once (case-insensitive).
+        stores, _ = self.store_repository.list_stores(skip=0, limit=100_000)
+        code_to_id = {s.code.strip().upper(): s.id for s in stores}
+
+        # Resolve drugs once, by SKU and by name, so medicine rows link to the
+        # formulary instead of creating parallel catalogue entries.
+        drugs, _ = self.drug_repository.list_drugs(skip=0, limit=100_000)
+        drug_by_sku = {d.sku.strip().upper(): d for d in drugs if d.sku}
+        drug_by_name = {d.name.strip().upper(): d for d in drugs}
+
+        for entry in rows:
+            row_no = entry.get("row")
+            data = entry.get("data", {}) or {}
+            try:
+                store_code = str(data.get("store_code") or "").strip().upper()
+                if not store_code:
+                    raise ValueError("Store Code is required.")
+                store_id = code_to_id.get(store_code)
+                if store_id is None:
+                    raise ValueError(f"Unknown store code '{store_code}'.")
+
+                item_type = str(data.get("item_type") or "DRUG").strip().upper()
+
+                # Resolve the linked drug: explicit "Drug (SKU or Name)" wins;
+                # otherwise auto-link DRUG rows whose own SKU/name matches one.
+                drug = None
+                ref = data.get("drug_ref")
+                if ref is not None and str(ref).strip():
+                    key = str(ref).strip().upper()
+                    drug = drug_by_sku.get(key) or drug_by_name.get(key)
+                    if drug is None:
+                        raise ValueError(
+                            f"Unknown drug '{ref}' — no formulary match by SKU or name."
+                        )
+                elif item_type == "DRUG":
+                    sku_key = str(data.get("sku") or "").strip().upper()
+                    name_key = str(data.get("item_name") or "").strip().upper()
+                    drug = (
+                        (drug_by_sku.get(sku_key) if sku_key else None)
+                        or (drug_by_name.get(name_key) if name_key else None)
+                    )
+
+                item_name = data.get("item_name")
+                sku = data.get("sku")
+                uom = data.get("unit_of_measure")
+                reorder = data.get("reorder_level")
+                drug_id = None
+                if drug is not None:
+                    drug_id = drug.id
+                    if not str(item_name or "").strip():
+                        item_name = drug.name
+                    if not str(sku or "").strip() and drug.sku:
+                        sku = drug.sku
+                    if not str(uom or "").strip() and drug.dosage_form:
+                        uom = drug.dosage_form
+                    if reorder in (None, "") and drug.reorder_level is not None:
+                        reorder = drug.reorder_level
+
+                if not str(item_name or "").strip():
+                    raise ValueError("Item Name is required (or link a drug to inherit it).")
+
+                payload = InventoryStockItemCreateSchema(
+                    store_id=store_id,
+                    drug_id=drug_id,
+                    item_type=item_type,
+                    item_name=item_name,
+                    sku=sku,
+                    unit_of_measure=uom,
+                    quantity_on_hand=data.get("quantity_on_hand", 0) or 0,
+                    reorder_level=reorder,
+                    unit_cost=data.get("unit_cost"),
+                    batch_no=data.get("batch_no"),
+                    expiry_date=data.get("expiry_date"),
+                )
+
+                # Isolate each insert so a DB error on one row doesn't poison
+                # the whole batch.
+                with self.db.begin_nested():
+                    self.repository.create(**payload.model_dump(exclude_unset=True))
+                created += 1
+            except ValidationError as exc:
+                errors.append({"row": row_no, "message": _format_validation_error(exc)})
+            except ValueError as exc:
+                errors.append({"row": row_no, "message": str(exc)})
+            except Exception as exc:  # pragma: no cover - unexpected DB errors
+                errors.append({"row": row_no, "message": f"Could not save this row: {exc}"})
+
+        if created:
+            self.db.commit()
+
+        total = len(rows)
+        failed = len(errors)
+        if created and not failed:
+            message = f"All {created} item(s) imported successfully."
+        elif created and failed:
+            message = f"Imported {created} item(s); {failed} row(s) had problems."
+        elif not created and failed:
+            message = f"No items imported — all {failed} row(s) had problems."
+        else:
+            message = "The file had no data rows to import."
+
+        return {
+            "success": failed == 0 and created > 0,
+            "message": message,
+            "total_rows": total,
+            "created": created,
+            "failed": failed,
+            "errors": errors,
+        }
+
+
+def _format_validation_error(exc: ValidationError) -> str:
+    """Turn a pydantic ValidationError into a short, human-readable message."""
+    parts: list[str] = []
+    for err in exc.errors():
+        loc = err.get("loc") or ()
+        field = str(loc[-1]) if loc else ""
+        msg = err.get("msg", "is invalid")
+        parts.append(f"{field}: {msg}" if field else msg)
+    return "; ".join(parts) or "Row failed validation."
 
 
 class StockMovementService:

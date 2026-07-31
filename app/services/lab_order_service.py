@@ -43,7 +43,7 @@ from app.schemas.lab_order_schema import (
 )
 from app.utils.charge_capture import (
     add_charge,
-    find_billable_service,
+    resolve_billable_service,
     get_or_create_open_billing,
 )
 from app.utils.payment_policy import requires_pre_payment
@@ -166,8 +166,16 @@ class LabOrderService:
                 test = tests_by_id.get(item.lab_test_catalog_id)
                 if test is None:
                     continue
-                # Map catalog test to billable service via code convention
-                billable = find_billable_service(self.db, code=f"LAB-{test.code}")
+                # Auto-map catalog test to a billable service (creates it,
+                # seeded with the test price + LAB revenue account, if missing).
+                billable = resolve_billable_service(
+                    self.db,
+                    code=f"LAB-{test.code}",
+                    name=f"Lab: {test.name}",
+                    default_price=Decimal(test.default_price or 0),
+                    category="LABORATORY",
+                    domain="LAB",
+                )
                 add_charge(
                     self.db,
                     billing=billing,
@@ -175,7 +183,7 @@ class LabOrderService:
                     service_code=f"LAB-{test.code}",
                     unit_price=Decimal(test.default_price or 0),
                     quantity=Decimal("1"),
-                    billable_service_id=billable.id if billable else None,
+                    billable_service_id=billable.id,
                     source_reference=f"LAB_ORDER_ITEM:{item.id}",
                 )
 

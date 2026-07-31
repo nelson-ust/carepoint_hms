@@ -7,6 +7,8 @@ from typing import Any, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from app.core.enums import PaymentMethod
+
 
 class PaymentReceiveSchema(BaseModel):
     invoice_id: int
@@ -21,12 +23,15 @@ class PaymentReceiveSchema(BaseModel):
     @field_validator("payment_method")
     @classmethod
     def normalize_payment_method(cls, v: str) -> str:
-        normalized = v.strip().upper()
-        if normalized not in {
-            "CASH", "CARD", "BANK_TRANSFER", "MOBILE_MONEY",
-            "INSURANCE", "LOYALTY", "WAIVER", "MEMBERSHIP_CARD", "OTHER",
-        }:
-            raise ValueError("payment_method invalid.")
+        # Accept any canonical method (cash, card, POS, bank transfer, mobile
+        # money, membership card, insurance, gateways, etc.) — validated
+        # against the PaymentMethod enum so the API and enum never drift.
+        normalized = (v or "").strip().upper()
+        valid = {m.value for m in PaymentMethod}
+        if normalized not in valid:
+            raise ValueError(
+                "payment_method invalid. Allowed: " + ", ".join(sorted(valid)) + "."
+            )
         return normalized
 
     @field_validator("currency")

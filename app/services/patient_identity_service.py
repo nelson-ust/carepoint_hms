@@ -60,3 +60,18 @@ class PatientIdentityService:
         record = self.repository.create_patient_insurance(patient_id, data)
         self.db.commit()
         return record
+
+    def list_patient_insurance(self, patient_id: int):
+        """
+        Return a patient's insurance policies, each enriched with its provider
+        name so the UI can present a meaningful policy dropdown without a second
+        lookup.
+        """
+        records = self.repository.list_patient_insurance(patient_id)
+        provider_names = {p.id: p.name for p in self.repository.list_providers(0, 1000)}
+        for record in records:
+            try:
+                record.provider_name = provider_names.get(record.insurance_provider_id)
+            except Exception:
+                pass
+        return records

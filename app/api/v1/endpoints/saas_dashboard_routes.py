@@ -44,11 +44,11 @@ def get_metrics(
     """
     Retrieve aggregated dashboard metrics for the SaaS portal.
     """
-    metrics = service.get_dashboard_metrics()
+    metrics = service.get_ecosystem_metrics()
     return {
         "success": True,
         "message": "Dashboard metrics retrieved successfully.",
-        "data": metrics.model_dump(),
+        "data": metrics,
     }
 
 

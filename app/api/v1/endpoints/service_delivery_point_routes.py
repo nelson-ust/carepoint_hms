@@ -99,7 +99,7 @@ def list_service_delivery_points(
     _: AdminUser,
     service: Annotated[ServiceDeliveryService, Depends(get_service_delivery_service)],
     skip: int = Query(0, ge=0, description="Pagination offset."),
-    limit: int = Query(20, ge=1, le=100, description="Pagination size."),
+    limit: int = Query(20, ge=1, le=1000, description="Pagination size."),
     name: Optional[str] = Query(None),
     code: Optional[str] = Query(None),
     service_point_type: Optional[str] = Query(None),
@@ -142,7 +142,7 @@ def list_active_service_delivery_points(
     _: AdminUser,
     service: Annotated[ServiceDeliveryService, Depends(get_service_delivery_service)],
     skip: int = Query(0, ge=0, description="Pagination offset."),
-    limit: int = Query(100, ge=1, le=200, description="Pagination size."),
+    limit: int = Query(100, ge=1, le=1000, description="Pagination size."),
     service_point_type: Optional[str] = Query(None),
     department_id: Optional[int] = Query(None),
 ):
@@ -163,6 +163,22 @@ def list_active_service_delivery_points(
         limit=limit,
         message="Active service delivery points fetched successfully.",
     )
+
+
+@router.get(
+    "/queue-stats",
+    status_code=status.HTTP_200_OK,
+    summary="Live queue metrics per service delivery point",
+)
+def service_delivery_point_queue_stats(
+    _: AdminUser,
+    service: Annotated[ServiceDeliveryService, Depends(get_service_delivery_service)],
+):
+    """
+    Return live per-SDP queue counts (waiting/called/serving) and today's
+    total tickets issued.
+    """
+    return service.queue_stats()
 
 
 @router.get(
@@ -320,7 +336,7 @@ def list_sdp_staff(
     _: AdminUser,
     staff_service: Annotated[StaffProfileService, Depends(get_staff_profile_service)],
     skip: int = Query(0, ge=0),
-    limit: int = Query(100, ge=1, le=200),
+    limit: int = Query(100, ge=1, le=1000),
 ):
     """
     Return a paginated list of staff profiles assigned to this service delivery point.

@@ -2,11 +2,19 @@ from __future__ import annotations
 from typing import List, Optional
 from sqlalchemy.orm import Session
 from sqlalchemy import select
-from app.models.all_models import AllowanceType, DeductionType, StatutoryDeductionConfig
+from app.models.all_models import (
+    AllowanceType,
+    DeductionType,
+    SalaryGrade,
+    SalaryStep,
+    StatutoryDeductionConfig,
+)
 from app.schemas.hr_payroll_schemas import (
     AllowanceTypeCreateSchema,
     DeductionTypeCreateSchema,
-    StatutoryDeductionConfigCreateSchema
+    SalaryGradeCreateSchema,
+    SalaryStepCreateSchema,
+    StatutoryDeductionConfigCreateSchema,
 )
 
 class HRPayrollRepository:
@@ -54,3 +62,32 @@ class HRPayrollRepository:
         return self.db.scalars(
             select(StatutoryDeductionConfig).where(StatutoryDeductionConfig.is_deleted == False)
         ).all()
+
+    # ── Salary Grades ─────────────────────────────────────────────────
+
+    def create_salary_grade(self, data: SalaryGradeCreateSchema) -> SalaryGrade:
+        item = SalaryGrade(**data.model_dump())
+        self.db.add(item)
+        self.db.flush()
+        self.db.refresh(item)
+        return item
+
+    def list_salary_grades(self) -> List[SalaryGrade]:
+        return self.db.scalars(
+            select(SalaryGrade).where(SalaryGrade.is_deleted == False)
+        ).all()
+
+    # ── Salary Steps ──────────────────────────────────────────────────
+
+    def create_salary_step(self, data: SalaryStepCreateSchema) -> SalaryStep:
+        item = SalaryStep(**data.model_dump())
+        self.db.add(item)
+        self.db.flush()
+        self.db.refresh(item)
+        return item
+
+    def list_salary_steps(self, grade_id: Optional[int] = None) -> List[SalaryStep]:
+        stmt = select(SalaryStep).where(SalaryStep.is_deleted == False)
+        if grade_id is not None:
+            stmt = stmt.where(SalaryStep.grade_id == grade_id)
+        return self.db.scalars(stmt).all()

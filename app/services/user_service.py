@@ -266,10 +266,33 @@ class UserService:
             event_metadata={"actor_user_id": actor_user_id, "role_ids": payload.role_ids},
         )
 
-        # TODO: Trigger invitation email with temp_password
-        logger.info(f"User {user.username} invited. Temporary Password: {temp_password}")
-
         self.db.commit()
+
+        # Best-effort invitation email with the temporary password. Email
+        # delivery failure must never fail user creation — log and move on.
+        try:
+            from app.core.enums import NotificationEvent
+            from app.services.notification_dispatcher import NotificationDispatcher
+
+            NotificationDispatcher(self.db).dispatch(
+                event=NotificationEvent.USER_INVITED,
+                recipients=[user],
+                subject="You've been invited to CarePoint HMS",
+                body=(
+                    f"Hello {user.first_name},\n\n"
+                    f"An account has been created for you on CarePoint HMS.\n\n"
+                    f"Username: {user.username}\n"
+                    f"Temporary password: {temp_password}\n\n"
+                    f"Please sign in and change your password immediately."
+                ),
+                context={"user_id": user.id, "username": user.username},
+                force_channels=["email"],
+            )
+        except Exception as exc:
+            logger.warning(
+                "Invitation email for user %s could not be sent: %s", user.username, exc
+            )
+
         return self.repository.get_required_by_id(user.id)
 
     # ============================================================

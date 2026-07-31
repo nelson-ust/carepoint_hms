@@ -45,7 +45,7 @@ def list_payments(
     _: Annotated[User, Depends(require_permission("BILLING_READ", "PAYMENT_RECEIVE"))],
     service: Annotated[PaymentService, Depends(get_payment_service)],
     skip: int = Query(0, ge=0),
-    limit: int = Query(50, ge=1, le=200),
+    limit: int = Query(50, ge=1, le=1000),
     invoice_id: Optional[int] = Query(None),
     payment_method: Optional[str] = Query(None),
     payment_status: Optional[str] = Query(None),

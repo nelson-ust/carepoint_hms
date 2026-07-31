@@ -9,11 +9,14 @@ from sqlalchemy.orm import Session
 
 from app.core.enums import ServicePointType, VisitStatus
 from app.core.exceptions import BadRequestError
+from app.core.logger import get_logger
 from app.models.all_models import VitalSign
 from app.repositories.vital_sign_repository import VitalSignRepository
 from app.schemas.vital_sign_schema import VitalSignCreateSchema
 from app.utils.visit_routing import validate_visit_sdp_activity
 
+
+logger = get_logger(__name__)
 
 _TERMINAL = {VisitStatus.COMPLETED, VisitStatus.CANCELLED}
 
@@ -109,12 +112,65 @@ class VitalSignService:
         mews = _compute_mews(data.get("pulse_rate"), data.get("respiratory_rate"), data.get("systolic_bp"), data.get("temperature_celsius"))
         if mews is not None:
             data["mews_score"] = mews
-            # If MEWS is critically high (e.g., >= 5), we would trigger an emergency push notification to ward nurses
-            if mews >= 5:
-                # TODO: Trigger NotificationDispatcher.dispatch(SYSTEM_ALERT, message="Sepsis Alert / Code Blue Triggered!")
-                pass
 
         data.setdefault("recorded_at", datetime.now(timezone.utc))
         record = self.repository.create(**data)
         self.db.commit()
+
+        # If MEWS is critically high (>= 5), trigger an emergency alert to the
+        # clinical care team (sepsis / Code Blue escalation). Best-effort: an
+        # alert delivery failure must never fail the vitals capture itself.
+        if mews is not None and mews >= 5:
+            self._dispatch_critical_alert(visit=visit, mews=mews, vital_sign_id=record.id)
+
         return self.repository.get_required_by_id(record.id)
+
+    def _dispatch_critical_alert(self, *, visit, mews: int, vital_sign_id: int) -> None:
+        """
+        Dispatch a SYSTEM_ALERT notification to the clinical care team when a
+        critically high MEWS score (sepsis / Code Blue threshold) is recorded.
+        """
+        try:
+            from app.core.enums import NotificationEvent
+            from app.models.all_models import Role, User, UserRoleAssociation
+            from app.services.notification_dispatcher import NotificationDispatcher
+
+            care_team = (
+                self.db.query(User)
+                .join(UserRoleAssociation, UserRoleAssociation.user_id == User.id)
+                .join(Role, Role.id == UserRoleAssociation.role_id)
+                .filter(
+                    Role.code.in_(["DOCTOR", "NURSE", "CLINICIAN", "TENANT_ADMIN"]),
+                    User.is_deleted.is_(False),
+                )
+                .all()
+            )
+            if not care_team:
+                logger.warning(
+                    "Critical MEWS %s on visit %s: no clinical staff found to alert.",
+                    mews,
+                    visit.id,
+                )
+                return
+
+            NotificationDispatcher(self.db).dispatch(
+                event=NotificationEvent.SYSTEM_ALERT,
+                recipients=care_team,
+                subject="Sepsis Alert / Code Blue Triggered!",
+                body=(
+                    f"CRITICAL: MEWS score {mews} recorded for patient "
+                    f"{visit.patient_id} on visit {visit.id}. "
+                    f"Immediate clinical review required (sepsis / Code Blue protocol)."
+                ),
+                context={
+                    "visit_id": visit.id,
+                    "patient_id": visit.patient_id,
+                    "vital_sign_id": vital_sign_id,
+                    "mews_score": mews,
+                },
+                suppress_quiet_hours=False,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Critical vitals alert dispatch failed for visit %s: %s", visit.id, exc
+            )

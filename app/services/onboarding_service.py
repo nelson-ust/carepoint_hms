@@ -171,10 +171,13 @@ class OnboardingService:
         # Prioritize tenant-specific bucket from context
         from app.utils.s3_utils import get_bucket_name
         try:
-            bucket_name = get_bucket_name()
-        except Exception:
-            bucket_name = getattr(settings, "AWS_S3_BUCKET_NAME", "carepoint-onboarding")
-            
+            bucket_name = get_bucket_name()  # tenant bucket only — no shared fallback
+        except Exception as exc:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Tenant document storage is not available: {exc}",
+            )
+
         file_url = self.s3_service.upload_file(bucket_name, file, s3_key)
         
         if not file_url:

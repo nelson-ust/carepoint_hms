@@ -102,14 +102,24 @@ class FacilityCreate(FacilityBase):
 class FacilityUpdate(BaseModel):
     """
     Schema for updating an existing facility.
+
+    Covers every operator-editable attribute so the management UI can present a
+    complete edit form. ``code`` is intentionally omitted — it is the facility's
+    immutable business identifier.
     """
     name: Optional[str] = None
+    facility_type: Optional[FacilityType] = None
     status: Optional[FacilityStatus] = None
     phone_number: Optional[str] = None
     email: Optional[str] = None
+    website: Optional[str] = None
     address_line_1: Optional[str] = None
+    address_line_2: Optional[str] = None
     city: Optional[str] = None
     state: Optional[str] = None
+    country: Optional[str] = None
+    postal_code: Optional[str] = None
+    timezone: Optional[str] = None
     network_id: Optional[int] = None
     parent_facility_id: Optional[int] = None
 

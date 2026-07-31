@@ -100,7 +100,7 @@ def list_templates(
     _: Annotated[User, Depends(require_permission("NOTIFICATION_READ"))],
     service: Annotated[NotificationTemplateService, Depends(get_template_service)],
     skip: int = Query(0, ge=0),
-    limit: int = Query(50, ge=1, le=200),
+    limit: int = Query(50, ge=1, le=1000),
     channel: Optional[str] = Query(None, description="IN_APP, EMAIL, SMS, WHATSAPP."),
     search: Optional[str] = Query(None),
 ):
@@ -182,7 +182,7 @@ def list_notifications(
     _: Annotated[User, Depends(require_permission("NOTIFICATION_READ"))],
     service: Annotated[NotificationService, Depends(get_notification_service)],
     skip: int = Query(0, ge=0),
-    limit: int = Query(50, ge=1, le=200),
+    limit: int = Query(50, ge=1, le=1000),
     user_id: Optional[int] = Query(None),
     patient_id: Optional[int] = Query(None),
     channel: Optional[str] = Query(None),
@@ -305,7 +305,7 @@ def message_inbox(
     actor: CurrentActiveUser,
     service: Annotated[MessageService, Depends(get_message_service)],
     skip: int = Query(0, ge=0),
-    limit: int = Query(50, ge=1, le=200),
+    limit: int = Query(50, ge=1, le=1000),
 ):
     items, total = service.list_inbox(actor.id, skip=skip, limit=limit)
     return paginate_response(
@@ -324,7 +324,7 @@ def message_sent(
     actor: CurrentActiveUser,
     service: Annotated[MessageService, Depends(get_message_service)],
     skip: int = Query(0, ge=0),
-    limit: int = Query(50, ge=1, le=200),
+    limit: int = Query(50, ge=1, le=1000),
 ):
     items, total = service.list_sent(actor.id, skip=skip, limit=limit)
     return paginate_response(

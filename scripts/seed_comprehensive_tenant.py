@@ -67,7 +67,11 @@ def seed_tenant_full():
         # Using NullPool for seeding
         from sqlalchemy.pool import NullPool
         tenant_engine = create_engine(db_url, poolclass=NullPool)
-        set_current_tenant(tenant.id)
+        # Detach the ORM object so it survives the session close, then set the
+        # full Tenant object as context (set_current_tenant expects the object,
+        # not the bare id — get_current_tenant_id() reads `.id` from it).
+        master_session.expunge(tenant)
+        set_current_tenant(tenant)
 
     try:
         with Session(tenant_engine) as db:
@@ -367,6 +371,16 @@ def seed_tenant_full():
                 ))
                 VitalSignService(db).create(VitalSignCreateSchema(
                     patient_id=patients[0].id, visit_id=visit_john.id, temperature=38.5, heart_rate=110
+                ))
+
+                # Triage complete -> route the patient to the specialist clinic.
+                # Consultations are only valid at CLINIC/EMERGENCY/WARD SDPs, so
+                # the visit must leave the TRIAGE point first.
+                from app.schemas.visit_schemas import VisitRerouteSchema
+                v_svc.reroute_visit(visit_john.id, VisitRerouteSchema(
+                    service_delivery_point_id=sdps["CLIN-SPEC"].id,
+                    reason="Triage complete - refer to specialist clinic",
+                    create_queue_ticket=True,
                 ))
 
                 from app.services.consultation_service import ConsultationService

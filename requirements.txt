@@ -44,5 +44,9 @@ python-dotenv==1.0.1
 pandas==2.2.2
 openpyxl==3.1.5
 fpdf==1.7.2
+reportlab==4.2.5
 qrcode==8.2
 Pillow==10.3.0
+
+# System resource metrics for the monitoring service (optional at runtime; the app degrades gracefully if absent).
+psutil==5.9.8

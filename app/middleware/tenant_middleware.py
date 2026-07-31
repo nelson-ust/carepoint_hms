@@ -71,6 +71,29 @@ IGNORE_PREFIXES: tuple[str, ...] = (
     "/api/v1/sync",
     "/api/v1/connectivity",
     "/api/v1/backups/master",   # Master backups (SaaS level)
+    # SaaS tenant administration (register / approve / provision-s3 / list)
+    # lives entirely in the MASTER database (the router depends on
+    # get_master_db) — tenant resolution is never needed and must never be
+    # able to 404 these calls based on the Host header.
+    "/api/v1/tenants",
+    # Developer platform. Registration / portal management operate on the
+    # MASTER database, and the data API resolves the holding tenant itself from
+    # the {tenant_code} path segment (via get_tenant_db_context) plus a grant
+    # check — so host-based tenant resolution must never gate or 404 these.
+    "/api/v1/developer",
+    # Partner inbound integration API: the third-party's API key identifies the
+    # owning tenant (bound by the api-key dependency), so host-based resolution
+    # must not gate it. NOTE: only the key-authed "/integration/v1" surface —
+    # the JWT-authed "/integration/partners" admin routes stay tenant-scoped.
+    "/api/v1/integration/v1",
+    # Consent-gated medical-record sharing PUBLIC surface: patient decisions and
+    # the one-time link are token-authenticated and operate on the master DB /
+    # an explicitly-resolved holding tenant, so host tenant resolution must not
+    # gate them. The staff "/medical-access/requests" routes stay tenant-scoped.
+    "/api/v1/medical-access/public",
+    # Public membership-card QR verification: token-free, resolves the holding
+    # tenant from the ``h`` (hospital code) query param itself.
+    "/api/v1/membership-cards/public",
     "/docs",
     "/redoc",
     "/openapi.json",

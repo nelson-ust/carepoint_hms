@@ -352,8 +352,9 @@ def _handler_daily_backup(db: Session, job: TenantScheduledJob) -> dict:
     except Exception as exc:
         return {"status": "skipped", "reason": f"backup service unavailable: {exc}"}
 
-    backup = TenantBackupService(db, tenant_code=tenant.code).create_backup()
-    return {"status": "ok", "backup_id": backup.id, "filename": backup.filename}
+    # create_backup() returns a summary dict, not an ORM record.
+    backup = TenantBackupService(db, tenant_code=tenant.code).create_backup(triggered_by="SCHEDULED")
+    return {"status": "ok", "backup_id": backup.get("backup_id"), "filename": backup.get("filename")}
 
 
 @register_handler("invoice_generation")

@@ -8,7 +8,7 @@ Clinicians are defined as staff members with clinical roles (DOCTOR, NURSE, etc.
 """
 
 from typing import Optional
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session, joinedload
 
 from app.models.all_models import Role, StaffProfile, User, UserRoleAssociation
@@ -31,11 +31,14 @@ class ClinicianRepository:
         skip: int = 0,
         limit: int = 20,
         specialty: Optional[str] = None,
+        search: Optional[str] = None,
     ) -> tuple[list[StaffProfile], int]:
         """
         Return paginated staff profiles who have clinical roles.
 
         Clinical roles include DOCTOR, NURSE, and CLINICIAN by default.
+        ``search`` performs a case-insensitive match against the user's
+        first/last name, username, and the profile's specialty.
         """
         clinician_roles = ["DOCTOR", "NURSE", "CLINICIAN"]
 
@@ -58,6 +61,17 @@ class ClinicianRepository:
         if specialty:
             query = query.filter(StaffProfile.specialty.ilike(f"%{specialty}%"))
 
+        if search:
+            pattern = f"%{search.strip()}%"
+            query = query.filter(
+                or_(
+                    User.first_name.ilike(pattern),
+                    User.last_name.ilike(pattern),
+                    User.username.ilike(pattern),
+                    StaffProfile.specialty.ilike(pattern),
+                )
+            )
+
         # Use distinct to avoid duplicate staff rows if they have multiple clinical roles
         query = query.distinct()
 
@@ -75,7 +89,6 @@ class ClinicianRepository:
             .options(
                 joinedload(StaffProfile.user),
                 joinedload(StaffProfile.department),
-                joinedload(StaffProfile.service_delivery_point),
             )
             .filter(
                 StaffProfile.id == clinician_id,

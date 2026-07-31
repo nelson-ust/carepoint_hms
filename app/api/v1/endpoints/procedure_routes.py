@@ -100,7 +100,7 @@ def list_procedures(
     _: Annotated[User, Depends(require_permission("PROCEDURE_ORDER", "PROCEDURE_PERFORM"))],
     service: Annotated[ProcedureCatalogService, Depends(get_catalog_service)],
     skip: int = Query(0, ge=0),
-    limit: int = Query(50, ge=1, le=200),
+    limit: int = Query(50, ge=1, le=1000),
     search: Optional[str] = Query(None),
 ):
     items, total = service.list_procedures(skip=skip, limit=limit, search=search)
@@ -182,7 +182,7 @@ def list_for_visit(
     _: Annotated[User, Depends(require_permission("PROCEDURE_ORDER", "PROCEDURE_PERFORM", "VISIT_READ"))],
     service: Annotated[ProcedureOrderService, Depends(get_order_service)],
     skip: int = Query(0, ge=0),
-    limit: int = Query(50, ge=1, le=200),
+    limit: int = Query(50, ge=1, le=1000),
 ):
     items, total = service.list_for_visit(visit_id, skip=skip, limit=limit)
     return paginate_response(
@@ -201,7 +201,7 @@ def list_worklist(
     _: Annotated[User, Depends(require_permission("PROCEDURE_PERFORM"))],
     service: Annotated[ProcedureOrderService, Depends(get_order_service)],
     skip: int = Query(0, ge=0),
-    limit: int = Query(50, ge=1, le=200),
+    limit: int = Query(50, ge=1, le=1000),
 ):
     items, total = service.list_open(skip=skip, limit=limit)
     return paginate_response(

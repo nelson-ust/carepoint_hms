@@ -31,7 +31,6 @@ Important notes
 """
 
 import argparse
-import logging
 from contextlib import contextmanager
 from typing import Any, Generator
 
@@ -43,14 +42,11 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.core.logger import get_logger
 from app.core.database import (
-    DATABASE_URL,
     MASTER_DATABASE_URL,
     SessionLocal,
-    check_database_connection,
-    create_tables,
     drop_tables,
 )
-from app.core.enums import ServicePointType, UserStatus, SubscriptionInterval, SubscriptionStatus
+from app.core.enums import ServicePointType, UserStatus, SubscriptionInterval
 from app.core.security import get_password_hash
 from app.models.all_models import (
     Department,
@@ -63,11 +59,8 @@ from app.models.all_models import (
     UserRoleAssociation,
     SubscriptionPlan,
     Tenant,
-    TenantDomain,
-    TenantSubscription,
     SaaSAdmin,
 )
-from app.models.base import MasterBase, TenantBase, BaseTable
 
 logger = get_logger()
 
@@ -210,6 +203,7 @@ PERMISSION_SEEDS: list[dict[str, Any]] = [
     {"code": "NOTIFICATION_MANAGE", "name": "Manage notification templates", "module": "NOTIFICATION"},
     {"code": "NOTIFICATION_DISPATCH", "name": "Send notifications", "module": "NOTIFICATION"},
     {"code": "MESSAGE_SEND", "name": "Send direct messages", "module": "NOTIFICATION"},
+    {"code": "PORTAL_MESSAGE_READ", "name": "Read patient portal messages", "module": "NOTIFICATION"},
 
     # Compliance / Governance
     {"code": "COMPLIANCE_READ", "name": "Read compliance records", "module": "COMPLIANCE"},
@@ -283,6 +277,18 @@ PERMISSION_SEEDS: list[dict[str, Any]] = [
     {"code": "BACKUP_CREATE", "name": "Create backups", "module": "BACKUP"},
     {"code": "SETTING_UPDATE", "name": "Update system settings", "module": "SETTING"},
     {"code": "SaaS_ADMIN", "name": "SaaS Administrative Access", "module": "SaaS"},
+
+    # Developer platform — third-party API access governance.
+    {"code": "DEVELOPER_ACCESS_MANAGE", "name": "Review developer accounts and approve / revoke third-party data grants", "module": "DEVELOPER"},
+
+    # Consent-gated medical-record sharing
+    {"code": "MEDICAL_ACCESS_REQUEST", "name": "Request access to a patient's medical history from another hospital", "module": "MEDICAL_ACCESS"},
+    {"code": "MEDICAL_ACCESS_REVIEW", "name": "Review and approve / decline incoming medical-record access requests", "module": "MEDICAL_ACCESS"},
+
+    # Accounting / General Ledger
+    {"code": "ACCOUNTING_READ", "name": "View journals, ledgers and financial reports", "module": "ACCOUNTING"},
+    {"code": "ACCOUNTING_POST", "name": "Create, post and reverse journal entries", "module": "ACCOUNTING"},
+    {"code": "ACCOUNTING_MANAGE", "name": "Manage accounting periods and run auto-posting", "module": "ACCOUNTING"},
 ]
 
 ROLE_PERMISSION_MAP: dict[str, list[str]] = {
@@ -293,12 +299,18 @@ ROLE_PERMISSION_MAP: dict[str, list[str]] = {
         "PERMISSION_READ", "FACILITY_READ", "FACILITY_CREATE", "FACILITY_UPDATE",
         "BACKUP_READ", "BACKUP_CREATE", "SETTING_UPDATE", "REPORT_READ", "REPORT_GENERATE",
         "TEMPLATE_READ", "TEMPLATE_CREATE", "INTEGRATION_READ", "INTEGRATION_UPDATE",
+        "PORTAL_MESSAGE_READ", "NOTIFICATION_READ", "NOTIFICATION_MANAGE",
+        "MESSAGE_SEND", "NOTIFICATION_DISPATCH",
+        "DEVELOPER_ACCESS_MANAGE",
+        "MEDICAL_ACCESS_REQUEST", "MEDICAL_ACCESS_REVIEW",
+        "ACCOUNTING_READ", "ACCOUNTING_POST", "ACCOUNTING_MANAGE",
     ],
     "DOCTOR": [
         "PATIENT_READ", "PATIENT_UPDATE", "VISIT_READ", "VISIT_ROUTE", "CONSULTATION_READ",
         "CONSULTATION_WRITE", "DIAGNOSIS_WRITE", "PRESCRIPTION_WRITE", "LAB_ORDER_CREATE",
         "RADIOLOGY_ORDER", "PROCEDURE_ORDER", "PROCEDURE_PERFORM", "ADMISSION_CREATE",
         "MEAL_READ", "MEAL_ORDER", "REFERRAL_READ", "REFERRAL_CREATE", "REFERRAL_UPDATE",
+        "MEDICAL_ACCESS_REQUEST",
     ],
     "NURSE": [
         "PATIENT_READ", "VISIT_READ", "VISIT_ROUTE", "TRIAGE_PERFORM", "VITAL_SIGN_RECORD",
@@ -318,6 +330,7 @@ ROLE_PERMISSION_MAP: dict[str, list[str]] = {
     ],
     "BILLING_OFFICER": [
         "PATIENT_READ", "BILLING_READ", "BILLING_CREATE", "INVOICE_ISSUE", "INVOICE_VOID", "PAYMENT_RECEIVE", "PAYMENT_REFUND",
+        "ACCOUNTING_READ", "ACCOUNTING_POST",
     ],
     "CASHIER": [
         "PATIENT_READ", "BILLING_READ", "PAYMENT_RECEIVE",
@@ -1117,6 +1130,34 @@ def backfill_missing_user_role_links(db: Session) -> None:
     db.flush()
 
 
+REQUEST_TYPE_SEEDS: list[dict[str, str]] = [
+    {"code": "PAYROLL_RUN", "name": "Payroll Run"},
+    {"code": "LEAVE_REQUEST", "name": "Leave Request"},
+    {"code": "TIMESHEET", "name": "Timesheet"},
+    {"code": "OVERTIME", "name": "Overtime"},
+    {"code": "REIMBURSEMENT", "name": "Reimbursement"},
+    {"code": "SALARY_ADVANCE", "name": "Salary Advance"},
+    {"code": "PROCUREMENT", "name": "Procurement"},
+    {"code": "STAFF_REQUEST", "name": "Staff Request"},
+    {"code": "GENERIC", "name": "Generic Request"},
+]
+
+
+def seed_request_types(db: Session) -> None:
+    """Seed the built-in approval RequestType rows (idempotent)."""
+    from app.models.all_models import RequestType
+
+    for item in REQUEST_TYPE_SEEDS:
+        existing = (
+            db.query(RequestType)
+            .filter(RequestType.code == item["code"], RequestType.is_deleted.is_(False))
+            .first()
+        )
+        if existing is None:
+            db.add(RequestType(code=item["code"], name=item["name"], is_active=True))
+    db.commit()
+
+
 def seed_all(db: Session, *, create_default_admin: bool = True) -> None:
     """
     Run all seed steps in the correct order.
@@ -1136,6 +1177,12 @@ def seed_all(db: Session, *, create_default_admin: bool = True) -> None:
     seed_role_permissions(db)
     seed_departments(db)
     seed_service_delivery_points(db)
+    seed_request_types(db)
+    try:
+        from app.seeds.payroll_seed import seed_payroll_lookups
+        seed_payroll_lookups(db)
+    except Exception:
+        logger.warning("Payroll lookup seed skipped.", exc_info=True)
     backfill_missing_user_role_links(db)
 
     if create_default_admin:

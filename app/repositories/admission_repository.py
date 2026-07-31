@@ -25,7 +25,7 @@ from sqlalchemy.orm import Session, joinedload, selectinload
 
 from app.core.enums import AdmissionStatus, BedStatus
 from app.core.exceptions import NotFoundError
-from app.models.all_models import Admission, Bed, Visit, Ward
+from app.models.all_models import Admission, Bed, Consultation, Visit, Ward
 from app.utils.helpers import generate_uuid_str
 
 
@@ -87,12 +87,50 @@ class AdmissionRepository:
             .first()
         )
 
+    def get_active_for_patient(self, patient_id: int) -> Optional[Admission]:
+        """Return the patient's current open admission, if any.
+
+        A patient may hold only one active admission at a time; this backs the
+        duplicate-admission guard in the service layer.
+        """
+        return (
+            self.db.query(Admission)
+            .filter(
+                Admission.patient_id == patient_id,
+                Admission.is_deleted.is_(False),
+                Admission.admission_status.in_(
+                    [AdmissionStatus.PENDING, AdmissionStatus.ADMITTED, AdmissionStatus.TRANSFERRED]
+                ),
+            )
+            .order_by(Admission.id.desc())
+            .first()
+        )
+
     def get_visit(self, visit_id: int) -> Optional[Visit]:
         return (
             self.db.query(Visit)
             .filter(Visit.id == visit_id, Visit.is_deleted.is_(False))
             .first()
         )
+
+    def has_admission_recommendation(self, visit_id: int) -> bool:
+        """
+        True when a clinician has recommended admission on this visit (i.e. the
+        patient has been seen by a doctor who documented an admit recommendation
+        on a consultation). Cancelled consultations do not count.
+        """
+        from app.core.enums import EncounterStatus
+
+        q = (
+            self.db.query(Consultation.id)
+            .filter(
+                Consultation.visit_id == visit_id,
+                Consultation.recommends_admission.is_(True),
+                Consultation.is_deleted.is_(False),
+                Consultation.status != EncounterStatus.CANCELLED,
+            )
+        )
+        return self.db.query(q.exists()).scalar() or False
 
     # ============================================================
     # WARD / BED RESOLUTION

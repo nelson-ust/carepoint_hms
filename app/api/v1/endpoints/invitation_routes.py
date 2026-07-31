@@ -57,6 +57,7 @@ class InvitationReadSchema(BaseModel):
     cancelled_at: Optional[datetime] = None
     last_sent_at: Optional[datetime] = None
     resend_count: int = 0
+    date_created: Optional[datetime] = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -113,11 +114,12 @@ def create_invitation(
         pass
 
     from app.core.config import settings
+    from app.services.invitation_service import _build_accept_url
 
     accept_url = None
     base = getattr(settings, "INVITATION_ACCEPT_BASE_URL", None)
     if base:
-        accept_url = f"{base.rstrip('/')}/invitations/accept?token={token}"
+        accept_url = _build_accept_url(base, token)
 
     return {"invitation": rec, "token": token, "accept_url": accept_url}
 
@@ -165,11 +167,12 @@ def resend_invitation(
         pass
 
     from app.core.config import settings
+    from app.services.invitation_service import _build_accept_url
 
     accept_url = None
     base = getattr(settings, "INVITATION_ACCEPT_BASE_URL", None)
     if base:
-        accept_url = f"{base.rstrip('/')}/invitations/accept?token={token}"
+        accept_url = _build_accept_url(base, token)
 
     return {"invitation": rec, "token": token, "accept_url": accept_url}
 

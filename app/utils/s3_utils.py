@@ -46,6 +46,7 @@ from typing import BinaryIO, Iterable, Optional
 from urllib.parse import urlparse
 
 import boto3
+from botocore.config import Config
 from botocore.exceptions import BotoCoreError, ClientError
 from fastapi import UploadFile
 
@@ -77,14 +78,16 @@ def _require_s3_config() -> None:
     if not getattr(settings, "S3_ENABLED", False):
         raise RuntimeError("S3 storage is not enabled.")
 
+    # Central policy: only the CREDENTIALS live in the environment. The
+    # per-tenant bucket is resolved from the tenant record — the global
+    # AWS_S3_BUCKET_NAME is reserved for platform (SaaS) artifacts and is
+    # deliberately NOT required here.
     required_values = [
         getattr(settings, "AWS_ACCESS_KEY_ID", None),
         getattr(settings, "AWS_SECRET_ACCESS_KEY", None),
-        getattr(settings, "AWS_DEFAULT_REGION", None),
-        getattr(settings, "AWS_S3_BUCKET_NAME", None),
     ]
     if not all(required_values):
-        raise RuntimeError("AWS S3 configuration is incomplete.")
+        raise RuntimeError("AWS S3 credentials are not configured (AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY).")
 
 
 def _resolve_secret(value):
@@ -108,29 +111,70 @@ def get_s3_client():
         "s3",
         aws_access_key_id=_resolve_secret(settings.AWS_ACCESS_KEY_ID),
         aws_secret_access_key=_resolve_secret(settings.AWS_SECRET_ACCESS_KEY),
-        region_name=settings.AWS_DEFAULT_REGION,
+        region_name=settings.AWS_DEFAULT_REGION or "us-east-1",
+        endpoint_url=getattr(settings, "AWS_ENDPOINT_URL", None),  # MinIO / local S3
+        # SigV4 — legacy SigV2 presigned URLs are rejected by newer buckets.
+        config=Config(signature_version="s3v4"),
     )
 
 
 def get_bucket_name() -> str:
     """
-    Return the S3 bucket name. 
-    Prioritizes the tenant-specific bucket from the request context, 
-    falling back to the global AWS_S3_BUCKET_NAME setting.
+    Return the CURRENT TENANT's S3 bucket — tenant uploads never touch the
+    platform bucket.
+
+    Resolution order:
+      1. the bucket already recorded on the tenant row;
+      2. self-heal: provision a bucket for the tenant on demand and persist
+         it to the master DB (covers tenants created before provisioning);
+      3. otherwise raise — falling back to the shared platform bucket would
+         silently break tenant data isolation.
+
+    Platform (SaaS-level) artifacts must use :func:`get_platform_bucket_name`.
     """
     _require_s3_config()
-    
-    # 1. Check request context for active tenant bucket
+
+    from app.core.multitenancy import get_current_tenant
+    tenant = get_current_tenant()
+    if tenant is None:
+        raise RuntimeError(
+            "No tenant context for S3 upload — use get_platform_bucket_name() "
+            "for platform-level storage."
+        )
+    if tenant.aws_s3_bucket_name:
+        return tenant.aws_s3_bucket_name
+
+    # Self-heal: provision + persist the bucket on first use.
     try:
-        from app.core.multitenancy import get_current_tenant
-        tenant = get_current_tenant()
-        if tenant and tenant.aws_s3_bucket_name:
-            return tenant.aws_s3_bucket_name
-    except Exception:
-        pass
-        
-    # 2. Fallback to global setting
-    return settings.AWS_S3_BUCKET_NAME
+        from app.core.database import get_master_db_context
+        from app.services.aws_s3_service import S3Service
+
+        with get_master_db_context() as master_db:
+            from app.models.all_models import Tenant
+            row = master_db.query(Tenant).filter(Tenant.id == tenant.id).first()
+            bucket = S3Service().ensure_tenant_bucket(master_db, row) if row else None
+            if bucket:
+                return bucket
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("On-demand bucket provisioning failed for tenant %s: %s",
+                       getattr(tenant, "code", "?"), exc)
+
+    raise RuntimeError(
+        f"No S3 bucket is provisioned for tenant '{getattr(tenant, 'code', '?')}'. "
+        "Provision one (tenant provisioning creates it automatically) before uploading."
+    )
+
+
+def get_platform_bucket_name() -> str:
+    """
+    Return the platform (SaaS) bucket from the environment. Reserved for
+    master-level artifacts (e.g. master DB backups) — never tenant uploads.
+    """
+    _require_s3_config()
+    bucket = getattr(settings, "AWS_S3_BUCKET_NAME", None)
+    if not bucket:
+        raise RuntimeError("AWS_S3_BUCKET_NAME (the platform bucket) is not configured.")
+    return bucket
 
 
 def sanitize_filename(filename: str) -> str:
@@ -469,6 +513,66 @@ def generate_presigned_url_file(
     except BotoCoreError as exc:
         logger.error("BotoCore presigned file URL failure: %s", exc)
         raise
+
+
+def presign_stored_url(
+    stored_url: Optional[str],
+    expiration: int = DEFAULT_IMAGE_PRESIGNED_EXPIRATION,
+) -> Optional[str]:
+    """
+    Turn a STORED S3 object URL (written at upload time) into a presigned URL
+    for temporary read access.
+
+    Handles both URL shapes the app writes:
+      * virtual-hosted —  https://{bucket}.s3.{region}.amazonaws.com/{key}
+      * path-style / MinIO —  {endpoint}/{bucket}/{key}
+
+    Returns None when the URL can't be parsed or presigning fails (callers
+    fall back to an icon/initials avatar), and the URL unchanged when it
+    doesn't look like S3 at all (e.g. an external avatar URL).
+    """
+    if not stored_url:
+        return None
+    try:
+        parsed = urlparse(stored_url)
+        host = (parsed.netloc or "").lower()
+        path = parsed.path.lstrip("/")
+        if not host or not path:
+            return None
+
+        bucket: Optional[str] = None
+        key: Optional[str] = None
+        if ".s3." in host and host.endswith(".amazonaws.com"):
+            # virtual-hosted style: bucket is the host prefix
+            bucket = host.split(".s3.")[0]
+            key = path
+        elif host.endswith(".amazonaws.com"):
+            # legacy path-style on AWS: s3.{region}.amazonaws.com/{bucket}/{key}
+            parts = path.split("/", 1)
+            if len(parts) == 2:
+                bucket, key = parts
+        else:
+            endpoint = getattr(settings, "AWS_ENDPOINT_URL", None) if settings else None
+            if endpoint and host == urlparse(endpoint).netloc.lower():
+                # MinIO / custom endpoint path-style
+                parts = path.split("/", 1)
+                if len(parts) == 2:
+                    bucket, key = parts
+            else:
+                # Not an S3 URL we recognise — pass it through untouched.
+                return stored_url
+
+        if not bucket or not key:
+            return None
+        client = get_s3_client()
+        return client.generate_presigned_url(
+            "get_object",
+            Params={"Bucket": bucket, "Key": key},
+            ExpiresIn=expiration,
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("Could not presign stored URL %s: %s", stored_url[:80], exc)
+        return None
 
 
 def extract_s3_key(s3_url: str) -> str:

@@ -60,6 +60,7 @@ from app.schemas.ambulance_schemas import (
     AmbulanceMaintenanceUpdateSchema,
     AmbulanceReadinessResponseSchema,
     AmbulanceReadSchema,
+    AmbulanceStatsResponseSchema,
     AmbulanceStatusUpdateSchema,
     AmbulanceUpdateSchema,
 )
@@ -201,7 +202,7 @@ def list_ambulances(
     _: Annotated[User, Depends(require_permission("AMBULANCE_READ"))],
     service: Annotated[AmbulanceService, Depends(get_ambulance_service)],
     skip: int = Query(0, ge=0),
-    limit: int = Query(50, ge=1, le=200),
+    limit: int = Query(50, ge=1, le=1000),
     status_filter: Optional[str] = Query(
         None, alias="status",
         description="AVAILABLE, DISPATCHED, IN_TRANSIT, OUT_OF_SERVICE, UNDER_MAINTENANCE.",
@@ -213,6 +214,24 @@ def list_ambulances(
         total=total, skip=skip, limit=limit,
         message="Ambulances fetched successfully.",
     )
+
+
+# NOTE: declared before "/{ambulance_id}" so the literal path wins routing.
+@router.get(
+    "/stats",
+    response_model=AmbulanceStatsResponseSchema,
+    summary="Fleet-wide ambulance statistics",
+)
+def get_fleet_stats(
+    _: Annotated[User, Depends(require_permission("AMBULANCE_READ"))],
+    service: Annotated[AmbulanceService, Depends(get_ambulance_service)],
+):
+    data = service.get_fleet_stats()
+    return {
+        "success": True,
+        "message": "Fleet statistics computed successfully.",
+        **data,
+    }
 
 
 @router.post(
@@ -323,7 +342,7 @@ def list_drivers(
     _: Annotated[User, Depends(require_permission("AMBULANCE_READ"))],
     service: Annotated[AmbulanceService, Depends(get_ambulance_service)],
     skip: int = Query(0, ge=0),
-    limit: int = Query(50, ge=1, le=200),
+    limit: int = Query(50, ge=1, le=1000),
     ambulance_id: Optional[int] = Query(None),
 ):
     items, total = service.list_drivers(skip=skip, limit=limit, ambulance_id=ambulance_id)
@@ -528,7 +547,7 @@ def list_dispatches(
     _: Annotated[User, Depends(require_permission("DISPATCH_READ"))],
     service: Annotated[AmbulanceService, Depends(get_ambulance_service)],
     skip: int = Query(0, ge=0),
-    limit: int = Query(50, ge=1, le=200),
+    limit: int = Query(50, ge=1, le=1000),
     ambulance_id: Optional[int] = Query(None),
     status_filter: Optional[str] = Query(
         None, alias="status",

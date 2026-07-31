@@ -289,6 +289,16 @@ class PatientPortalAuthService:
             "expires_in_seconds": OTP_TTL_MINUTES * 60,
         }
 
+    def _hospital_name(self) -> Optional[str]:
+        """Resolve the tenant's hospital name for email branding, if available."""
+        try:
+            from app.core.multitenancy import get_current_tenant
+
+            tenant = get_current_tenant()
+            return tenant.name if tenant else None
+        except Exception:
+            return None
+
     def _dispatch_otp_notification(
         self,
         *,
@@ -297,26 +307,96 @@ class PatientPortalAuthService:
         destination: str,
         code: str,
     ) -> None:
-        """Best-effort notification dispatch. The OTP row is the source of truth."""
+        """
+        Best-effort notification dispatch. The OTP row is the source of truth.
+
+        Email is sent as a polished, branded HTML message with detailed context
+        (patient, hospital number, masked destination, validity window) plus a
+        plain-text fallback. SMS stays short and unstyled by nature.
+        """
         try:
             notification_service = NotificationService(self.db)
-            subject = "Your Carepoint Portal Login Code"
-            body = (
-                f"Hello {patient.first_name},\n\n"
-                f"Your one-time login code is: {code}\n"
-                f"It expires in {OTP_TTL_MINUTES} minutes. If you did not "
-                f"request this code, please ignore this message."
-            )
-            notification_service.dispatch_ad_hoc(
-                NotificationAdHocDispatchSchema(
-                    channel=channel,
-                    subject=subject,
-                    body=body,
-                    patient_id=patient.id,
-                    recipient_address=destination,
-                ),
-                raise_on_failure=False,
-            )
+            brand = self._hospital_name()
+            brand_label = brand or "the patient portal"
+
+            if channel == "EMAIL":
+                from app.utils.email_utils import (
+                    render_branded_email,
+                    render_branded_email_text,
+                )
+
+                full_name = " ".join(
+                    part
+                    for part in [patient.first_name, patient.middle_name, patient.last_name]
+                    if part
+                ) or (patient.first_name or "there")
+                masked = _mask_email(destination)
+
+                details = [
+                    ("Patient", full_name),
+                    ("Hospital number", patient.hospital_number),
+                    ("Sent to", masked),
+                    ("Valid for", f"{OTP_TTL_MINUTES} minutes"),
+                    ("Single use", "Yes — the code stops working once used"),
+                ]
+                common = dict(
+                    title="Your patient portal login code",
+                    intro=(
+                        f"Hi {patient.first_name or 'there'}, use the one-time code "
+                        f"below to securely sign in to {brand_label}."
+                    ),
+                    body_paragraphs=[
+                        "Enter this code on the login screen to access your "
+                        "appointments, test results, bills, membership card and "
+                        "secure messages.",
+                    ],
+                    highlight_label="One-time login code",
+                    highlight_value=code,
+                    highlight_caption=(
+                        f"This code expires in {OTP_TTL_MINUTES} minutes and can only "
+                        "be used once."
+                    ),
+                    details=details,
+                    details_heading="Request details",
+                    footer_note=(
+                        "For your security, never share this code with anyone — our "
+                        "staff will never ask you for it. If you didn't request this "
+                        "code, you can safely ignore this email; your account stays "
+                        "protected."
+                    ),
+                    preheader=(
+                        f"Your login code is {code} — it expires in "
+                        f"{OTP_TTL_MINUTES} minutes."
+                    ),
+                    brand_name=brand,
+                )
+                subject = f"{brand or 'Patient Portal'} — Your login code ({code})"
+                notification_service.dispatch_ad_hoc(
+                    NotificationAdHocDispatchSchema(
+                        channel="EMAIL",
+                        subject=subject,
+                        body=render_branded_email_text(**common),
+                        body_html=render_branded_email(**common),
+                        patient_id=patient.id,
+                        recipient_address=destination,
+                    ),
+                    raise_on_failure=False,
+                )
+            else:
+                sms_body = (
+                    f"{brand + ': ' if brand else ''}Your one-time login code is "
+                    f"{code}. It expires in {OTP_TTL_MINUTES} minutes. Do not share it."
+                )
+                notification_service.dispatch_ad_hoc(
+                    NotificationAdHocDispatchSchema(
+                        channel=channel,
+                        subject="Your portal login code",
+                        body=sms_body,
+                        patient_id=patient.id,
+                        recipient_address=destination,
+                    ),
+                    raise_on_failure=False,
+                )
         except Exception:
             # Notification dispatch is best-effort. The OTP row already
             # exists; the patient can still verify if delivery worked.

@@ -41,7 +41,7 @@ def list_movements(
     _: Annotated[User, Depends(require_permission("INVENTORY_READ"))],
     service: Annotated[StockMovementService, Depends(get_stock_movement_service)],
     skip: int = Query(0, ge=0),
-    limit: int = Query(50, ge=1, le=200),
+    limit: int = Query(50, ge=1, le=1000),
     store_id: Optional[int] = Query(None),
     stock_item_id: Optional[int] = Query(None),
     movement_type: Optional[str] = Query(None),

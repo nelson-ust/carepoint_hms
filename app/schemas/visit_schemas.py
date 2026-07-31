@@ -626,6 +626,40 @@ class VisitRerouteResultSchema(BaseModel):
     new_queue_ticket: Optional[QueueTicketReadSchema] = None
 
 
+class VisitAdvanceSchema(BaseModel):
+    """
+    Schema for advancing a visit one stage along its configured flow.
+
+    ``action`` is ``complete`` (default) to finish the current stage, or
+    ``skip`` to bypass an optional stage; in both cases the patient is moved to
+    the next pending step in order.
+    """
+
+    action: str = Field(default="complete", max_length=20)
+    notes: Optional[str] = None
+    routed_by_id: Optional[int] = None
+    create_queue_ticket: bool = True
+
+    @field_validator("action")
+    @classmethod
+    def normalize_action(cls, value: Optional[str]) -> str:
+        normalized = (value or "complete").strip().lower()
+        if normalized not in {"complete", "skip"}:
+            raise ValueError("action must be either 'complete' or 'skip'.")
+        return normalized
+
+
+class VisitAdvanceResultSchema(BaseModel):
+    """Response schema for a sequential visit advance."""
+
+    success: bool = True
+    message: str
+    visit: VisitDetailedReadSchema
+    completed_step: Optional[VisitFlowStepReadSchema] = None
+    next_step: Optional[VisitFlowStepReadSchema] = None
+    next_queue_ticket: Optional[QueueTicketReadSchema] = None
+
+
 class VisitSwitchFlowResultSchema(BaseModel):
     """
     Response schema for visit flow template switching.

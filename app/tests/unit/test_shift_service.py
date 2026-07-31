@@ -44,7 +44,11 @@ class TestShiftDefinitionService:
         db = MagicMock()
         svc = ShiftDefinitionService(db)
         svc.repository = MagicMock()
-        payload = MagicMock()
+        # create() now validates that the selected unit (SDP) belongs to the
+        # chosen department. Satisfy that lookup with a matching unit.
+        unit = SimpleNamespace(id=2, department_id=1)
+        db.scalars.return_value.first.return_value = unit
+        payload = MagicMock(department_id=1, service_delivery_point_id=2)
         svc.create(payload)
         svc.repository.create.assert_called_once_with(payload)
 
@@ -66,7 +70,9 @@ class TestShiftDefinitionService:
         svc.repository.list_definitions.return_value = ([], 0)
 
         items, total = svc.list_definitions(department_id=1)
-        svc.repository.list_definitions.assert_called_once_with(1, 0, 100)
+        # The repository call now carries the service_delivery_point_id filter
+        # (None here) between department_id and the pagination args.
+        svc.repository.list_definitions.assert_called_once_with(1, None, 0, 100)
         assert total == 0
 
 

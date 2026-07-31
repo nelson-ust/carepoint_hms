@@ -17,6 +17,7 @@ from app.core.exceptions import BadRequestError, NotFoundError
 from app.models.all_models import MealOrder, MealType, Billing, BillingItem
 from app.repositories.meal_repository import MealRepository
 from app.repositories.billing_repository import BillingRepository
+from app.utils.charge_capture import add_charge, resolve_billable_service
 from app.schemas.meal_schemas import MealOrderCreate, MealOrderUpdate, MealTypeCreate
 
 
@@ -128,18 +129,30 @@ class MealService:
         recipient_label = "Patient" if order.recipient_type == MealRecipient.PATIENT else f"Caregiver ({order.caregiver_name or 'Unknown'})"
         service_name = f"Meal: {order.meal_type.name} for {recipient_label}"
         
-        billing_item = BillingItem(
-            billing_id=billing.id,
-            billable_service_id=order.meal_type.billable_service_id,
+        # Ensure the meal maps to an account-bearing billable service so the
+        # charge posts to the ledger like every other clinical service.
+        billable = resolve_billable_service(
+            self.db,
+            code=f"MEAL-{order.meal_type.code}",
+            name=f"Meal: {order.meal_type.name}",
+            default_price=Decimal(order.unit_price or 0),
+            category="DIETARY",
+            domain="MEALS",
+        )
+        if order.meal_type.billable_service_id is None:
+            order.meal_type.billable_service_id = billable.id
+            self.db.add(order.meal_type)
+
+        billing_item = add_charge(
+            self.db,
+            billing=billing,
             service_name=service_name,
             service_code=order.meal_type.code,
-            quantity=order.quantity,
-            unit_price=order.unit_price,
-            line_total=order.total_amount,
-            source_reference=f"MEAL-ORDER-{order.id}"
+            unit_price=Decimal(order.unit_price or 0),
+            quantity=Decimal(order.quantity or 1),
+            billable_service_id=billable.id,
+            source_reference=f"MEAL-ORDER-{order.id}",
         )
-        self.db.add(billing_item)
-        self.db.flush()
         
         # Link the invoice item (or billing item) back to the order for audit
         order.invoice_item_id = billing_item.id

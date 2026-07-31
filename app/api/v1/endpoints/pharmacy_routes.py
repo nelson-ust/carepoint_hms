@@ -37,7 +37,7 @@ def get_worklist(
     _: Annotated[User, Depends(require_permission("PRESCRIPTION_DISPENSE"))],
     service: Annotated[PharmacyService, Depends(get_pharmacy_service)],
     skip: int = Query(0, ge=0),
-    limit: int = Query(50, ge=1, le=200),
+    limit: int = Query(50, ge=1, le=1000),
 ):
     items, total = service.worklist(skip=skip, limit=limit)
     return {

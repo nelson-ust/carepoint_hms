@@ -311,6 +311,80 @@ class AmbulanceService:
     # READINESS
     # ============================================================
 
+    def get_fleet_stats(self) -> dict:
+        """
+        Fleet-wide aggregates for the ambulance dashboard.
+
+        Returns counts derived from live rows only:
+        - ``fleet_total`` / ``by_status`` — non-deleted ambulances grouped by status
+        - ``ready_count`` — AVAILABLE ambulances with no open maintenance
+        - ``drivers_total`` — non-deleted registered drivers
+        - ``maintenance_open`` — maintenance rows still SCHEDULED / IN_PROGRESS
+        """
+        from sqlalchemy import func
+
+        fleet_total = (
+            self.db.query(func.count(Ambulance.id))
+            .filter(Ambulance.is_deleted.is_(False))
+            .scalar()
+            or 0
+        )
+
+        by_status = {s.value: 0 for s in AmbulanceStatus}
+        rows = (
+            self.db.query(Ambulance.status, func.count(Ambulance.id))
+            .filter(Ambulance.is_deleted.is_(False))
+            .group_by(Ambulance.status)
+            .all()
+        )
+        for status_value, count in rows:
+            key = status_value.value if isinstance(status_value, AmbulanceStatus) else str(status_value)
+            by_status[key] = int(count)
+
+        drivers_total = (
+            self.db.query(func.count(AmbulanceDriver.id))
+            .filter(AmbulanceDriver.is_deleted.is_(False))
+            .scalar()
+            or 0
+        )
+
+        open_states = [MaintenanceStatus.SCHEDULED, MaintenanceStatus.IN_PROGRESS]
+        maintenance_open = (
+            self.db.query(func.count(AmbulanceMaintenance.id))
+            .filter(
+                AmbulanceMaintenance.is_deleted.is_(False),
+                AmbulanceMaintenance.maintenance_status.in_(open_states),
+            )
+            .scalar()
+            or 0
+        )
+
+        open_maintenance_ambulance_ids = (
+            self.db.query(AmbulanceMaintenance.ambulance_id)
+            .filter(
+                AmbulanceMaintenance.is_deleted.is_(False),
+                AmbulanceMaintenance.maintenance_status.in_(open_states),
+            )
+        )
+        ready_count = (
+            self.db.query(func.count(Ambulance.id))
+            .filter(
+                Ambulance.is_deleted.is_(False),
+                Ambulance.status == AmbulanceStatus.AVAILABLE,
+                ~Ambulance.id.in_(open_maintenance_ambulance_ids),
+            )
+            .scalar()
+            or 0
+        )
+
+        return {
+            "fleet_total": int(fleet_total),
+            "by_status": by_status,
+            "ready_count": int(ready_count),
+            "drivers_total": int(drivers_total),
+            "maintenance_open": int(maintenance_open),
+        }
+
     def compute_readiness(self, ambulance_id: int) -> dict:
         """
         Derived readiness state. ``ready=True`` only when every check passes.

@@ -1,7 +1,9 @@
 from sqlalchemy.orm import Session
 from sqlalchemy import func
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from typing import Optional, Any, Tuple, List
+import logging
+import os
 import uuid
 import io
 import pandas as pd
@@ -14,12 +16,16 @@ from app.schemas.report_schemas import (
     ReportDownloadSchema
 )
 from app.repositories.report_repository import ReportRepository
+from app.core.config import settings
 from app.core.database import get_master_db_context
+from app.core.multitenancy import get_current_tenant_code
 from app.services.aws_s3_service import S3Service
 from app.models.all_models import (
-    WarehouseExportJob, WarehouseExportRun, WarehouseTableSnapshot, 
+    WarehouseExportJob, WarehouseExportRun, WarehouseTableSnapshot,
     WarehouseJobStatus, WarehouseExportType
 )
+
+logger = logging.getLogger(__name__)
 
 class ReportService:
     def __init__(self, db: Session):
@@ -222,11 +228,18 @@ class ReportService:
                 system_health_status="HEALTHY"
             )
 
-    def process_warehouse_export(self, run_id: int):
+    def process_warehouse_export(self, run_id: int, tenant_code: Optional[str] = None):
         """
         Processes a single warehouse export run.
-        Extracts data based on the job's source_query, generates a snapshot,
-        and uploads it to S3.
+
+        Extracts data based on the job's source_query, writes the dataset to
+        CSV (or Excel for EXCEL-type jobs), stores the file via S3 (with a
+        local uploads-directory fallback when S3 is disabled), records a
+        WarehouseTableSnapshot pointing at the file, and finalizes the run
+        status.
+
+        ``tenant_code`` should be supplied by background workers that operate
+        outside a request context; otherwise the request-bound tenant is used.
         """
         run = self.db.query(WarehouseExportRun).filter(WarehouseExportRun.id == run_id).first()
         if not run:
@@ -265,19 +278,20 @@ class ReportService:
             file_size = buffer.getbuffer().nbytes
             run.bytes_written = file_size
             
-            # 3. Upload to S3
-            tenant = self.db.query(Tenant).filter(Tenant.id == job.tenant_id).first()
-            tenant_code = tenant.code if tenant else "unknown"
-            
-            # Get bucket name (assumes bucket is provisioned)
-            bucket_name = f"carepoint-hms-{tenant_code.lower()}-reports" 
-            # In production, this might be settings.S3_REPORTS_BUCKET
-            
-            s3_key = f"warehouse/{job.code}/{run.id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.{file_extension}"
-            
+            # 3. Upload to S3 (or the local uploads directory fallback).
+            resolved_tenant_code = tenant_code or get_current_tenant_code() or "unknown"
+
+            # Central policy: reports land in the TENANT's own bucket under a
+            # reports/ prefix — never a shared or hardcoded bucket.
+            from app.utils.s3_utils import get_bucket_name
+            bucket_name = get_bucket_name()
+
+            s3_key = f"reports/warehouse/{job.code}/{run.id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.{file_extension}"
+
             # Use a mockable upload method
             file_url = self._upload_buffer_to_s3(buffer, bucket_name, s3_key, content_type)
-            
+            run.run_metadata = {**(run.run_metadata or {}), "file_url": file_url}
+
             # 4. Create Snapshot record
             snapshot = WarehouseTableSnapshot(
                 run_id=run.id,
@@ -309,12 +323,10 @@ class ReportService:
         """
         buffer, filename = self.generate_on_the_fly_report(report_type, file_type)
         
-        # Determine bucket and key
-        # We'd ideally have a way to resolve the current tenant code here.
-        # For now, we'll use a generic reports bucket or extract from DB.
-        tenant_id = getattr(self.db, "tenant_id", "shared") 
-        bucket_name = f"carepoint-hms-reports"
-        s3_key = f"scheduled/{tenant_id}/{filename}"
+        # Central policy: scheduled reports go to the tenant's own bucket.
+        from app.utils.s3_utils import get_bucket_name
+        bucket_name = get_bucket_name()
+        s3_key = f"reports/scheduled/{filename}"
         
         content_type = "application/pdf" if file_type == "pdf" else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         

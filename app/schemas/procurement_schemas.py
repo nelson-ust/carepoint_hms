@@ -31,7 +31,8 @@ class PurchaseRequisitionBase(BaseModel):
     justification: Optional[str] = None
 
 class PurchaseRequisitionCreateSchema(PurchaseRequisitionBase):
-    requested_by_staff_id: int
+    # Optional: resolved from the authenticated user's staff profile when omitted.
+    requested_by_staff_id: Optional[int] = None
     items: List[PurchaseRequisitionItemCreateSchema]
 
 class PurchaseRequisitionUpdateSchema(PurchaseRequisitionBase):
@@ -45,14 +46,26 @@ class PurchaseRequisitionSubmitSchema(BaseModel):
 class PurchaseRequisitionReadSchema(PurchaseRequisitionBase):
     id: int
     requisition_no: str
-    requested_by_staff_id: int
+    requested_by_staff_id: Optional[int] = None
     status: ProcurementRequisitionStatus
-    estimated_total: float
+    estimated_total: float = 0
     submitted_at: Optional[datetime] = None
     approval_request_id: Optional[int] = None
     items: List[PurchaseRequisitionItemReadSchema] = []
-    
+    # Display helpers populated by the route (not columns).
+    department_name: Optional[str] = None
+    requested_by_name: Optional[str] = None
+    created_at: Optional[datetime] = None
+
     model_config = ConfigDict(from_attributes=True)
+
+
+class ProcurementStatsSchema(BaseModel):
+    open_requisitions: int = 0
+    pending_approval: int = 0
+    low_stock_items: int = 0
+    total_requisitions: int = 0
+    total_estimated_value: float = 0
 
 # ── RFQ Schemas ───────────────────────────────────────────────────────
 

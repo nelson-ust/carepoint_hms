@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session
 from app.core.database import get_master_db
 from app.core.multitenancy import get_current_tenant_id
 from app.services.subscription_service import SubscriptionService
-from app.dependencies.auth import get_token_payload
+from app.dependencies.auth import get_optional_token_payload
 from typing import Annotated, Optional
 
 def get_subscription_service(db: Annotated[Session, Depends(get_master_db)]) -> SubscriptionService:
@@ -14,7 +14,7 @@ def require_plan_feature(feature_name: str):
         request: Request,
         tenant_id: Annotated[int, Depends(get_current_tenant_id)],
         service: Annotated[SubscriptionService, Depends(get_subscription_service)],
-        payload: Annotated[Optional[dict], Depends(get_token_payload)] = None
+        payload: Annotated[Optional[dict], Depends(get_optional_token_payload)] = None
     ):
         # Skip feature gate for synthetic/test tenants
         if not tenant_id:

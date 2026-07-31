@@ -59,6 +59,8 @@ class AuthUserLiteSchema(BaseModel):
     is_email_verified: bool = False
     is_phone_verified: bool = False
     is_two_factor_enabled: bool = False
+    # UI appearance preference so the client applies it immediately at login.
+    theme_preference: str = "light"
 
 
 class AuthRoleLiteSchema(BaseModel):
@@ -628,6 +630,9 @@ class AuthenticatedUserProfileSchema(BaseModel):
     two_factor_sms_enabled: bool = False
     two_factor_whatsapp_enabled: bool = False
     two_factor_authenticator_enabled: bool = False
+
+    # UI appearance preference so the client can apply it immediately at login.
+    theme_preference: str = "light"
 
     roles: list[AuthRoleLiteSchema] = Field(default_factory=list)
 

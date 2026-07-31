@@ -157,6 +157,281 @@ def render_email_template(template: str, context: Optional[dict[str, Any]] = Non
     return template.format(**context)
 
 
+# =====================================================================
+# Branded email layout
+# =====================================================================
+#
+# A single, reusable HTML shell so every transactional email the platform
+# sends (OTP, invoices, receipts, dunning, patient notifications) looks
+# consistent and carries structured detail rather than a wall of plain text.
+#
+# Design constraints for maximum email-client compatibility (Gmail, Outlook,
+# Apple Mail, mobile clients):
+#   * table-based layout, fixed 600px content width
+#   * every visual style is INLINE on the element (a small <style> block is
+#     included only for dark-mode / responsive niceties; clients that strip it
+#     still render correctly from the inline styles)
+#   * no external CSS, no web fonts, no JavaScript
+#   * a hidden preheader so the inbox preview line is meaningful
+
+import html as _html
+from typing import Sequence, Tuple
+
+_BRAND_ACCENT = "#0d9488"       # teal-600 (matches the app's emerald/teal brand)
+_BRAND_ACCENT_DARK = "#0f766e"  # teal-700
+_INK = "#111827"                # gray-900
+_MUTED = "#6b7280"              # gray-500
+_LINE = "#e5e7eb"               # gray-200
+_CANVAS = "#f3f4f6"             # gray-100
+_SOFT = "#f0fdfa"               # teal-50
+
+
+def _brand_name() -> str:
+    return str(getattr(settings, "APP_NAME", None) or "CarePoint HMS")
+
+
+def _esc(value: Any) -> str:
+    """HTML-escape a value for safe interpolation into the template."""
+    if value is None:
+        return ""
+    return _html.escape(str(value))
+
+
+def render_branded_email(
+    *,
+    title: str,
+    intro: Optional[str] = None,
+    body_paragraphs: Optional[Sequence[str]] = None,
+    details: Optional[Sequence[Tuple[str, Any]]] = None,
+    details_heading: Optional[str] = None,
+    highlight_label: Optional[str] = None,
+    highlight_value: Optional[str] = None,
+    highlight_caption: Optional[str] = None,
+    cta_label: Optional[str] = None,
+    cta_url: Optional[str] = None,
+    footer_note: Optional[str] = None,
+    preheader: Optional[str] = None,
+    brand_name: Optional[str] = None,
+    accent: str = _BRAND_ACCENT,
+) -> str:
+    """
+    Compose a polished, email-client-safe HTML email.
+
+    Args:
+        title: Bold headline shown at the top of the card.
+        intro: Optional lead sentence under the title.
+        body_paragraphs: Optional list of paragraphs (each escaped & wrapped).
+        details: Optional list of ``(label, value)`` rows rendered as a
+            two-column "receipt" style table — the structured detail.
+        details_heading: Optional small heading above the details table.
+        highlight_label/value/caption: Optional callout box (e.g. an OTP code,
+            an amount due, or a status) drawn in the brand colour.
+        cta_label/cta_url: Optional call-to-action button.
+        footer_note: Optional small print above the standard footer.
+        preheader: Inbox preview text (hidden in the body).
+        brand_name: Overrides the header brand (defaults to APP_NAME).
+        accent: Brand accent colour.
+
+    Returns:
+        A complete HTML document string.
+    """
+    brand = _esc(brand_name or _brand_name())
+    year_hint = ""  # date helpers are avoided here; the footer stays evergreen
+
+    # --- Preheader (hidden preview text) ---
+    pre = _esc(preheader or intro or title)
+    preheader_html = (
+        f'<div style="display:none;max-height:0;overflow:hidden;opacity:0;'
+        f'color:transparent;height:0;width:0;">{pre}</div>'
+    )
+
+    # --- Intro + body paragraphs ---
+    paras: list[str] = []
+    if intro:
+        paras.append(intro)
+    if body_paragraphs:
+        paras.extend(body_paragraphs)
+    paragraphs_html = "".join(
+        f'<p style="margin:0 0 16px 0;color:#374151;font-size:15px;'
+        f'line-height:1.65;">{_esc(p)}</p>'
+        for p in paras
+    )
+
+    # --- Highlight / callout box ---
+    highlight_html = ""
+    if highlight_value:
+        cap = (
+            f'<div style="margin-top:10px;color:{_MUTED};font-size:12px;'
+            f'line-height:1.5;">{_esc(highlight_caption)}</div>'
+            if highlight_caption
+            else ""
+        )
+        lab = (
+            f'<div style="text-transform:uppercase;letter-spacing:.12em;'
+            f'font-size:11px;font-weight:700;color:{accent};margin-bottom:8px;">'
+            f'{_esc(highlight_label)}</div>'
+            if highlight_label
+            else ""
+        )
+        highlight_html = (
+            f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" '
+            f'style="margin:24px 0;"><tr><td style="background:{_SOFT};'
+            f'border:1px solid #ccfbf1;border-radius:12px;padding:22px 24px;'
+            f'text-align:center;">{lab}'
+            f'<div style="font-size:26px;font-weight:800;color:{_BRAND_ACCENT_DARK};'
+            f'letter-spacing:.02em;font-family:Menlo,Consolas,\'Courier New\',monospace;">'
+            f'{_esc(highlight_value)}</div>{cap}</td></tr></table>'
+        )
+
+    # --- Details table ---
+    details_html = ""
+    if details:
+        rows = []
+        for label, value in details:
+            rows.append(
+                f'<tr>'
+                f'<td style="padding:10px 0;border-bottom:1px solid {_LINE};'
+                f'color:{_MUTED};font-size:13px;vertical-align:top;width:42%;">'
+                f'{_esc(label)}</td>'
+                f'<td style="padding:10px 0;border-bottom:1px solid {_LINE};'
+                f'color:{_INK};font-size:14px;font-weight:600;text-align:right;'
+                f'vertical-align:top;">{_esc(value)}</td>'
+                f'</tr>'
+            )
+        heading = (
+            f'<div style="text-transform:uppercase;letter-spacing:.1em;'
+            f'font-size:11px;font-weight:700;color:{_MUTED};margin:0 0 6px 0;">'
+            f'{_esc(details_heading)}</div>'
+            if details_heading
+            else ""
+        )
+        details_html = (
+            f'{heading}'
+            f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" '
+            f'style="margin:8px 0 24px 0;border-collapse:collapse;">'
+            f'{"".join(rows)}</table>'
+        )
+
+    # --- CTA button ---
+    cta_html = ""
+    if cta_label and cta_url:
+        cta_html = (
+            f'<table role="presentation" cellpadding="0" cellspacing="0" '
+            f'style="margin:8px 0 24px 0;"><tr><td style="border-radius:10px;'
+            f'background:{accent};"><a href="{_esc(cta_url)}" target="_blank" '
+            f'style="display:inline-block;padding:13px 28px;color:#ffffff;'
+            f'font-size:14px;font-weight:700;text-decoration:none;border-radius:10px;">'
+            f'{_esc(cta_label)}</a></td></tr></table>'
+        )
+
+    footer_note_html = (
+        f'<p style="margin:0 0 12px 0;color:{_MUTED};font-size:13px;'
+        f'line-height:1.6;">{_esc(footer_note)}</p>'
+        if footer_note
+        else ""
+    )
+
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="light">
+<title>{_esc(title)}</title>
+<style>
+  @media (max-width:620px) {{
+    .cp-card {{ padding:28px 22px !important; }}
+    .cp-wrap {{ padding:16px !important; }}
+  }}
+</style>
+</head>
+<body style="margin:0;padding:0;background:{_CANVAS};">
+{preheader_html}
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:{_CANVAS};">
+<tr><td align="center" class="cp-wrap" style="padding:32px 16px;">
+  <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="width:600px;max-width:100%;">
+    <!-- Header -->
+    <tr><td style="padding:4px 8px 20px 8px;">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>
+        <td style="vertical-align:middle;">
+          <span style="display:inline-block;width:34px;height:34px;border-radius:9px;
+            background:{accent};color:#ffffff;font-weight:800;font-size:16px;
+            line-height:34px;text-align:center;vertical-align:middle;">C</span>
+          <span style="margin-left:10px;font-size:17px;font-weight:800;color:{_INK};
+            letter-spacing:-.01em;vertical-align:middle;">{brand}</span>
+        </td>
+        <td style="text-align:right;color:{_MUTED};font-size:12px;vertical-align:middle;">
+          Hospital Management System
+        </td>
+      </tr></table>
+    </td></tr>
+    <!-- Card -->
+    <tr><td class="cp-card" style="background:#ffffff;border:1px solid {_LINE};
+      border-radius:16px;padding:40px 40px;">
+      <h1 style="margin:0 0 16px 0;color:{_INK};font-size:22px;font-weight:800;
+        line-height:1.3;">{_esc(title)}</h1>
+      {paragraphs_html}
+      {highlight_html}
+      {details_html}
+      {cta_html}
+      {footer_note_html}
+    </td></tr>
+    <!-- Footer -->
+    <tr><td style="padding:24px 12px;text-align:center;color:{_MUTED};font-size:12px;
+      line-height:1.6;">
+      This is an automated message from {brand}.{year_hint}<br>
+      Please do not reply directly to this email.
+    </td></tr>
+  </table>
+</td></tr>
+</table>
+</body>
+</html>"""
+
+
+def render_branded_email_text(
+    *,
+    title: str,
+    intro: Optional[str] = None,
+    body_paragraphs: Optional[Sequence[str]] = None,
+    details: Optional[Sequence[Tuple[str, Any]]] = None,
+    highlight_label: Optional[str] = None,
+    highlight_value: Optional[str] = None,
+    highlight_caption: Optional[str] = None,
+    cta_label: Optional[str] = None,
+    cta_url: Optional[str] = None,
+    footer_note: Optional[str] = None,
+    brand_name: Optional[str] = None,
+    **_ignored: Any,
+) -> str:
+    """Plain-text counterpart of :func:`render_branded_email` (fallback body)."""
+    brand = brand_name or _brand_name()
+    lines: list[str] = [brand, "=" * len(brand), "", title, ""]
+    if intro:
+        lines += [intro, ""]
+    for p in body_paragraphs or []:
+        lines += [p, ""]
+    if highlight_value:
+        if highlight_label:
+            lines.append(f"{highlight_label}: {highlight_value}")
+        else:
+            lines.append(str(highlight_value))
+        if highlight_caption:
+            lines.append(highlight_caption)
+        lines.append("")
+    if details:
+        width = max((len(str(l)) for l, _ in details), default=0)
+        for label, value in details:
+            lines.append(f"{str(label).ljust(width)}  {value}")
+        lines.append("")
+    if cta_label and cta_url:
+        lines += [f"{cta_label}: {cta_url}", ""]
+    if footer_note:
+        lines += [footer_note, ""]
+    lines.append(f"— The {brand} Team")
+    return "\n".join(lines)
+
+
 def add_attachments(
     message: EmailMessage,
     attachments: Optional[Iterable[str | Path]] = None,
@@ -449,116 +724,77 @@ def send_otp_email(email: str, code: str, purpose: str) -> dict[str, Any]:
     elif "LOGIN" in purpose.upper():
         title = "Two-Factor Authentication"
 
-    context = {
-        "title": title,
-        "purpose": purpose.lower().replace("_", " "),
-        "otp": code
-    }
-
-    text_template = (
-        "Carepoint HMS\n\n"
-        "{title}\n"
-        "Hello,\n\n"
-        "Your verification code for {purpose} is: {otp}\n\n"
-        "This code will expire in 10 minutes. If you did not request this, please ignore this email.\n"
+    purpose_label = purpose.lower().replace("_", " ")
+    common = dict(
+        title=title,
+        intro=f"You requested a {purpose_label} for your {_brand_name()} account. "
+        "Use the verification code below to continue.",
+        highlight_label="Your verification code",
+        highlight_value=code,
+        highlight_caption="This code expires in 10 minutes.",
+        footer_note="If you didn't request this, you can safely ignore this email — "
+        "your account remains secure. Never share this code with anyone.",
+        preheader=f"Your {_brand_name()} code is {code} (expires in 10 minutes).",
     )
 
-    html_template = """
-<!DOCTYPE html>
-<html>
-<head>
-    <style>
-        body {
-            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
-            background-color: #f9fafb;
-            margin: 0;
-            padding: 40px;
-            -webkit-font-smoothing: antialiased;
-        }
-        .container {
-            max-width: 600px;
-            margin: 0 auto;
-            background-color: #ffffff;
-            border-radius: 16px;
-            padding: 48px;
-            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
-        }
-        .header {
-            text-align: center;
-            margin-bottom: 32px;
-        }
-        .logo {
-            font-weight: 800;
-            font-size: 24px;
-            color: #0d9488;
-            letter-spacing: -0.025em;
-        }
-        h1 {
-            color: #111827;
-            font-size: 24px;
-            font-weight: 700;
-            margin-bottom: 16px;
-            text-align: center;
-        }
-        p {
-            color: #4b5563;
-            font-size: 16px;
-            line-height: 1.6;
-            margin-bottom: 24px;
-        }
-        .otp-container {
-            background-color: #f0fdfa;
-            border: 1px solid #ccfbf1;
-            border-radius: 12px;
-            padding: 24px;
-            text-align: center;
-            margin: 32px 0;
-        }
-        .otp-code {
-            font-family: 'Courier New', monospace;
-            font-size: 36px;
-            font-weight: 800;
-            color: #0f766e;
-            letter-spacing: 0.25em;
-        }
-        .footer {
-            text-align: center;
-            margin-top: 48px;
-            color: #9ca3af;
-            font-size: 14px;
-        }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <div class="header">
-            <span class="logo">CAREPOINT</span>
-        </div>
-        <h1>{title}</h1>
-        <p>Hello,</p>
-        <p>You requested a <strong>{purpose}</strong> for your Carepoint HMS account. Use the verification code below to complete the process:</p>
-        
-        <div class="otp-container">
-            <div class="otp-code">{otp}</div>
-        </div>
-        
-        <p>This code will expire in 10 minutes. If you did not request this, please ignore this email or contact support if you have concerns.</p>
-        
-        <div class="footer">
-            &copy; 2026 Carepoint HMS. All rights reserved.<br>
-            Carepoint Hospital Management System
-        </div>
-    </div>
-</body>
-</html>
-    """
-
-    return send_templated_email(
-        subject=f"Carepoint HMS - {title}",
+    return send_email(
+        subject=f"{_brand_name()} — {title}",
         recipients=email,
-        text_template=text_template,
-        html_template=html_template,
-        context=context
+        body_text=render_branded_email_text(**common),
+        body_html=render_branded_email(**common),
+    )
+
+
+def send_developer_verification_email(
+    *,
+    email: str,
+    contact_name: str,
+    organization_name: str,
+    token: str,
+    expires_hours: int = 48,
+    verify_url: Optional[str] = None,
+) -> dict[str, Any]:
+    """
+    Send the developer-account email-verification message.
+
+    Contains the one-time verification token (and, when a frontend URL is
+    configured, a one-click verification link). Best-effort: callers should
+    treat a failure as non-fatal — the token is also returned by the register
+    endpoint as a fallback.
+    """
+    brand = _brand_name()
+    greeting = f"Hi {contact_name}," if contact_name else "Hello,"
+    intro = (
+        f"{greeting} thanks for registering "
+        f"{organization_name or 'your organization'} on the {brand} Developer "
+        "Platform. Confirm your email to activate your account and start "
+        "creating API keys."
+    )
+    common: dict[str, Any] = dict(
+        title="Verify your developer email",
+        intro=intro,
+        highlight_label="Your verification token",
+        highlight_value=token,
+        highlight_caption=f"This token expires in {expires_hours} hours.",
+        footer_note=(
+            "If you didn't create this account, you can safely ignore this "
+            "email — no account is activated until it is verified."
+        ),
+        preheader=f"Confirm your {brand} developer account to activate API access.",
+    )
+    if verify_url:
+        common["cta_label"] = "Verify my email"
+        common["cta_url"] = verify_url
+        common["body_paragraphs"] = [
+            "Click the button below to verify automatically, or open the "
+            "Developer Portal verification page and paste the token above."
+        ]
+
+    return send_email(
+        subject=f"{brand} — Verify your developer account",
+        recipients=email,
+        body_text=render_branded_email_text(**common),
+        body_html=render_branded_email(**common),
     )
 
 
@@ -577,123 +813,27 @@ def build_password_reset_email_content(
     Returns:
         dict[str, str]: ``{"subject", "body_text", "body_html"}``.
     """
-    context = {
-        "reset_link": reset_link,
-        "expires_minutes": str(expires_minutes),
-    }
-
-    text_template = (
-        "Carepoint HMS\n\n"
-        "Reset Your Password\n"
-        "Hello,\n\n"
-        "We received a request to reset the password for your Carepoint HMS account.\n"
-        "Use the link below to choose a new password:\n\n"
-        "{reset_link}\n\n"
-        "This link will expire in {expires_minutes} minutes. "
-        "If you did not request a password reset, please ignore this email — "
-        "your password will remain unchanged.\n"
+    common = dict(
+        title="Reset your password",
+        intro="We received a request to reset the password for your "
+        f"{_brand_name()} account. Click the button below to choose a new password.",
+        body_paragraphs=[
+            "If the button doesn't work, copy and paste this link into your browser:",
+            reset_link,
+        ],
+        cta_label="Reset password",
+        cta_url=reset_link,
+        footer_note=(
+            f"This link expires in {expires_minutes} minutes. If you didn't request a "
+            "password reset, you can ignore this email — your password stays unchanged."
+        ),
+        preheader="Reset your password — this link expires soon.",
     )
 
-    html_template = """
-<!DOCTYPE html>
-<html>
-<head>
-    <style>
-        body {
-            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
-            background-color: #f9fafb;
-            margin: 0;
-            padding: 40px;
-            -webkit-font-smoothing: antialiased;
-        }
-        .container {
-            max-width: 600px;
-            margin: 0 auto;
-            background-color: #ffffff;
-            border-radius: 16px;
-            padding: 48px;
-            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
-        }
-        .header {
-            text-align: center;
-            margin-bottom: 32px;
-        }
-        .logo {
-            font-weight: 800;
-            font-size: 24px;
-            color: #0d9488;
-            letter-spacing: -0.025em;
-        }
-        h1 {
-            color: #111827;
-            font-size: 24px;
-            font-weight: 700;
-            margin-bottom: 16px;
-            text-align: center;
-        }
-        p {
-            color: #4b5563;
-            font-size: 16px;
-            line-height: 1.6;
-            margin-bottom: 24px;
-        }
-        .button-container {
-            text-align: center;
-            margin: 32px 0;
-        }
-        .reset-button {
-            display: inline-block;
-            background-color: #0d9488;
-            color: #ffffff !important;
-            font-size: 16px;
-            font-weight: 700;
-            text-decoration: none;
-            padding: 14px 32px;
-            border-radius: 12px;
-        }
-        .link-fallback {
-            font-size: 13px;
-            color: #6b7280;
-            word-break: break-all;
-        }
-        .footer {
-            text-align: center;
-            margin-top: 48px;
-            color: #9ca3af;
-            font-size: 14px;
-        }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <div class="header">
-            <span class="logo">CAREPOINT</span>
-        </div>
-        <h1>Reset Your Password</h1>
-        <p>Hello,</p>
-        <p>We received a request to reset the password for your Carepoint HMS account. Click the button below to choose a new password:</p>
-
-        <div class="button-container">
-            <a href="{reset_link}" class="reset-button">Reset Password</a>
-        </div>
-
-        <p class="link-fallback">If the button does not work, copy and paste this link into your browser:<br>{reset_link}</p>
-
-        <p>This link will expire in {expires_minutes} minutes. If you did not request a password reset, please ignore this email — your password will remain unchanged.</p>
-
-        <div class="footer">
-            &copy; 2026 Carepoint HMS. All rights reserved.<br>
-            Carepoint Hospital Management System
-        </div>
-    </div>
-</body>
-</html>
-    """
-
     return {
-        "subject": "Carepoint HMS - Reset Your Password",
-        "body_text": render_email_template(text_template, context),
-        "body_html": render_email_template(html_template, context),
+        "subject": f"{_brand_name()} — Reset your password",
+        "body_text": render_branded_email_text(**common),
+        "body_html": render_branded_email(**common),
     }
 
 

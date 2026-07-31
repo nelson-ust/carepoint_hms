@@ -8,7 +8,7 @@ Repository for Drug and DrugCategory.
 from typing import Optional
 
 from sqlalchemy import func, or_
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from app.core.exceptions import AlreadyExistsError, NotFoundError
 from app.models.all_models import Drug, DrugCategory
@@ -96,6 +96,7 @@ class DrugRepository:
     def get_by_id(self, drug_id: int) -> Optional[Drug]:
         return (
             self.db.query(Drug)
+            .options(joinedload(Drug.category))
             .filter(Drug.id == drug_id, Drug.is_deleted.is_(False))
             .first()
         )
@@ -143,7 +144,13 @@ class DrugRepository:
                 )
             )
         total = query.with_entities(func.count(Drug.id)).scalar() or 0
-        items = query.order_by(Drug.name.asc()).offset(skip).limit(limit).all()
+        items = (
+            query.options(joinedload(Drug.category))
+            .order_by(Drug.name.asc())
+            .offset(skip)
+            .limit(limit)
+            .all()
+        )
         return items, int(total)
 
     def create(self, **kwargs) -> Drug:

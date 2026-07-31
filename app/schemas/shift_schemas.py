@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, time
-from typing import Optional
+from typing import List, Optional
 from pydantic import BaseModel, Field, ConfigDict
 
 from app.core.enums import StaffShiftType, ShiftStatus
@@ -22,6 +22,9 @@ class ShiftDefinitionBase(BaseModel):
 
 class ShiftDefinitionCreateSchema(ShiftDefinitionBase):
     department_id: int
+    # Optional "unit" scope — a service delivery point inside the department
+    # (ward, clinic, ICU, pharmacy…). Null means the shift is department-wide.
+    service_delivery_point_id: Optional[int] = None
 
 
 class ShiftDefinitionUpdateSchema(BaseModel):
@@ -32,13 +35,36 @@ class ShiftDefinitionUpdateSchema(BaseModel):
     break_duration_minutes: Optional[int] = Field(None, ge=0)
     color_hex: Optional[str] = Field(None, max_length=7)
     description: Optional[str] = None
+    # Nullable on purpose: send null to make a unit-scoped shift department-wide.
+    service_delivery_point_id: Optional[int] = None
 
 
 class ShiftDefinitionReadSchema(ShiftDefinitionBase):
     id: int
     department_id: int
+    service_delivery_point_id: Optional[int] = None
+    department_name: Optional[str] = None
+    service_delivery_point_name: Optional[str] = None
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class ShiftQuickSetupSchema(BaseModel):
+    """
+    One-click creation of a standard rotation for a department (optionally a
+    single unit within it):
+
+    * ``TWO``   → Day (07:00–19:00) + Night (19:00–07:00)
+    * ``THREE`` → Morning (07:00–14:00) + Afternoon (14:00–21:00) +
+                  Night (21:00–07:00)
+    """
+
+    department_id: int
+    service_delivery_point_id: Optional[int] = None
+    preset: str = Field(..., pattern="^(TWO|THREE)$")
+    # When true, existing definitions for the same scope are cleared first so
+    # re-running the setup doesn't pile up duplicates.
+    replace_existing: bool = False
 
 
 # ── Staff Shift Assignment ───────────────────────────────────────────

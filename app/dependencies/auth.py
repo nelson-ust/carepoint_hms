@@ -32,6 +32,11 @@ from app.core.enums import SubscriptionStatus
 # token extraction in protected routes.
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login")
 
+# Non-raising variant for endpoints/gates where authentication is OPTIONAL
+# (e.g. plan-feature gating on public patient-portal routes). auto_error=False
+# yields None instead of a 401 when no bearer token is supplied.
+oauth2_scheme_optional = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login", auto_error=False)
+
 # For SaaS routes, we use HTTPBearer so Swagger UI provides a generic "Bearer" input
 # instead of automatically injecting the Tenant login token.
 saas_bearer = HTTPBearer()
@@ -64,6 +69,21 @@ def get_token_payload(
     Decode the incoming bearer token and return its payload.
     """
     return decode_token(token)
+
+
+def get_optional_token_payload(
+    token: Annotated[Optional[str], Depends(oauth2_scheme_optional)] = None,
+) -> Optional[dict]:
+    """
+    Decode the bearer token when present; return None when the request is
+    anonymous or the token is invalid. Never raises — for optional-auth gates.
+    """
+    if not token:
+        return None
+    try:
+        return decode_token(token)
+    except Exception:
+        return None
 
 
 def get_access_token_payload(

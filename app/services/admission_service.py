@@ -34,9 +34,9 @@ from typing import Optional
 
 from sqlalchemy.orm import Session
 
-from app.core.enums import AdmissionStatus, BedStatus, VisitStatus
+from app.core.enums import AdmissionStatus, BedStatus, VisitPriority, VisitStatus
 from app.core.exceptions import BadRequestError, NotFoundError
-from app.models.all_models import Admission
+from app.models.all_models import Admission, StaffProfile
 from app.repositories.admission_repository import AdmissionRepository
 from app.schemas.admission_schemas import (
     AdmissionBedDayCaptureSchema,
@@ -48,6 +48,9 @@ from app.schemas.admission_schemas import (
 from app.utils.charge_capture import capture_bed_day_charges_for_admission
 from app.utils.security_event_util import record_security_event
 from app.utils.visit_routing import route_visit_to_next_sdp
+from app.core.logger import get_logger
+
+logger = get_logger(__name__)
 
 
 # Admissions that are still "open" — they hold a bed and accrue bed-day fees.
@@ -109,6 +112,49 @@ class AdmissionService:
             status=status_enum, facility_id=facility_id,
         )
 
+    def _resolve_staff_profile_id(self, user_id: Optional[int]) -> Optional[int]:
+        """Resolve a user id to their (non-deleted) staff profile id, if any.
+
+        Used to default the admitting staff to the person performing the
+        admission when the caller didn't specify one.
+        """
+        if user_id is None:
+            return None
+        sp = (
+            self.db.query(StaffProfile)
+            .filter(StaffProfile.user_id == user_id, StaffProfile.is_deleted.is_(False))
+            .first()
+        )
+        return sp.id if sp else None
+
+    def _resolve_admitting_staff_profile_id(
+        self, supplied, actor_user_id
+    ):
+        """Resolve the admitting staff to a valid ``staff_profile.id``.
+
+        ``supplied`` may already be a staff_profile id, a *user* id (the
+        staff picker is fed from /staff, which lists users), or ``None``.
+        Every case is resolved to a real ``staff_profile.id``, falling back
+        to the acting user's own profile, so ``admitted_by_staff_id`` can
+        never violate its foreign key.
+        """
+        if supplied is not None:
+            by_id = (
+                self.db.query(StaffProfile)
+                .filter(StaffProfile.id == supplied, StaffProfile.is_deleted.is_(False))
+                .first()
+            )
+            if by_id is not None:
+                return by_id.id
+            by_user = (
+                self.db.query(StaffProfile)
+                .filter(StaffProfile.user_id == supplied, StaffProfile.is_deleted.is_(False))
+                .first()
+            )
+            if by_user is not None:
+                return by_user.id
+        return self._resolve_staff_profile_id(actor_user_id)
+
     # ============================================================
     # ADMIT
     # ============================================================
@@ -133,6 +179,63 @@ class AdmissionService:
            capture today's bed-day charge into the visit's open billing.
         6. Record a ``PATIENT_ADMITTED`` security event with the bed/ward IDs.
         """
+
+        # A patient may hold only ONE active admission at a time. Block a
+        # second admission (including a visit conversion) while one is open.
+        existing_admission = self.repository.get_active_for_patient(payload.patient_id)
+        if existing_admission is not None:
+            raise BadRequestError(
+                message=(
+                    "This patient already has an active admission "
+                    f"({existing_admission.admission_no}). Discharge or cancel it "
+                    "before starting a new one."
+                ),
+                detail={
+                    "patient_id": payload.patient_id,
+                    "admission_id": existing_admission.id,
+                    "admission_no": existing_admission.admission_no,
+                    "status": str(existing_admission.admission_status),
+                },
+            )
+
+        # ----------------------------------------------------------------
+        # Admission policy — a patient may only be admitted when a doctor
+        # who saw them recommends admission, or on emergency. Emergency is
+        # either an explicit (audited) flag or a visit triaged EMERGENCY.
+        # ----------------------------------------------------------------
+        visit = None
+        if payload.visit_id is not None:
+            visit = self.repository.get_visit(payload.visit_id)
+            if visit is None:
+                raise NotFoundError(
+                    message="Visit not found.",
+                    detail={"visit_id": payload.visit_id},
+                )
+            if visit.status in {VisitStatus.COMPLETED, VisitStatus.CANCELLED}:
+                raise BadRequestError(
+                    message="Cannot admit on a closed visit.",
+                    detail={"visit_id": visit.id, "visit_status": str(visit.status)},
+                )
+
+        is_emergency = bool(payload.is_emergency) or (
+            visit is not None and visit.priority == VisitPriority.EMERGENCY
+        )
+        has_recommendation = payload.visit_id is not None and (
+            self.repository.has_admission_recommendation(payload.visit_id)
+        )
+        if not (is_emergency or has_recommendation):
+            raise BadRequestError(
+                message=(
+                    "Admission not allowed. The patient must first be seen by a "
+                    "doctor who recommends admission, or the admission must be "
+                    "flagged as an emergency."
+                ),
+                detail={
+                    "visit_id": payload.visit_id,
+                    "requires": "doctor_recommendation_or_emergency",
+                },
+            )
+        admission_basis = "EMERGENCY" if is_emergency else "DOCTOR_RECOMMENDATION"
         ward = self.repository.get_ward(payload.ward_id)
         if ward is None:
             raise NotFoundError(
@@ -167,20 +270,13 @@ class AdmissionService:
                     detail={"ward_id": ward.id},
                 )
 
-        # If a visit is supplied, ensure the visit is open. A closed visit
-        # cannot accumulate inpatient charges.
-        if payload.visit_id is not None:
-            visit = self.repository.get_visit(payload.visit_id)
-            if visit is None:
-                raise NotFoundError(
-                    message="Visit not found.",
-                    detail={"visit_id": payload.visit_id},
-                )
-            if visit.status in {VisitStatus.COMPLETED, VisitStatus.CANCELLED}:
-                raise BadRequestError(
-                    message="Cannot admit on a closed visit.",
-                    detail={"visit_id": visit.id, "visit_status": str(visit.status)},
-                )
+        # Resolve the admitting staff to a valid staff_profile id. The staff
+        # picker lists USERS (/staff), so the supplied value may be a user id,
+        # a staff_profile id, or absent; all resolve to a real staff_profile.id
+        # (falling back to the acting user) so the FK is always satisfied.
+        admitting_staff_id = self._resolve_admitting_staff_profile_id(
+            payload.admitting_staff_id, actor_user_id
+        )
 
         # Persist the admission with the resolved bed/ward.
         admitted_at = payload.admitted_at or datetime.now(timezone.utc)
@@ -189,7 +285,7 @@ class AdmissionService:
             visit_id=payload.visit_id,
             ward_id=ward.id,
             bed_id=bed.id,
-            admitting_staff_id=payload.admitting_staff_id,
+            admitting_staff_id=admitting_staff_id,
             admission_reason=payload.admission_reason,
             admitted_at=admitted_at,
             expected_discharge_at=payload.expected_discharge_at,
@@ -199,18 +295,7 @@ class AdmissionService:
         # Mark the bed OCCUPIED so it can't be re-assigned mid-flight.
         self.repository.update_bed_status(bed, BedStatus.OCCUPIED)
 
-        # Capture the very first bed-day charge so finance teams see the
-        # admission immediately on the cashier workstation.
-        bed_day_summary = {"charges_captured": 0, "total_amount_captured": Decimal("0")}
-        if payload.capture_first_bed_day_charge and admission.visit_id is not None:
-            bed_day_summary = capture_bed_day_charges_for_admission(
-                self.db,
-                admission=admission,
-                through_date=admitted_at.date(),
-            )
-
-        # Audit trail. Bed-day capture details are included so a security
-        # reviewer can correlate financial and clinical rows in one query.
+        # Audit trail for the admission itself.
         record_security_event(
             self.db,
             user_id=actor_user_id,
@@ -225,12 +310,34 @@ class AdmissionService:
                 "visit_id": admission.visit_id,
                 "ward_id": ward.id,
                 "bed_id": bed.id,
-                "bed_day_charges_captured": int(bed_day_summary.get("charges_captured", 0)),
-                "bed_day_amount_captured": str(bed_day_summary.get("total_amount_captured", Decimal("0"))),
+                "admission_basis": admission_basis,
             },
         )
 
+        # Commit the admission + bed occupancy as the atomic core. Everything
+        # after this point is a best-effort side effect that must never unwind
+        # a completed admission.
         self.db.commit()
+
+        # Capture the first bed-day charge so finance sees the admission on the
+        # cashier workstation. A billing hiccup (missing rate, catalog issue,
+        # etc.) is logged and skipped rather than failing the admission.
+        if payload.capture_first_bed_day_charge and admission.visit_id is not None:
+            try:
+                capture_bed_day_charges_for_admission(
+                    self.db,
+                    admission=admission,
+                    through_date=admitted_at.date(),
+                )
+                self.db.commit()
+            except Exception as exc:  # never fail an admission on a billing issue
+                self.db.rollback()
+                logger.warning(
+                    "First bed-day charge capture failed for admission %s: %s",
+                    admission.id,
+                    exc,
+                )
+
         return self.repository.get_required_by_id(admission.id)
 
     # ============================================================
@@ -276,6 +383,7 @@ class AdmissionService:
             admitting_staff_id=payload.admitting_staff_id,
             admission_reason=payload.admission_reason,
             expected_discharge_at=payload.expected_discharge_at,
+            is_emergency=payload.is_emergency,
             capture_first_bed_day_charge=payload.capture_first_bed_day_charge,
         )
         admission = self.admit(admit_payload, actor_user_id=actor_user_id)

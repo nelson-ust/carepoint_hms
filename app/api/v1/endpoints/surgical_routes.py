@@ -303,7 +303,7 @@ def list_theatres(
     _: Annotated[User, Depends(require_permission("THEATRE_MANAGE", "SURGICAL_READ"))],
     service: Annotated[OperatingTheatreService, Depends(get_theatre_service)],
     skip: int = Query(0, ge=0),
-    limit: int = Query(50, ge=1, le=200),
+    limit: int = Query(50, ge=1, le=1000),
     status_filter: Optional[str] = Query(None, alias="status"),
     facility_id: Optional[int] = Query(None),
     emergency_only: bool = Query(False),
@@ -428,7 +428,7 @@ def list_procedures(
     ],
     service: Annotated[SurgicalCatalogService, Depends(get_catalog_service)],
     skip: int = Query(0, ge=0),
-    limit: int = Query(50, ge=1, le=200),
+    limit: int = Query(50, ge=1, le=1000),
     search: Optional[str] = Query(None),
 ):
     items, total = service.list_procedures(skip=skip, limit=limit, search=search)
@@ -508,7 +508,7 @@ def list_cases_for_visit(
     ],
     service: Annotated[SurgicalCaseService, Depends(get_case_service)],
     skip: int = Query(0, ge=0),
-    limit: int = Query(50, ge=1, le=200),
+    limit: int = Query(50, ge=1, le=1000),
 ):
     items, total = service.list_for_visit(visit_id, skip=skip, limit=limit)
     return paginate_response(
@@ -529,7 +529,7 @@ def case_worklist(
     _: Annotated[User, Depends(require_permission("SURGICAL_PERFORM", "SURGICAL_READ"))],
     service: Annotated[SurgicalCaseService, Depends(get_case_service)],
     skip: int = Query(0, ge=0),
-    limit: int = Query(50, ge=1, le=200),
+    limit: int = Query(50, ge=1, le=1000),
     statuses: Optional[list[str]] = Query(None),
     operating_theatre_id: Optional[int] = Query(None),
     emergency_only: bool = Query(False),
@@ -933,7 +933,7 @@ def list_instrument_sets(
     _: Annotated[User, Depends(require_permission("INSTRUMENT_MANAGE", "SURGICAL_READ"))],
     service: Annotated[InstrumentSetService, Depends(get_instrument_service)],
     skip: int = Query(0, ge=0),
-    limit: int = Query(50, ge=1, le=200),
+    limit: int = Query(50, ge=1, le=1000),
     sterilization_status: Optional[str] = Query(None),
     facility_id: Optional[int] = Query(None),
     search: Optional[str] = Query(None),

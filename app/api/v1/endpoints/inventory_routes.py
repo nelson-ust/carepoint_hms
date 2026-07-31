@@ -1,13 +1,16 @@
 # app/api/v1/endpoints/inventory_routes.py
 from __future__ import annotations
 
+from io import BytesIO
 from typing import Annotated, Optional
 
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, File, Query, UploadFile, status
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.core.dependencies import require_plan_feature
+from app.core.exceptions import BadRequestError
 from app.dependencies.role import require_permission
 from app.models.all_models import User
 from app.schemas.inventory_schema import (
@@ -21,6 +24,7 @@ from app.schemas.inventory_schema import (
     InventoryStoreListResponseSchema,
     InventoryStoreReadSchema,
     InventoryStoreUpdateSchema,
+    StockItemBulkUploadResultSchema,
     StockMovementActionResponseSchema,
     StockMovementCreateSchema,
     StockMovementListResponseSchema,
@@ -31,6 +35,7 @@ from app.services.inventory_service import (
     InventoryStoreService,
     StockMovementService,
 )
+from app.utils.inventory_import import parse_stock_item_rows
 from app.utils.pagination import paginate_response
 
 router = APIRouter(
@@ -67,7 +72,7 @@ def list_stores(
     _: Annotated[User, Depends(require_permission("INVENTORY_READ"))],
     service: Annotated[InventoryStoreService, Depends(get_store_service)],
     skip: int = Query(0, ge=0),
-    limit: int = Query(50, ge=1, le=200),
+    limit: int = Query(50, ge=1, le=1000),
     search: Optional[str] = Query(None),
 ):
     """
@@ -170,7 +175,7 @@ def list_items(
     _: Annotated[User, Depends(require_permission("INVENTORY_READ"))],
     service: Annotated[InventoryStockItemService, Depends(get_stock_item_service)],
     skip: int = Query(0, ge=0),
-    limit: int = Query(50, ge=1, le=200),
+    limit: int = Query(50, ge=1, le=1000),
     store_id: Optional[int] = Query(None),
     drug_id: Optional[int] = Query(None),
     item_type: Optional[str] = Query(None),
@@ -219,6 +224,70 @@ def create_item(
     """
     i = service.create(payload)
     return {"success": True, "message": "Stock item created.", "stock_item": i}
+
+
+# ----- BULK IMPORT -----
+# NOTE: these must be declared BEFORE "/items/{item_id}" so the literal
+# "template" / "bulk-upload" segments are not captured as an item id.
+
+@router.get(
+    "/items/template",
+    summary="Download the bulk stock-item upload template",
+)
+def download_stock_item_template(
+    _: Annotated[User, Depends(require_permission("INVENTORY_READ"))],
+    service: Annotated[InventoryStockItemService, Depends(get_stock_item_service)],
+):
+    """
+    Return an .xlsx template with a pre-populated Item Type dropdown and a
+    Store Code dropdown sourced from this tenant's stores.
+
+    Permissions: INVENTORY_READ
+    """
+    content = service.build_import_template()
+    return StreamingResponse(
+        BytesIO(content),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": 'attachment; filename="stock_items_template.xlsx"'
+        },
+    )
+
+
+@router.post(
+    "/items/bulk-upload",
+    response_model=StockItemBulkUploadResultSchema,
+    summary="Bulk-upload stock items from a filled template",
+)
+async def bulk_upload_stock_items(
+    _: Annotated[User, Depends(require_permission("INVENTORY_MANAGE"))],
+    service: Annotated[InventoryStockItemService, Depends(get_stock_item_service)],
+    file: UploadFile = File(..., description="Filled .xlsx template"),
+):
+    """
+    Import many stock items at once from a filled template. Each row is
+    validated independently; the response lists any rows that were rejected.
+
+    Permissions: INVENTORY_MANAGE
+    """
+    filename = (file.filename or "").lower()
+    if not filename.endswith((".xlsx", ".xlsm")):
+        raise BadRequestError(message="Please upload the .xlsx template file.")
+
+    content = await file.read()
+    if not content:
+        raise BadRequestError(message="The uploaded file is empty.")
+
+    try:
+        rows = parse_stock_item_rows(content)
+    except ValueError as exc:
+        raise BadRequestError(message=str(exc))
+    except Exception:
+        raise BadRequestError(
+            message="Could not read the spreadsheet. Please upload the provided .xlsx template."
+        )
+
+    return service.bulk_create(rows)
 
 
 @router.get(
@@ -288,7 +357,7 @@ def list_movements(
     _: Annotated[User, Depends(require_permission("INVENTORY_READ"))],
     service: Annotated[StockMovementService, Depends(get_movement_service)],
     skip: int = Query(0, ge=0),
-    limit: int = Query(50, ge=1, le=200),
+    limit: int = Query(50, ge=1, le=1000),
     store_id: Optional[int] = Query(None),
     stock_item_id: Optional[int] = Query(None),
     movement_type: Optional[str] = Query(None),

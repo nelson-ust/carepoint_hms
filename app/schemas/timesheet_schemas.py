@@ -19,6 +19,7 @@ class TimesheetEntryBaseSchema(BaseModel):
     weekend_hours: Decimal = Field(default=Decimal("0.00"), max_digits=6, decimal_places=2)
     holiday_hours: Decimal = Field(default=Decimal("0.00"), max_digits=6, decimal_places=2)
     is_absent: bool = False
+    is_leave: bool = False
     note: Optional[str] = None
 
 
@@ -66,9 +67,19 @@ class TimesheetReadSchema(TimesheetBaseSchema):
     approved_by_user_id: Optional[int] = None
     approved_at: Optional[datetime] = None
     locked_at: Optional[datetime] = None
+    approval_request_id: Optional[int] = None
     entries: List[TimesheetEntryReadSchema] = Field(default_factory=list)
 
 class TimesheetSubmitSchema(BaseModel):
-    flow_id: int
+    flow_id: Optional[int] = None
     title: str
     submit_now: bool = True
+    assigned_approver_user_id: Optional[int] = None
+
+
+class TimesheetSelfCreateSchema(BaseModel):
+    """Self-service create — the staff profile is resolved from the caller."""
+    period_start: date
+    period_end: date
+    notes: Optional[str] = None
+    entries: List[TimesheetEntryCreateSchema] = Field(default_factory=list)

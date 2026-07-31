@@ -2,630 +2,359 @@
 from __future__ import annotations
 
 """
-FastAPI routes for the Approval Engine.
+Generic approval-engine API.
 
-Two route groups, all mounted under ``/api/v1/approvals``:
-
-Admin / flow management
-    GET    /approvals/flows                       list flows
-    POST   /approvals/flows                       create flow + steps + approvers
-    GET    /approvals/flows/{flow_id}             read a flow with its steps
-    PATCH  /approvals/flows/{flow_id}             update flow metadata
-    DELETE /approvals/flows/{flow_id}             soft-delete a flow
-
-Operator / request runtime
-    GET    /approvals/requests                    list (filtered) requests
-    GET    /approvals/requests/inbox              "awaiting my decision" feed
-    GET    /approvals/requests/mine               requests I raised
-    POST   /approvals/requests                    submit a new request
-    GET    /approvals/requests/{request_id}       full request with steps + comments
-    POST   /approvals/requests/{request_id}/decisions   approve / reject / delegate
-    POST   /approvals/requests/{request_id}/comments    add a comment thread row
-    POST   /approvals/requests/{request_id}/cancel      cancel as requester
-
-Auth model
-----------
-* Flow CRUD requires ``AdminUser`` (matches existing ``hr_router`` pattern).
-* Submitting / commenting / cancelling requires ``CurrentActiveUser``.
-* Decisioning requires ``CurrentActiveUser``; the engine itself enforces
-  that the caller is in the step's eligible-user set.
+* Request types + flow configuration require ``AdminUser``.
+* Submitting / deciding / cancelling requires ``CurrentActiveUser``; the
+  engine enforces per-step approver eligibility.
 """
 
-from typing import Annotated, Any, Optional
+from typing import Annotated, Optional
 
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, File, Query, UploadFile, status
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.core.dependencies import AdminUser, CurrentActiveUser
-from app.core.enums import (
-    ApprovalRequestStatus,
-    ApprovalSubjectType,
-)
-from app.models.all_models import (
-    ApprovalFlow,
-    ApprovalRequest,
-    ApprovalRequestStep,
-)
+from app.core.enums import ApprovalRequestStatus
+from app.core.exceptions import BadRequestError
+from app.models.all_models import ApprovalRequest, ApprovalFlow, Role, User
 from app.schemas.approval_schemas import (
-    ApprovalCommentActionResponseSchema,
-    ApprovalCommentCreateSchema,
-    ApprovalCommentReadSchema,
-    ApprovalDecisionActionResponseSchema,
     ApprovalDecisionCreateSchema,
-    ApprovalDecisionReadSchema,
-    ApprovalFlowActionResponseSchema,
     ApprovalFlowCreateSchema,
-    ApprovalFlowListResponseSchema,
     ApprovalFlowReadSchema,
-    ApprovalFlowStepApproverReadSchema,
-    ApprovalFlowStepReadSchema,
     ApprovalFlowUpdateSchema,
-    ApprovalRequestActionResponseSchema,
+    ApprovalLogReadSchema,
     ApprovalRequestCreateSchema,
-    ApprovalRequestListResponseSchema,
+    ApprovalRequestListResponse,
     ApprovalRequestReadSchema,
-    ApprovalRequestStepReadSchema,
+    ApprovalStepReadSchema,
+    RequestTypeCreateSchema,
+    RequestTypeReadSchema,
 )
 from app.services.approval_service import (
     ApprovalFlowService,
     ApprovalRequestService,
+    RequestTypeService,
 )
 from app.utils.pagination import paginate_response
-
+from app.utils import approval_import
 
 router = APIRouter(prefix="/approvals", tags=["Approvals"])
 
 
-# ---------------------------------------------------------------------
-# Service factories
-# ---------------------------------------------------------------------
-
-
-def get_flow_service(
-    db: Annotated[Session, Depends(get_db)],
-) -> ApprovalFlowService:
+def _flow_svc(db: Annotated[Session, Depends(get_db)]) -> ApprovalFlowService:
     return ApprovalFlowService(db)
 
 
-def get_request_service(
-    db: Annotated[Session, Depends(get_db)],
-) -> ApprovalRequestService:
+def _req_svc(db: Annotated[Session, Depends(get_db)]) -> ApprovalRequestService:
     return ApprovalRequestService(db)
 
 
-# ---------------------------------------------------------------------
-# ORM -> read-schema serialisers
-# ---------------------------------------------------------------------
+def _type_svc(db: Annotated[Session, Depends(get_db)]) -> RequestTypeService:
+    return RequestTypeService(db)
 
 
-def _flow_to_dict(flow: ApprovalFlow, db: Session) -> dict[str, Any]:
-    from app.repositories.approval_repository import ApprovalFlowRepository
+# ── bulk import helpers ──────────────────────────────────────────────
 
-    repo = ApprovalFlowRepository(db)
-    steps = repo.get_steps(flow.id)
-    step_payload: list[dict[str, Any]] = []
-    for step in steps:
-        approvers = repo.get_step_approvers(step.id)
-        step_payload.append(
-            {
-                "id": step.id,
-                "flow_id": step.flow_id,
-                "step_order": step.step_order,
-                "name": step.name,
-                "description": step.description,
-                "decision_rule": step.decision_rule,
-                "required_approvals": step.required_approvals,
-                "allow_self_approval": step.allow_self_approval,
-                "sla_hours": step.sla_hours,
-                "is_optional": step.is_optional,
-                "parallel_group": step.parallel_group,
-                "condition": step.condition,
-                "approvers": [
-                    ApprovalFlowStepApproverReadSchema.model_validate(a).model_dump()
-                    for a in approvers
-                ],
-            }
+_XLSX_MEDIA = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
+async def _read_upload(file: UploadFile) -> bytes:
+    if not file.filename or not file.filename.lower().endswith(".xlsx"):
+        raise BadRequestError(message="Please upload the .xlsx template file.")
+    content = await file.read()
+    if not content:
+        raise BadRequestError(message="The uploaded file is empty.")
+    return content
+
+
+
+
+# ── serialization helpers ────────────────────────────────────────────
+
+def _user_name(db: Session, user_id: Optional[int]) -> Optional[str]:
+    if not user_id:
+        return None
+    u = db.query(User).filter(User.id == user_id).first()
+    if not u:
+        return None
+    return f"{u.first_name or ''} {u.last_name or ''}".strip() or u.username
+
+
+def _flow_read(flow: ApprovalFlow) -> ApprovalFlowReadSchema:
+    return ApprovalFlowReadSchema(
+        id=flow.id,
+        request_type_id=flow.request_type_id,
+        request_type_code=getattr(flow.request_type, "code", None),
+        code=flow.code,
+        name=flow.name,
+        description=flow.description,
+        is_default=flow.is_default,
+        is_active=flow.is_active,
+        steps=[ApprovalStepReadSchema.model_validate(s) for s in sorted(flow.steps, key=lambda x: x.step_order)],
+    )
+
+
+def _actor_media_map(db: Session, user_ids: set[int]) -> dict[int, tuple[Optional[str], Optional[str]]]:
+    """Presigned (photo, signature) for the request's actors — one presign per asset."""
+    ids = {i for i in user_ids if i}
+    if not ids:
+        return {}
+    try:
+        from app.utils.s3_utils import presign_stored_url
+        rows = db.query(User.id, User.profile_photo_url, User.signature_url).filter(User.id.in_(ids)).all()
+        return {
+            uid: (
+                presign_stored_url(photo) if photo else None,
+                presign_stored_url(sig) if sig else None,
+            )
+            for uid, photo, sig in rows
+        }
+    except Exception:  # pragma: no cover - media must never break the read
+        return {}
+
+
+def _request_read(db: Session, svc: ApprovalRequestService, req: ApprovalRequest) -> ApprovalRequestReadSchema:
+    steps = svc.steps_for(req)
+    current_name = next((s.name for s in steps if s.step_order == req.current_step_order), None)
+    media = _actor_media_map(
+        db,
+        {req.requester_user_id, req.assigned_approver_user_id}
+        | {l.actor_user_id for l in req.logs},
+    )
+    _photo = lambda uid: media.get(uid, (None, None))[0]
+    _sig = lambda uid: media.get(uid, (None, None))[1]
+    logs = [
+        ApprovalLogReadSchema(
+            id=l.id,
+            step_order=l.step_order,
+            step_name=l.step_name,
+            action=l.action,
+            actor_user_id=l.actor_user_id,
+            actor_name=_user_name(db, l.actor_user_id),
+            actor_photo_url=_photo(l.actor_user_id),
+            actor_signature_url=_sig(l.actor_user_id),
+            comment=l.comment,
+            resulting_status=l.resulting_status,
+            created_at=getattr(l, "created_at_ts", None) or getattr(l, "date_created", None),
         )
-    return {
-        "id": flow.id,
-        "code": flow.code,
-        "name": flow.name,
-        "description": flow.description,
-        "subject_type": flow.subject_type,
-        "is_default": flow.is_default,
-        "is_active": flow.is_active,
-        "version": flow.version,
-        "sla_hours": flow.sla_hours,
-        "auto_cancel_after_hours": flow.auto_cancel_after_hours,
-        "notify_on_submit": flow.notify_on_submit,
-        "notify_on_decision": flow.notify_on_decision,
-        "steps": step_payload,
-        "created_at": getattr(flow, "created_at", None),
-        "updated_at": getattr(flow, "updated_at", None),
-    }
-
-
-def _step_with_decisions(
-    step: ApprovalRequestStep, db: Session
-) -> dict[str, Any]:
-    from app.repositories.approval_repository import ApprovalRequestRepository
-
-    repo = ApprovalRequestRepository(db)
-    decisions = repo.get_step_decisions(step.id)
-    return {
-        "id": step.id,
-        "request_id": step.request_id,
-        "flow_step_id": step.flow_step_id,
-        "step_order": step.step_order,
-        "name": step.name,
-        "decision_rule": step.decision_rule,
-        "required_approvals": step.required_approvals,
-        "is_optional": step.is_optional,
-        "parallel_group": step.parallel_group,
-        "condition_snapshot": step.condition_snapshot,
-        "status": step.status,
-        "approvals_received": step.approvals_received,
-        "rejections_received": step.rejections_received,
-        "eligible_user_ids": step.eligible_user_ids or [],
-        "approver_specs": step.approver_specs or [],
-        "started_at": step.started_at,
-        "completed_at": step.completed_at,
-        "decisions": [
-            ApprovalDecisionReadSchema.model_validate(d).model_dump()
-            for d in decisions
-        ],
-    }
-
-
-def _request_to_dict(request: ApprovalRequest, db: Session) -> dict[str, Any]:
-    from app.repositories.approval_repository import ApprovalRequestRepository
-
-    repo = ApprovalRequestRepository(db)
-    steps = repo.get_steps(request.id)
-    comments = repo.get_comments(request.id)
-    return {
-        "id": request.id,
-        "flow_id": request.flow_id,
-        "subject_type": request.subject_type,
-        "subject_id": request.subject_id,
-        "requester_user_id": request.requester_user_id,
-        "requester_staff_profile_id": request.requester_staff_profile_id,
-        "department_id": request.department_id,
-        "facility_id": request.facility_id,
-        "title": request.title,
-        "description": request.description,
-        "payload": request.payload,
-        "priority": request.priority,
-        "status": request.status,
-        "submitted_at": request.submitted_at,
-        "completed_at": request.completed_at,
-        "expires_at": request.expires_at,
-        "current_step_id": request.current_step_id,
-        "decision_summary": request.decision_summary,
-        "steps": [_step_with_decisions(s, db) for s in steps],
-        "comments": [
-            ApprovalCommentReadSchema.model_validate(c).model_dump()
-            for c in comments
-        ],
-        "created_at": getattr(request, "created_at", None),
-        "updated_at": getattr(request, "updated_at", None),
-    }
-
-
-# =====================================================================
-# FLOW MANAGEMENT (admin)
-# =====================================================================
-
-
-@router.get(
-    "/flows",
-    response_model=ApprovalFlowListResponseSchema,
-    summary="List approval flows",
-)
-def list_flows(
-    _: AdminUser,
-    db: Annotated[Session, Depends(get_db)],
-    service: Annotated[ApprovalFlowService, Depends(get_flow_service)],
-    skip: int = Query(0, ge=0),
-    limit: int = Query(50, ge=1, le=200),
-    subject_type: Optional[ApprovalSubjectType] = None,
-    search: Optional[str] = None,
-    active_only: bool = Query(True),
-):
-    flows, total = service.list_flows(
-        skip=skip,
-        limit=limit,
-        subject_type=subject_type,
-        search=search,
-        active_only=active_only,
-    )
-    items = [_flow_to_dict(f, db) for f in flows]
-    return paginate_response(
-        items=items,
-        total=total,
-        skip=skip,
-        limit=limit,
-        message="Approval flows fetched successfully.",
+        for l in sorted(req.logs, key=lambda x: x.id)
+    ]
+    return ApprovalRequestReadSchema(
+        id=req.id,
+        request_type_code=req.request_type_code,
+        flow_id=req.flow_id,
+        flow_name=getattr(req.flow, "name", None),
+        subject_id=req.subject_id,
+        requester_user_id=req.requester_user_id,
+        requester_name=_user_name(db, req.requester_user_id),
+        requester_photo_url=_photo(req.requester_user_id),
+        requester_signature_url=_sig(req.requester_user_id),
+        assigned_approver_user_id=req.assigned_approver_user_id,
+        assigned_approver_name=_user_name(db, req.assigned_approver_user_id),
+        assigned_approver_photo_url=_photo(req.assigned_approver_user_id),
+        assigned_approver_signature_url=_sig(req.assigned_approver_user_id),
+        title=req.title,
+        description=req.description,
+        payload=req.payload,
+        status=req.status,
+        current_step_order=req.current_step_order,
+        current_step_name=current_name,
+        submitted_at=req.submitted_at,
+        completed_at=req.completed_at,
+        decision_summary=req.decision_summary,
+        steps=[ApprovalStepReadSchema.model_validate(s) for s in steps],
+        logs=logs,
+        created_at=getattr(req, "date_created", None),
     )
 
 
-@router.post(
-    "/flows",
-    response_model=ApprovalFlowActionResponseSchema,
-    status_code=status.HTTP_201_CREATED,
-    summary="Create a new approval flow with steps and approvers",
-)
-def create_flow(
-    payload: ApprovalFlowCreateSchema,
-    current_user: AdminUser,
-    db: Annotated[Session, Depends(get_db)],
-    service: Annotated[ApprovalFlowService, Depends(get_flow_service)],
-):
-    flow = service.create(payload, actor_user_id=current_user.id)
-    return {
-        "success": True,
-        "message": "Approval flow created successfully.",
-        "flow": ApprovalFlowReadSchema.model_validate(_flow_to_dict(flow, db)),
-    }
+# ── Request types ────────────────────────────────────────────────────
+
+@router.get("/request-types", response_model=list[RequestTypeReadSchema], summary="List request types")
+def list_request_types(_: CurrentActiveUser, svc: Annotated[RequestTypeService, Depends(_type_svc)], only_active: bool = False):
+    return svc.list(only_active=only_active)
 
 
-@router.get(
-    "/flows/{flow_id}",
-    response_model=ApprovalFlowActionResponseSchema,
-    summary="Read an approval flow",
-)
-def get_flow(
-    flow_id: int,
+@router.post("/request-types", response_model=RequestTypeReadSchema, status_code=status.HTTP_201_CREATED, summary="Create a request type")
+def create_request_type(payload: RequestTypeCreateSchema, _: AdminUser, svc: Annotated[RequestTypeService, Depends(_type_svc)]):
+    return svc.create(**payload.model_dump())
+
+
+@router.get("/request-types/template", summary="Download the bulk request-type upload template")
+def download_request_type_template(_: CurrentActiveUser):
+    content = approval_import.build_request_type_template()
+    return StreamingResponse(
+        iter([content]), media_type=_XLSX_MEDIA,
+        headers={"Content-Disposition": 'attachment; filename="request_types_template.xlsx"'},
+    )
+
+
+@router.post("/request-types/bulk-upload", summary="Bulk-upload request types from a filled template")
+async def bulk_upload_request_types(
     _: AdminUser,
-    db: Annotated[Session, Depends(get_db)],
-    service: Annotated[ApprovalFlowService, Depends(get_flow_service)],
+    svc: Annotated[RequestTypeService, Depends(_type_svc)],
+    file: UploadFile = File(..., description="Filled .xlsx template"),
 ):
-    flow = service.get(flow_id)
-    return {
-        "success": True,
-        "message": "Approval flow fetched successfully.",
-        "flow": ApprovalFlowReadSchema.model_validate(_flow_to_dict(flow, db)),
-    }
-
-
-@router.patch(
-    "/flows/{flow_id}",
-    response_model=ApprovalFlowActionResponseSchema,
-    summary="Update flow metadata",
-)
-def update_flow(
-    flow_id: int,
-    payload: ApprovalFlowUpdateSchema,
-    current_user: AdminUser,
-    db: Annotated[Session, Depends(get_db)],
-    service: Annotated[ApprovalFlowService, Depends(get_flow_service)],
-):
-    flow = service.update(flow_id, payload, actor_user_id=current_user.id)
-    return {
-        "success": True,
-        "message": "Approval flow updated successfully.",
-        "flow": ApprovalFlowReadSchema.model_validate(_flow_to_dict(flow, db)),
-    }
-
-
-@router.delete(
-    "/flows/{flow_id}",
-    response_model=ApprovalFlowActionResponseSchema,
-    summary="Soft-delete an approval flow",
-)
-def delete_flow(
-    flow_id: int,
-    current_user: AdminUser,
-    db: Annotated[Session, Depends(get_db)],
-    service: Annotated[ApprovalFlowService, Depends(get_flow_service)],
-):
-    flow = service.soft_delete(flow_id, actor_user_id=current_user.id)
-    return {
-        "success": True,
-        "message": "Approval flow deleted successfully.",
-        "flow": ApprovalFlowReadSchema.model_validate(_flow_to_dict(flow, db)),
-    }
-
-
-# =====================================================================
-# REQUEST RUNTIME (any authenticated user)
-# =====================================================================
+    content = await _read_upload(file)
+    try:
+        rows = approval_import.parse_request_type_rows(content)
+    except ValueError as exc:
+        raise BadRequestError(message=str(exc))
+    return svc.bulk_create(rows)
 
 
 @router.get(
-    "/requests",
-    response_model=ApprovalRequestListResponseSchema,
-    summary="List approval requests",
+    "/request-types/{code}/first-step-approvers",
+    summary="Eligible approvers for the first step of a request type's flow",
 )
+def first_step_approvers(
+    code: str,
+    actor: CurrentActiveUser,
+    svc: Annotated[ApprovalRequestService, Depends(_req_svc)],
+    flow_id: Optional[int] = None,
+):
+    """Used by the submit dialog: the requester picks who actions step one."""
+    return svc.first_step_approvers(code, flow_id=flow_id, exclude_user_id=actor.id)
+
+
+# ── Flows ────────────────────────────────────────────────────────────
+
+@router.get("/flows", response_model=list[ApprovalFlowReadSchema], summary="List approval flows")
+def list_flows(_: CurrentActiveUser, svc: Annotated[ApprovalFlowService, Depends(_flow_svc)], request_type: Optional[str] = None):
+    return [_flow_read(f) for f in svc.list_flows(request_type=request_type)]
+
+
+@router.post("/flows", response_model=ApprovalFlowReadSchema, status_code=status.HTTP_201_CREATED, summary="Create a flow with steps")
+def create_flow(payload: ApprovalFlowCreateSchema, _: AdminUser, svc: Annotated[ApprovalFlowService, Depends(_flow_svc)]):
+    return _flow_read(svc.create(payload))
+
+
+@router.get("/flows/template", summary="Download the bulk approval-flow upload template")
+def download_flow_template(_: CurrentActiveUser, type_svc: Annotated[RequestTypeService, Depends(_type_svc)]):
+    request_types = [(t.code, t.name) for t in type_svc.list()]
+    content = approval_import.build_flow_template(request_types)
+    return StreamingResponse(
+        iter([content]), media_type=_XLSX_MEDIA,
+        headers={"Content-Disposition": 'attachment; filename="approval_flows_template.xlsx"'},
+    )
+
+
+@router.post("/flows/bulk-upload", summary="Bulk-upload approval flows from a filled template")
+async def bulk_upload_flows(
+    _: AdminUser,
+    svc: Annotated[ApprovalFlowService, Depends(_flow_svc)],
+    file: UploadFile = File(..., description="Filled .xlsx template"),
+):
+    content = await _read_upload(file)
+    try:
+        rows = approval_import.parse_flow_rows(content)
+    except ValueError as exc:
+        raise BadRequestError(message=str(exc))
+    return svc.bulk_create_flows(rows)
+
+
+@router.get("/steps/template", summary="Download the bulk approval-step upload template")
+def download_step_template(
+    _: CurrentActiveUser,
+    db: Annotated[Session, Depends(get_db)],
+    flow_svc: Annotated[ApprovalFlowService, Depends(_flow_svc)],
+    type_svc: Annotated[RequestTypeService, Depends(_type_svc)],
+):
+    code_by_type = {t.id: t.code for t in type_svc.list()}
+    flows = [
+        (code_by_type.get(f.request_type_id, ""), f.code, f.name)
+        for f in flow_svc.list_flows()
+    ]
+    roles = [(r.code, r.name) for r in db.query(Role).order_by(Role.code.asc()).all()]
+    content = approval_import.build_step_template(flows, roles)
+    return StreamingResponse(
+        iter([content]), media_type=_XLSX_MEDIA,
+        headers={"Content-Disposition": 'attachment; filename="approval_steps_template.xlsx"'},
+    )
+
+
+@router.post("/steps/bulk-upload", summary="Bulk-upload approval steps from a filled template")
+async def bulk_upload_steps(
+    _: AdminUser,
+    svc: Annotated[ApprovalFlowService, Depends(_flow_svc)],
+    file: UploadFile = File(..., description="Filled .xlsx template"),
+):
+    content = await _read_upload(file)
+    try:
+        rows = approval_import.parse_step_rows(content)
+    except ValueError as exc:
+        raise BadRequestError(message=str(exc))
+    return svc.bulk_create_steps(rows)
+
+
+@router.get("/flows/{flow_id}", response_model=ApprovalFlowReadSchema, summary="Read a flow")
+def get_flow(flow_id: int, _: CurrentActiveUser, svc: Annotated[ApprovalFlowService, Depends(_flow_svc)]):
+    return _flow_read(svc.get(flow_id))
+
+
+@router.put("/flows/{flow_id}", response_model=ApprovalFlowReadSchema, summary="Update a flow (and optionally replace steps)")
+def update_flow(flow_id: int, payload: ApprovalFlowUpdateSchema, _: AdminUser, svc: Annotated[ApprovalFlowService, Depends(_flow_svc)]):
+    return _flow_read(svc.update(flow_id, payload))
+
+
+@router.delete("/flows/{flow_id}", status_code=status.HTTP_204_NO_CONTENT, summary="Delete (soft) a flow")
+def delete_flow(flow_id: int, _: AdminUser, svc: Annotated[ApprovalFlowService, Depends(_flow_svc)]):
+    svc.soft_delete(flow_id)
+    return None
+
+
+# ── Requests ─────────────────────────────────────────────────────────
+
+@router.get("/requests", response_model=ApprovalRequestListResponse, summary="List approval requests")
 def list_requests(
     _: CurrentActiveUser,
     db: Annotated[Session, Depends(get_db)],
-    service: Annotated[ApprovalRequestService, Depends(get_request_service)],
+    svc: Annotated[ApprovalRequestService, Depends(_req_svc)],
+    request_type: Optional[str] = None,
+    request_status: Optional[ApprovalRequestStatus] = None,
     skip: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=200),
-    subject_type: Optional[ApprovalSubjectType] = None,
-    requester_user_id: Optional[int] = None,
-    status_in: Annotated[Optional[list[ApprovalRequestStatus]], Query()] = None,
-    flow_id: Optional[int] = None,
-    search: Optional[str] = None,
 ):
-    requests, total = service.list_requests(
-        skip=skip,
-        limit=limit,
-        requester_user_id=requester_user_id,
-        subject_type=subject_type,
-        statuses=status_in,
-        flow_id=flow_id,
-        search=search,
-    )
-    items = [_request_to_dict(r, db) for r in requests]
-    return paginate_response(
-        items=items,
-        total=total,
-        skip=skip,
-        limit=limit,
-        message="Approval requests fetched successfully.",
-    )
+    rows, total = svc.list_requests(request_type=request_type, status=request_status, skip=skip, limit=limit)
+    items = [_request_read(db, svc, r) for r in rows]
+    return paginate_response(items=items, total=total, skip=skip, limit=limit, message="Approval requests fetched.")
 
 
-@router.get(
-    "/requests/inbox",
-    response_model=ApprovalRequestListResponseSchema,
-    summary="List requests awaiting my decision",
-)
-def my_inbox(
-    current_user: CurrentActiveUser,
-    db: Annotated[Session, Depends(get_db)],
-    service: Annotated[ApprovalRequestService, Depends(get_request_service)],
-    skip: int = Query(0, ge=0),
-    limit: int = Query(50, ge=1, le=200),
-    subject_type: Optional[ApprovalSubjectType] = None,
-):
-    requests, total = service.list_my_pending(
-        user_id=current_user.id,
-        skip=skip,
-        limit=limit,
-        subject_type=subject_type,
-    )
-    items = [_request_to_dict(r, db) for r in requests]
-    return paginate_response(
-        items=items,
-        total=total,
-        skip=skip,
-        limit=limit,
-        message="Requests awaiting your decision.",
-    )
+@router.get("/requests/mine", response_model=list[ApprovalRequestReadSchema], summary="Requests I raised")
+def list_my_requests(actor: CurrentActiveUser, db: Annotated[Session, Depends(get_db)], svc: Annotated[ApprovalRequestService, Depends(_req_svc)]):
+    rows, _total = svc.list_requests(requester_user_id=getattr(actor, "id", None), limit=200)
+    return [_request_read(db, svc, r) for r in rows]
 
 
-@router.get(
-    "/requests/mine",
-    response_model=ApprovalRequestListResponseSchema,
-    summary="List requests I raised",
-)
-def my_requests(
-    current_user: CurrentActiveUser,
-    db: Annotated[Session, Depends(get_db)],
-    service: Annotated[ApprovalRequestService, Depends(get_request_service)],
-    skip: int = Query(0, ge=0),
-    limit: int = Query(50, ge=1, le=200),
-    subject_type: Optional[ApprovalSubjectType] = None,
-    status_in: Annotated[Optional[list[ApprovalRequestStatus]], Query()] = None,
-):
-    requests, total = service.list_requests(
-        skip=skip,
-        limit=limit,
-        requester_user_id=current_user.id,
-        subject_type=subject_type,
-        statuses=status_in,
-    )
-    items = [_request_to_dict(r, db) for r in requests]
-    return paginate_response(
-        items=items,
-        total=total,
-        skip=skip,
-        limit=limit,
-        message="Your approval requests.",
-    )
+@router.get("/requests/pending", response_model=list[ApprovalRequestReadSchema], summary="Requests awaiting my decision")
+def list_pending(actor: CurrentActiveUser, db: Annotated[Session, Depends(get_db)], svc: Annotated[ApprovalRequestService, Depends(_req_svc)]):
+    return [_request_read(db, svc, r) for r in svc.list_my_pending(getattr(actor, "id", 0))]
 
 
-@router.post(
-    "/requests",
-    response_model=ApprovalRequestActionResponseSchema,
-    status_code=status.HTTP_201_CREATED,
-    summary="Submit a new approval request",
-)
-def submit_request(
-    payload: ApprovalRequestCreateSchema,
-    current_user: CurrentActiveUser,
-    db: Annotated[Session, Depends(get_db)],
-    service: Annotated[ApprovalRequestService, Depends(get_request_service)],
-):
-    request = service.submit(
-        payload,
-        requester_user_id=current_user.id,
-        actor_user_id=current_user.id,
-    )
-    return {
-        "success": True,
-        "message": "Approval request submitted successfully.",
-        "request": ApprovalRequestReadSchema.model_validate(
-            _request_to_dict(request, db)
-        ),
-    }
+@router.post("/requests", response_model=ApprovalRequestReadSchema, status_code=status.HTTP_201_CREATED, summary="Submit a new approval request")
+def submit_request(payload: ApprovalRequestCreateSchema, actor: CurrentActiveUser, db: Annotated[Session, Depends(get_db)], svc: Annotated[ApprovalRequestService, Depends(_req_svc)]):
+    req = svc.submit(payload, requester_user_id=getattr(actor, "id", 0))
+    if req is None:
+        from app.core.exceptions import BadRequestError
+        raise BadRequestError(message="Could not submit the approval request.")
+    return _request_read(db, svc, svc.get(req.id))
 
 
-@router.get(
-    "/requests/{request_id}",
-    response_model=ApprovalRequestActionResponseSchema,
-    summary="Read an approval request with full step + decision history",
-)
-def read_request(
-    request_id: int,
-    _: CurrentActiveUser,
-    db: Annotated[Session, Depends(get_db)],
-    service: Annotated[ApprovalRequestService, Depends(get_request_service)],
-):
-    request = service.get(request_id)
-    return {
-        "success": True,
-        "message": "Approval request fetched successfully.",
-        "request": ApprovalRequestReadSchema.model_validate(
-            _request_to_dict(request, db)
-        ),
-    }
+@router.get("/requests/{request_id}", response_model=ApprovalRequestReadSchema, summary="Read a request with steps + logs")
+def get_request(request_id: int, _: CurrentActiveUser, db: Annotated[Session, Depends(get_db)], svc: Annotated[ApprovalRequestService, Depends(_req_svc)]):
+    return _request_read(db, svc, svc.get(request_id))
 
 
-@router.post(
-    "/requests/{request_id}/decisions",
-    response_model=ApprovalDecisionActionResponseSchema,
-    summary="Record an APPROVE / REJECT / DELEGATE on the active step",
-)
-def record_decision(
-    request_id: int,
-    payload: ApprovalDecisionCreateSchema,
-    current_user: CurrentActiveUser,
-    db: Annotated[Session, Depends(get_db)],
-    service: Annotated[ApprovalRequestService, Depends(get_request_service)],
-):
-    decision, request = service.decide(
-        request_id,
-        payload,
-        decider_user_id=current_user.id,
-        actor_user_id=current_user.id,
-    )
-    return {
-        "success": True,
-        "message": "Decision recorded successfully.",
-        "decision": ApprovalDecisionReadSchema.model_validate(decision),
-        "request": ApprovalRequestReadSchema.model_validate(
-            _request_to_dict(request, db)
-        ),
-    }
+@router.post("/requests/{request_id}/decisions", response_model=ApprovalRequestReadSchema, summary="Record an action (APPROVE/RETURN/REJECT/COMMENT/CANCEL) on the active step")
+def decide_request(request_id: int, payload: ApprovalDecisionCreateSchema, actor: CurrentActiveUser, db: Annotated[Session, Depends(get_db)], svc: Annotated[ApprovalRequestService, Depends(_req_svc)]):
+    svc.decide(request_id, payload, actor_user_id=getattr(actor, "id", 0))
+    return _request_read(db, svc, svc.get(request_id))
 
 
-@router.post(
-    "/requests/{request_id}/comments",
-    response_model=ApprovalCommentActionResponseSchema,
-    status_code=status.HTTP_201_CREATED,
-    summary="Add a comment to the request thread",
-)
-def add_comment(
-    request_id: int,
-    payload: ApprovalCommentCreateSchema,
-    current_user: CurrentActiveUser,
-    service: Annotated[ApprovalRequestService, Depends(get_request_service)],
-):
-    comment = service.add_comment(
-        request_id,
-        payload,
-        author_user_id=current_user.id,
-        actor_user_id=current_user.id,
-    )
-    return {
-        "success": True,
-        "message": "Comment added successfully.",
-        "comment": ApprovalCommentReadSchema.model_validate(comment),
-    }
-
-
-@router.post(
-    "/requests/{request_id}/cancel",
-    response_model=ApprovalRequestActionResponseSchema,
-    summary="Cancel a request you submitted (DRAFT/PENDING/IN_PROGRESS)",
-)
-def cancel_request(
-    request_id: int,
-    current_user: CurrentActiveUser,
-    db: Annotated[Session, Depends(get_db)],
-    service: Annotated[ApprovalRequestService, Depends(get_request_service)],
-    reason: Optional[str] = Query(None, max_length=500),
-):
-    request = service.cancel(
-        request_id, actor_user_id=current_user.id, reason=reason
-    )
-    return {
-        "success": True,
-        "message": "Approval request cancelled.",
-        "request": ApprovalRequestReadSchema.model_validate(
-            _request_to_dict(request, db)
-        ),
-    }
-
-
-# =====================================================================
-# ADMIN OVERRIDES
-# =====================================================================
-
-
-@router.post(
-    "/requests/{request_id}/force-close",
-    response_model=ApprovalRequestActionResponseSchema,
-    summary="Admin override: mark a request APPROVED or REJECTED outright",
-)
-def admin_force_close(
-    request_id: int,
-    current_user: AdminUser,
-    db: Annotated[Session, Depends(get_db)],
-    service: Annotated[ApprovalRequestService, Depends(get_request_service)],
-    approve: bool = Query(..., description="True approves, False rejects."),
-    reason: Optional[str] = Query(None, max_length=500),
-):
-    request = service.admin_force_close(
-        request_id,
-        actor_user_id=current_user.id,
-        approve=approve,
-        reason=reason,
-    )
-    return {
-        "success": True,
-        "message": (
-            "Request force-approved by admin."
-            if approve
-            else "Request force-rejected by admin."
-        ),
-        "request": ApprovalRequestReadSchema.model_validate(
-            _request_to_dict(request, db)
-        ),
-    }
-
-
-@router.post(
-    "/requests/{request_id}/steps/{step_id}/reopen",
-    response_model=ApprovalRequestActionResponseSchema,
-    summary="Admin override: reopen a closed step on an in-flight request",
-)
-def admin_reopen_step(
-    request_id: int,
-    step_id: int,
-    current_user: AdminUser,
-    db: Annotated[Session, Depends(get_db)],
-    service: Annotated[ApprovalRequestService, Depends(get_request_service)],
-):
-    request = service.admin_reopen_step(
-        request_id, step_id, actor_user_id=current_user.id
-    )
-    return {
-        "success": True,
-        "message": "Approval step reopened.",
-        "request": ApprovalRequestReadSchema.model_validate(
-            _request_to_dict(request, db)
-        ),
-    }
-
-
-@router.post(
-    "/maintenance/expire-stale",
-    summary="Auto-expire requests whose SLA window has passed (admin / scheduler)",
-)
-def expire_stale(
-    _: AdminUser,
-    service: Annotated[ApprovalRequestService, Depends(get_request_service)],
-    batch_limit: int = Query(200, ge=1, le=2000),
-):
-    count = service.expire_stale_requests(batch_limit=batch_limit)
-    return {
-        "success": True,
-        "message": f"Auto-expired {count} approval request(s).",
-        "expired_count": count,
-    }
+@router.post("/requests/{request_id}/cancel", response_model=ApprovalRequestReadSchema, summary="Cancel a request")
+def cancel_request(request_id: int, actor: CurrentActiveUser, db: Annotated[Session, Depends(get_db)], svc: Annotated[ApprovalRequestService, Depends(_req_svc)]):
+    svc.cancel(request_id, actor_user_id=getattr(actor, "id", 0))
+    return _request_read(db, svc, svc.get(request_id))

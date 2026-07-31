@@ -120,9 +120,27 @@ class FacilityService:
     def delete_facility(self, facility_id: int) -> None:
         """
         Remove a facility.
+
+        Facilities are frequently referenced by other records (beds, cards,
+        transactions, etc.). A hard delete of a referenced facility would raise
+        a raw database IntegrityError (surfacing as an opaque 500). We translate
+        that into a friendly message advising the operator to decommission the
+        facility (set its status) instead of deleting it.
         """
+        from sqlalchemy.exc import IntegrityError
+
         facility = self.get_facility(facility_id)
-        self.repo.delete_facility(facility)
+        try:
+            self.repo.delete_facility(facility)
+        except IntegrityError:
+            self.db.rollback()
+            raise BadRequestError(
+                message=(
+                    "This facility is still linked to existing records and "
+                    "cannot be deleted. Set its status to 'Decommissioned' "
+                    "instead to retire it while preserving history."
+                )
+            )
 
 
     # --- FACILITY NETWORK BUSINESS LOGIC ---
