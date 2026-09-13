@@ -116,7 +116,12 @@ from app.api.v1.endpoints.developer_admin_routes import router as developer_admi
 from app.api.v1.endpoints.medical_access_routes import router as medical_access_router
 from app.api.v1.endpoints.medical_access_public_routes import router as medical_access_public_router
 from app.api.v1.endpoints.membership_card_public_routes import router as membership_card_public_router
+from app.api.v1.endpoints.statutory_routes import router as statutory_router
+from app.api.v1.endpoints.system_routes import router as system_router
 from app.api.v1.endpoints.accounting_routes import router as accounting_router
+from app.api.v1.endpoints.accounting_ext_routes import router as accounting_ext_router
+from app.api.v1.endpoints.banking_routes import router as banking_router
+from app.api.v1.endpoints.hmo_routes import router as hmo_router
 from app.api.v1.endpoints.template_routes import router as template_router
 from app.api.v1.endpoints.clinical_template_routes import router as clinical_template_router
 
@@ -261,6 +266,9 @@ api_router.include_router(medication_adherence_router)
 api_router.include_router(doctor_calendar_router)
 api_router.include_router(appointment_extension_router)
 api_router.include_router(tax_router)
+api_router.include_router(accounting_ext_router)
+api_router.include_router(banking_router)
+api_router.include_router(hmo_router)
 api_router.include_router(hr_router)
 api_router.include_router(approval_router)
 api_router.include_router(timesheet_router)
@@ -302,6 +310,8 @@ api_router.include_router(developer_admin_router)
 api_router.include_router(medical_access_router)
 api_router.include_router(medical_access_public_router)
 api_router.include_router(membership_card_public_router)
+api_router.include_router(system_router)
+api_router.include_router(statutory_router)
 api_router.include_router(accounting_router)
 api_router.include_router(template_router)
 api_router.include_router(clinical_template_router)

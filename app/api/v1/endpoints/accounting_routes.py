@@ -84,6 +84,13 @@ def get_entry(entry_id: int, actor: Reader, svc: Annotated[AccountingService, De
     return {"success": True, "entry": svc.get_entry(entry_id)}
 
 
+@router.post("/journal-entries/{entry_id}/approve",
+             summary="Approve + post a PENDING_APPROVAL entry (maker-checker)")
+def approve_entry(entry_id: int, actor: Manager,
+                  svc: Annotated[AccountingService, Depends(_svc)]):
+    return {"success": True, "entry": svc.approve_entry(entry_id, user_id=getattr(actor, "id", None))}
+
+
 @router.post("/journal-entries/{entry_id}/post", summary="Post a draft entry")
 def post_entry(entry_id: int, actor: Poster, svc: Annotated[AccountingService, Depends(_svc)]):
     return {"success": True, "entry": svc.post_entry(entry_id, user_id=getattr(actor, "id", None))}
@@ -102,8 +109,18 @@ def delete_entry(entry_id: int, actor: Poster, svc: Annotated[AccountingService,
 
 
 @router.post("/auto-post", summary="Sweep operational money events into the ledger (idempotent)")
-def auto_post(actor: Manager, svc: Annotated[AccountingService, Depends(_svc)]):
-    return {"success": True, **svc.auto_post_operations(user_id=getattr(actor, "id", None))}
+def auto_post(actor: Manager, svc: Annotated[AccountingService, Depends(_svc)],
+              db: Session = Depends(get_db)):
+    base = svc.auto_post_operations(user_id=getattr(actor, "id", None))
+    # Extended sources: claims, capitation, disallowances, payroll
+    # liabilities, pharmacy COGS, VAT (same idempotent source_ref pipeline).
+    from app.services.posting_rules_service import PostingRulesService
+    ext = PostingRulesService(db).sweep_extended(user_id=getattr(actor, "id", None))
+    return {"success": True,
+            "created": base["created"] + ext["created"],
+            "skipped_existing": base["skipped_existing"] + ext["skipped_existing"],
+            "refs": (base.get("refs") or []) + (ext.get("refs") or []),
+            "base": base, "extended": ext}
 
 
 # ---------------- Periods ----------------
@@ -178,6 +195,10 @@ class BillPaySchema(BaseModel):
     paid_at: date
     payment_method: Optional[str] = "BANK_TRANSFER"
     reference: Optional[str] = Field(None, max_length=120)
+    wht_rate_percent: Optional[float] = Field(
+        None, gt=0, lt=100,
+        description="Withhold WHT at this rate: vendor is settled in full, "
+                    "bank pays net, WHT goes to WHT Payable until remitted.")
 
 
 def _vendors(db: Session = Depends(get_db)) -> VendorService:

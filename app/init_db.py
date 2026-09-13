@@ -1075,13 +1075,11 @@ def seed_default_admin_user(
 
     if create_staff_profile and not admin_user.staff_profile:
         admin_department = db.query(Department).filter(Department.code == "ADMIN").first()
-        admin_service_point = db.query(ServiceDeliveryPoint).filter(ServiceDeliveryPoint.code == "REG").first()
 
         db.add(
             StaffProfile(
                 user_id=admin_user.id,
                 department_id=admin_department.id if admin_department else None,
-                service_delivery_point_id=admin_service_point.id if admin_service_point else None,
                 staff_no="STAFF-ADMIN-0001",
                 job_title="System Administrator",
                 professional_license_no=None,
@@ -1533,6 +1531,119 @@ def run_initialization(
 # CLI entry point
 # =============================================================================
 
+def provision_dedicated_deployment() -> None:
+    """
+    One-command provisioning for a DEDICATED (single-hospital) install.
+
+    Creates BOTH metadata sets (master + tenant tables) inside the single
+    ``DATABASE_URL`` database, forward-syncs the schema (new columns / enum
+    values / default chart of accounts), seeds security roles, permissions,
+    departments, request types and the default admin user, and registers the
+    one Tenant row that represents the hospital (its connection string
+    pointing back at the same database).
+
+    Idempotent: safe to re-run on upgrades. Requires
+    ``DEPLOYMENT_MODE=dedicated``; leave ``MASTER_DATABASE_URL`` unset so the
+    master engine falls back to ``DATABASE_URL``.
+    """
+    from app.core.config import settings as _settings
+    from app.core.deployment import get_or_create_dedicated_tenant
+
+    if not _settings.is_dedicated:
+        logger.error(
+            "provision_dedicated_deployment() requires DEPLOYMENT_MODE=dedicated "
+            "(set it in the environment / .env before provisioning).")
+        raise SystemExit(2)
+    if _settings.MASTER_DATABASE_URL and _settings.MASTER_DATABASE_URL != _settings.DATABASE_URL:
+        logger.warning(
+            "MASTER_DATABASE_URL is set and differs from DATABASE_URL. A "
+            "dedicated install should use ONE database — unset "
+            "MASTER_DATABASE_URL so it falls back to DATABASE_URL.")
+
+    url = _settings.DATABASE_URL
+    engine = create_engine(url, future=True)
+
+    logger.info("Dedicated provisioning: creating master + tenant tables in the single database…")
+    import app.models.all_models  # noqa: F401 — register every model
+    from app.models.base import MasterBase, TenantBase
+
+    from sqlalchemy import inspect as _sa_inspect
+    pre_existing = set(_sa_inspect(engine).get_table_names())
+    if pre_existing:
+        logger.info(
+            "Target database already has %d table(s) — continuing idempotently "
+            "(a brand-new empty database is the recommended target for a "
+            "fresh dedicated install).", len(pre_existing))
+
+    def _create_all_tolerant(metadata, label: str) -> list[str]:
+        """create_all, falling back to table-by-table when a leftover
+        relation (e.g. an orphaned index from an old drop/rename) collides.
+        Returns the list of tables that could NOT be created."""
+        try:
+            metadata.create_all(bind=engine, checkfirst=True)
+            return []
+        except Exception as exc:
+            if "already exists" not in str(exc).lower():
+                raise
+            logger.warning(
+                "%s: bulk create collided with an existing relation "
+                "(%s) — retrying table-by-table.", label, exc.__class__.__name__)
+        failed: list[str] = []
+        for table in metadata.sorted_tables:
+            try:
+                table.create(engine, checkfirst=True)
+            except Exception as exc:
+                msg = str(exc).lower()
+                if "already exists" in msg or "duplicate" in msg:
+                    existing_now = set(_sa_inspect(engine).get_table_names())
+                    if table.name not in existing_now:
+                        failed.append(table.name)
+                        # Extract the offending relation name for an
+                        # actionable hint.
+                        import re as _re
+                        m = _re.search(r'relation "([^"]+)" already exists', str(exc))
+                        rel = m.group(1) if m else "<unknown>"
+                        logger.error(
+                            "Table '%s' could not be created: a leftover "
+                            "relation named '%s' exists without its table "
+                            "(orphan from an old drop/rename). Fix with:\n"
+                            "    DROP INDEX IF EXISTS \"%s\";\n"
+                            "then re-run  python -m app.init_db --dedicated",
+                            table.name, rel, rel)
+                    continue
+                raise
+        return failed
+
+    failed = _create_all_tolerant(MasterBase.metadata, "master tables")
+    failed += _create_all_tolerant(TenantBase.metadata, "tenant tables")
+    if failed:
+        logger.error(
+            "Provisioning finished with %d table(s) unresolved (%s). "
+            "Apply the DROP INDEX hints above (or point DATABASE_URL at a "
+            "fresh empty database) and re-run.", len(failed), ", ".join(failed))
+        raise SystemExit(3)
+
+    # Forward-sync (new columns, enum values, CoA seed, request types).
+    try:
+        from app.db_sync import sync_tenant_schema
+        summary = sync_tenant_schema(url)
+        logger.info("Schema sync summary: %s", {k: len(v) for k, v in summary.items()})
+    except Exception:
+        logger.warning("Schema sync step reported an issue — continuing.", exc_info=True)
+
+    with Session(engine) as db:
+        seed_all(db, create_default_admin=True)
+        db.commit()
+        tenant = get_or_create_dedicated_tenant(db)
+        logger.info(
+            "Dedicated tenant ready: code=%s name=%s (id=%s).",
+            tenant.code, tenant.name, tenant.id)
+
+    logger.info(
+        "Dedicated deployment provisioned. Next: set LICENSE_EXPIRES_AT for the "
+        "annual licence, then start the API (python -m app.main).")
+
+
 def parse_args() -> argparse.Namespace:
     """
     Parse command-line arguments for database reset/initialization.
@@ -1668,6 +1779,16 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--dedicated",
+        action="store_true",
+        help=(
+            "Provision a DEDICATED single-hospital install: master + tenant "
+            "tables in the one DATABASE_URL database, seeds, default admin "
+            "and the hospital's Tenant row. Idempotent; requires "
+            "DEPLOYMENT_MODE=dedicated."
+        ),
+    )
+    parser.add_argument(
         "--heal-missing-tenant-dbs",
         action="store_true",
         help=(
@@ -1691,6 +1812,9 @@ if __name__ == "__main__":
     args = parse_args()
 
     try:
+        if args.dedicated:
+            provision_dedicated_deployment()
+            raise SystemExit(0)
         if args.reset:
             check_production_safety(destructive=True)
             logger.warning("Initiating FULL RESET. Dropping all tenant databases...")

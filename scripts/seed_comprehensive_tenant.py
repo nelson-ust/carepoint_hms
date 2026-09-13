@@ -34,9 +34,22 @@ from app.core.enums import (
 )
 
 def get_tenant_from_input():
-    """Prompt the user for a Tenant ID or Code."""
+    """Resolve the target Tenant ID/Code.
+
+    Non-interactive-friendly so this can run in scripted/CI contexts: checks
+    (in order) argv[1], then the TENANT_ID / TENANT env vars, then prompts,
+    and finally defaults to ID "1".
+    """
+    if len(sys.argv) > 1 and sys.argv[1].strip():
+        return sys.argv[1].strip()
+    env_val = (os.environ.get("TENANT_ID") or os.environ.get("TENANT") or "").strip()
+    if env_val:
+        return env_val
     print("\n--- Tenant Selection ---")
-    val = input("Enter Tenant ID or Tenant Code (leave blank for ID 1): ").strip()
+    try:
+        val = input("Enter Tenant ID or Tenant Code (leave blank for ID 1): ").strip()
+    except EOFError:
+        val = ""
     return val if val else "1"
 
 def seed_tenant_full():
@@ -61,6 +74,47 @@ def seed_tenant_full():
             return
 
         print(f"Connecting to Database for Tenant: {tenant.name} ({tenant.code})...")
+
+        # --- Prerequisite: ensure an ACTIVE subscription for this tenant ---
+        # Facility, user and module management are gated behind an active
+        # subscription (SaaS quota enforcement). Dedicated single-hospital
+        # installs have none, so attach the tenant to the most generous plan
+        # with a long-lived ACTIVE subscription. Idempotent; safe to re-run.
+        from app.models.all_models import SubscriptionPlan, TenantSubscription
+        from app.core.enums import SubscriptionStatus as _SubStatus
+        _active_sub = (
+            master_session.query(TenantSubscription)
+            .filter(
+                TenantSubscription.tenant_id == tenant.id,
+                TenantSubscription.status == _SubStatus.ACTIVE,
+            )
+            .first()
+        )
+        if not _active_sub:
+            _plan = (
+                master_session.query(SubscriptionPlan)
+                .order_by(SubscriptionPlan.max_users.desc())
+                .first()
+            )
+            if _plan is None:
+                print("   WARNING: No subscription plan in master DB. "
+                      "Run `python -m app.init_db --init-master-only` first.")
+            else:
+                _now = datetime.now(timezone.utc)
+                master_session.add(TenantSubscription(
+                    tenant_id=tenant.id,
+                    plan_id=_plan.id,
+                    status=_SubStatus.ACTIVE,
+                    start_date=_now,
+                    end_date=_now + timedelta(days=3650),
+                    billing_interval="YEARLY",
+                    current_period_start=_now,
+                    current_period_end=_now + timedelta(days=3650),
+                    auto_renew=True,
+                ))
+                master_session.commit()
+                print(f"   Attached ACTIVE subscription on plan "
+                      f"'{_plan.name}' (max_users={_plan.max_users}).")
         
         # Decrypt connection string and set context
         db_url = decrypt_string(tenant.db_connection_string)
@@ -164,6 +218,9 @@ def seed_tenant_full():
                 ("Radiology Suite", "RAD-01", ServicePointType.RADIOLOGY, "DIAG", True, True),
                 ("Main Pharmacy", "PHARM-01", ServicePointType.PHARMACY, "PHARM", False, True),
                 ("Surgical Theatre", "THE-01", ServicePointType.THEATRE, "SURG", True, False),
+                ("Cash Point", "CASH-01", ServicePointType.CASHIER, "ADMIN", False, True),
+                ("Billing Desk", "BILL-01", ServicePointType.CASHIER, "ADMIN", False, True),
+                ("Insurance/HMO Desk", "INS-01", ServicePointType.INSURANCE_CONFIRMATION, "ADMIN", False, True),
             ]
             sdps = {}
             for name, code, sp_type, d_code, appt, walkin in sdps_data:
@@ -198,6 +255,10 @@ def seed_tenant_full():
                 ("nurse.nightingale", "Florence", "Nightingale", "INT-MED", "TRI-01", ["NURSE"]),
                 ("lab.dexter", "Dexter", "Lab", "DIAG", "LAB-01", ["LAB_TECHNICIAN"]),
                 ("pharm.walter", "Walter", "White", "PHARM", "PHARM-01", ["PHARMACIST"]),
+                ("cashier.grace", "Grace", "Cashier", "ADMIN", "CASH-01", ["CASHIER"]),
+                ("billing.oliver", "Oliver", "Billing", "ADMIN", "BILL-01", ["BILLING_OFFICER"]),
+                ("radiographer.rachel", "Rachel", "Ray", "DIAG", "RAD-01", ["RADIOGRAPHER"]),
+                ("insurance.amara", "Amara", "Insure", "ADMIN", "INS-01", ["INSURANCE_OFFICER"]),
             ]
             staff_members = {}
             for username, f_name, l_name, d_code, s_code, role_codes in staff_to_seed:
@@ -250,19 +311,38 @@ def seed_tenant_full():
             from app.services.billing_service import BillableServiceService
             from app.schemas.billing_schemas import BillableServiceCreateSchema
             bs_svc = BillableServiceService(db)
+            # Billable services must post to a chart-of-accounts revenue account
+            # (required field). Ensure the CoA exists, then resolve ids by code.
+            try:
+                from app.seeds.accounting_seed import seed_default_chart_of_accounts
+                seed_default_chart_of_accounts(db)
+            except Exception as _coa_err:
+                print(f"   ⚠ Chart-of-accounts seed skipped: {_coa_err}")
+            from app.models.all_models import Account as _Account
+            _acct_by_code = {
+                a.code: a.id
+                for a in db.query(_Account).filter(_Account.is_deleted.is_(False)).all()
+            }
+            def _acct(*codes):
+                for c in codes:
+                    if c in _acct_by_code:
+                        return _acct_by_code[c]
+                return next(iter(_acct_by_code.values())) if _acct_by_code else None
+
             services_data = [
-                ("General Consultation", "CONS-001", "CLINICAL", "50.00"),
-                ("Specialist Consultation", "CONS-SPEC", "CLINICAL", "150.00"),
-                ("Emergency Consultation", "CONS-EMER", "CLINICAL", "200.00"),
-                ("Nursing Assessment", "NURS-001", "NURSING", "10.00"),
-                ("Theater Fee", "THEA-001", "SURGERY", "1000.00"),
+                ("General Consultation", "CONS-001", "CLINICAL", "50.00", "4010"),
+                ("Specialist Consultation", "CONS-SPEC", "CLINICAL", "150.00", "4010"),
+                ("Emergency Consultation", "CONS-EMER", "CLINICAL", "200.00", "4010"),
+                ("Nursing Assessment", "NURS-001", "NURSING", "10.00", "4000"),
+                ("Theater Fee", "THEA-001", "SURGERY", "1000.00", "4050"),
             ]
             services = {}
-            for name, code, cat, price in services_data:
+            for name, code, cat, price, acc_code in services_data:
                 s = db.query(BillableService).filter_by(code=code).first()
                 if not s:
                     s = bs_svc.create(BillableServiceCreateSchema(
-                        name=name, code=code, category=cat, default_price=Decimal(price)
+                        name=name, code=code, category=cat, default_price=Decimal(price),
+                        account_id=_acct(acc_code, "4000")
                     ))
                 services[code] = s
 
@@ -309,117 +389,130 @@ def seed_tenant_full():
                     t = lcat_svc.create(LabTestCatalogCreateSchema(code=code, name=name, default_price=Decimal(price)))
                 test_catalogs.append(t)
 
-            # 9. QUEUES & VISITS
-            print("9. Seeding Active Clinic Queues & Multi-Patient Journeys...")
-            from app.services.visit_service import VisitService
-            from app.schemas.visit_schemas import VisitInitiateSchema
-            v_svc = VisitService(db)
+            try:
+                # 9. QUEUES & VISITS
+                print("9. Seeding Active Clinic Queues & Multi-Patient Journeys...")
+                from app.services.visit_service import VisitService
+                from app.schemas.visit_schemas import VisitInitiateSchema
+                v_svc = VisitService(db)
             
-            # Journey 1: Patient 3 (Bob Smith) - Waiting at Reception
-            active_bob, _ = v_svc.list_visits(patient_id=patients[2].id)
-            if not [v for v in active_bob if v.status not in [VisitStatus.COMPLETED, VisitStatus.CANCELLED]]:
-                v_svc.initiate_visit(VisitInitiateSchema(
-                    patient_id=patients[2].id, first_service_delivery_point_id=sdps["REC-01"].id,
-                    visit_reason="New Registration", create_queue_ticket=True, first_queue_status="WAITING"
-                ))
+                # Journey 1: Patient 3 (Bob Smith) - Waiting at Reception
+                active_bob, _ = v_svc.list_visits(patient_id=patients[2].id)
+                if not [v for v in active_bob if v.status not in [VisitStatus.COMPLETED, VisitStatus.CANCELLED]]:
+                    v_svc.initiate_visit(VisitInitiateSchema(
+                        patient_id=patients[2].id, first_service_delivery_point_id=sdps["REC-01"].id,
+                        visit_reason="New Registration", create_queue_ticket=True, first_queue_status="WAITING"
+                    ))
 
-            # Journey 2: Patient 4 (Alice Wonder) - Waiting at Triage
-            active_alice, _ = v_svc.list_visits(patient_id=patients[3].id)
-            if not [v for v in active_alice if v.status not in [VisitStatus.COMPLETED, VisitStatus.CANCELLED]]:
-                v_svc.initiate_visit(VisitInitiateSchema(
-                    patient_id=patients[3].id, first_service_delivery_point_id=sdps["TRI-01"].id,
-                    visit_reason="Fever", create_queue_ticket=True, first_queue_status="WAITING"
-                ))
+                # Journey 2: Patient 4 (Alice Wonder) - Waiting at Triage
+                active_alice, _ = v_svc.list_visits(patient_id=patients[3].id)
+                if not [v for v in active_alice if v.status not in [VisitStatus.COMPLETED, VisitStatus.CANCELLED]]:
+                    v_svc.initiate_visit(VisitInitiateSchema(
+                        patient_id=patients[3].id, first_service_delivery_point_id=sdps["TRI-01"].id,
+                        visit_reason="Fever", create_queue_ticket=True, first_queue_status="WAITING"
+                    ))
 
-            # Journey 3: Patient 2 (Jane Doe) - In Consultation with Dr. Watson
-            active_jane, _ = v_svc.list_visits(patient_id=patients[1].id)
-            if not [v for v in active_jane if v.status not in [VisitStatus.COMPLETED, VisitStatus.CANCELLED]]:
-                v_svc.initiate_visit(VisitInitiateSchema(
-                    patient_id=patients[1].id, first_service_delivery_point_id=sdps["CLIN-GEN"].id,
-                    visit_reason="General Checkup", create_queue_ticket=True, first_queue_status="SERVING"
-                ))
+                # Journey 3: Patient 2 (Jane Doe) - In Consultation with Dr. Watson
+                active_jane, _ = v_svc.list_visits(patient_id=patients[1].id)
+                if not [v for v in active_jane if v.status not in [VisitStatus.COMPLETED, VisitStatus.CANCELLED]]:
+                    v_svc.initiate_visit(VisitInitiateSchema(
+                        patient_id=patients[1].id, first_service_delivery_point_id=sdps["CLIN-GEN"].id,
+                        visit_reason="General Checkup", create_queue_ticket=True, first_queue_status="SERVING"
+                    ))
             
-            # Journey 4: Patient 1 (John Wick) - Complex Journey
-            print("10. Seeding Complex Journey (John Wick)...")
-            from app.services.appointment_service import AppointmentService
-            from app.schemas.appointment_schemas import AppointmentCreateSchema
-            appt_svc = AppointmentService(db)
+                # Journey 4: Patient 1 (John Wick) - Complex Journey
+                print("10. Seeding Complex Journey (John Wick)...")
+                from app.services.appointment_service import AppointmentService
+                from app.schemas.appointment_schemas import AppointmentCreateSchema
+                appt_svc = AppointmentService(db)
             
-            existing_visits, _ = v_svc.list_visits(patient_id=patients[0].id)
-            if not existing_visits:
-                appt = appt_svc.book_appointment(AppointmentCreateSchema(
-                    patient_id=patients[0].id, facility_id=facility.id, 
-                    service_delivery_point_id=sdps["CLIN-SPEC"].id,
-                    scheduled_start_at=datetime.now(timezone.utc) - timedelta(hours=1),
-                    reason="Severe chronic pain"
-                ))
+                existing_visits, _ = v_svc.list_visits(patient_id=patients[0].id)
+                if not existing_visits:
+                    appt = appt_svc.book_appointment(AppointmentCreateSchema(
+                        patient_id=patients[0].id, facility_id=facility.id, 
+                        service_delivery_point_id=sdps["CLIN-SPEC"].id,
+                        scheduled_start_at=datetime.now(timezone.utc) - timedelta(hours=1),
+                        reason="Severe chronic pain"
+                    ))
                 
-                v_res_john = v_svc.initiate_visit(VisitInitiateSchema(
-                    patient_id=patients[0].id, appointment_id=appt.id,
-                    first_service_delivery_point_id=sdps["TRI-01"].id,
-                    visit_reason="Follow-up on pain", create_queue_ticket=True
-                ))
-                visit_john = v_res_john["visit"]
+                    v_res_john = v_svc.initiate_visit(VisitInitiateSchema(
+                        patient_id=patients[0].id, appointment_id=appt.id,
+                        first_service_delivery_point_id=sdps["TRI-01"].id,
+                        visit_reason="Follow-up on pain", create_queue_ticket=True
+                    ))
+                    visit_john = v_res_john["visit"]
 
-                from app.services.triage_service import TriageService
-                from app.services.vital_sign_service import VitalSignService
-                from app.schemas.triage_schema import TriageCreateSchema
-                from app.schemas.vital_sign_schema import VitalSignCreateSchema
-                TriageService(db).create(TriageCreateSchema(
-                    visit_id=visit_john.id, chief_complaint="Worsening pain", priority="HIGH", 
-                    assessed_by_staff_id=staff_members["nurse.joy"].id
-                ))
-                VitalSignService(db).create(VitalSignCreateSchema(
-                    patient_id=patients[0].id, visit_id=visit_john.id, temperature=38.5, heart_rate=110
-                ))
+                    from app.services.triage_service import TriageService
+                    from app.services.vital_sign_service import VitalSignService
+                    from app.schemas.triage_schema import TriageCreateSchema
+                    from app.schemas.vital_sign_schema import VitalSignCreateSchema
+                    TriageService(db).create(TriageCreateSchema(
+                        visit_id=visit_john.id, chief_complaint="Worsening pain", priority="HIGH", 
+                        assessed_by_staff_id=staff_members["nurse.joy"].id
+                    ))
+                    VitalSignService(db).create(VitalSignCreateSchema(
+                        patient_id=patients[0].id, visit_id=visit_john.id, temperature=38.5, heart_rate=110
+                    ))
 
-                # Triage complete -> route the patient to the specialist clinic.
-                # Consultations are only valid at CLINIC/EMERGENCY/WARD SDPs, so
-                # the visit must leave the TRIAGE point first.
-                from app.schemas.visit_schemas import VisitRerouteSchema
-                v_svc.reroute_visit(visit_john.id, VisitRerouteSchema(
-                    service_delivery_point_id=sdps["CLIN-SPEC"].id,
-                    reason="Triage complete - refer to specialist clinic",
-                    create_queue_ticket=True,
-                ))
+                    # Triage complete -> route the patient to the specialist clinic.
+                    # Consultations are only valid at CLINIC/EMERGENCY/WARD SDPs, so
+                    # the visit must leave the TRIAGE point first.
+                    from app.schemas.visit_schemas import VisitRerouteSchema
+                    v_svc.reroute_visit(visit_john.id, VisitRerouteSchema(
+                        service_delivery_point_id=sdps["CLIN-SPEC"].id,
+                        reason="Triage complete - refer to specialist clinic",
+                        create_queue_ticket=True,
+                    ))
 
-                from app.services.consultation_service import ConsultationService
-                from app.services.diagnosis_service import DiagnosisService
-                from app.schemas.consultation_schema import ConsultationCreateSchema
-                from app.schemas.diagnosis_schema import DiagnosisCreateSchema
-                con_john = ConsultationService(db).create(ConsultationCreateSchema(
-                    visit_id=visit_john.id, clinician_staff_id=staff_members["dr.house"].id,
-                    subjective_note="Patient reports localized pain in ribs.", assessment_note="Potential fracture."
-                ))
-                DiagnosisService(db).create(DiagnosisCreateSchema(
-                    visit_id=visit_john.id, consultation_id=con_john.id, diagnosis_name="Chest trauma", diagnosis_type="PROVISIONAL"
-                ))
+                    from app.services.consultation_service import ConsultationService
+                    from app.services.diagnosis_service import DiagnosisService
+                    from app.schemas.consultation_schema import ConsultationCreateSchema
+                    from app.schemas.diagnosis_schema import DiagnosisCreateSchema
+                    con_john = ConsultationService(db).create(ConsultationCreateSchema(
+                        visit_id=visit_john.id, clinician_staff_id=staff_members["dr.house"].id,
+                        subjective_note="Patient reports localized pain in ribs.", assessment_note="Potential fracture."
+                    ))
+                    DiagnosisService(db).create(DiagnosisCreateSchema(
+                        visit_id=visit_john.id, consultation_id=con_john.id, diagnosis_name="Chest trauma", diagnosis_type="PROVISIONAL"
+                    ))
 
-                # Lab Order
-                from app.services.lab_order_service import LabOrderService
-                from app.schemas.lab_order_schema import LabOrderCreateSchema, LabOrderItemCreateSchema
-                LabOrderService(db).create_order(LabOrderCreateSchema(
-                    visit_id=visit_john.id, consultation_id=con_john.id, items=[LabOrderItemCreateSchema(lab_test_catalog_id=test_catalogs[0].id)]
-                ))
+                    # Lab Order
+                    from app.services.lab_order_service import LabOrderService
+                    from app.schemas.lab_order_schema import LabOrderCreateSchema, LabOrderItemCreateSchema
+                    LabOrderService(db).create_order(LabOrderCreateSchema(
+                        visit_id=visit_john.id, consultation_id=con_john.id, items=[LabOrderItemCreateSchema(lab_test_catalog_id=test_catalogs[0].id)]
+                    ))
 
-                # Admission
-                from app.services.ward_service import WardService
-                from app.services.bed_service import BedService
-                from app.schemas.ward_schemas import WardCreateSchema
-                from app.schemas.bed_schemas import BedCreateSchema
-                ward = db.query(Ward).filter_by(code="WARD-A").first() or WardService(db).create_ward(WardCreateSchema(
-                    name="Executive Ward", code="WARD-A", facility_id=facility.id, department_id=depts["INT-MED"].id, capacity=5
-                ))
-                bed = db.query(Bed).filter_by(ward_id=ward.id, bed_status="AVAILABLE").first() or BedService(db).create_bed(BedCreateSchema(
-                    ward_id=ward.id, bed_no="SUITE-01", bed_status="AVAILABLE"
-                ))
+                    # Admission
+                    from app.services.ward_service import WardService
+                    from app.services.bed_service import BedService
+                    from app.schemas.ward_schemas import WardCreateSchema
+                    from app.schemas.bed_schemas import BedCreateSchema
+                    ward = db.query(Ward).filter_by(code="WARD-A").first() or WardService(db).create_ward(WardCreateSchema(
+                        name="Executive Ward", code="WARD-A", facility_id=facility.id, department_id=depts["INT-MED"].id, capacity=5
+                    ))
+                    bed = db.query(Bed).filter_by(ward_id=ward.id, bed_status="AVAILABLE").first() or BedService(db).create_bed(BedCreateSchema(
+                        ward_id=ward.id, bed_no="SUITE-01", bed_status="AVAILABLE"
+                    ))
                 
-                from app.services.admission_service import AdmissionService
-                from app.schemas.admission_schemas import AdmissionCreateSchema
-                AdmissionService(db).admit(AdmissionCreateSchema(
-                    patient_id=patients[0].id, visit_id=visit_john.id, ward_id=ward.id, bed_id=bed.id,
-                    admission_reason="Close observation for chest trauma."
-                ))
+                    from app.services.admission_service import AdmissionService
+                    from app.schemas.admission_schemas import AdmissionCreateSchema
+                    AdmissionService(db).admit(AdmissionCreateSchema(
+                        patient_id=patients[0].id, visit_id=visit_john.id, ward_id=ward.id, bed_id=bed.id,
+                        admission_reason="Close observation for chest trauma."
+                    ))
+            except Exception as _journey_err:
+                db.rollback()
+                print(f"   ⚠ Demo journeys skipped (non-fatal): {_journey_err}")
+
+            # Ensure the standard outpatient pathway template exists now that a
+            # CASHIER service point is available (idempotent; non-fatal).
+            try:
+                from app.seeds.clinical_flow_seed import seed_standard_visit_flow
+                flow_res = seed_standard_visit_flow(db)
+                print(f"11. Standard visit flow: {flow_res.get('message')}")
+            except Exception as flow_err:
+                print(f"   ⚠ Standard visit flow seeding skipped: {flow_err}")
 
             db.commit()
             print("\nExtensive Seeding Finished SUCCESSFULLY!")

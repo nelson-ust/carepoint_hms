@@ -65,6 +65,9 @@ IGNORE_PREFIXES: tuple[str, ...] = (
     "/uploads",
     "/api/v1/health",
     "/api/v1/ready",
+    # Deployment mode + licence posture: needed by the login page before any
+    # tenant or auth context exists.
+    "/api/v1/system/deployment-info",
     # Edge-node sync uses its own bearer token; tenant context is
     # resolved from the node row, not from the request URL.
     "/api/v1/edge-nodes",
@@ -115,6 +118,9 @@ DEFAULT_RESERVED_LABELS = {
     "127",
     "0",
 }
+
+
+_DEDICATED_TENANT_CACHE = None  # process-wide, set on first request
 
 
 def _resolved_base_domain() -> Optional[str]:
@@ -183,8 +189,67 @@ class TenantMiddleware(BaseHTTPMiddleware):
     dependencies will operate against the tenant database.
     """
 
+    async def _dispatch_dedicated(self, request: Request, call_next, path: str):
+        from app.core.deployment import (
+            get_or_create_dedicated_tenant,
+            is_saas_only_path,
+            license_status,
+        )
+        global _DEDICATED_TENANT_CACHE
+
+        # Platform-only surfaces do not exist on a dedicated install.
+        if is_saas_only_path(path):
+            return JSONResponse(
+                status_code=404,
+                content={
+                    "success": False,
+                    "detail": "This feature is part of the SaaS platform and is "
+                              "not available on a dedicated deployment.",
+                },
+            )
+
+        lic = license_status()
+        if lic["blocked"] and not _is_ignored_path(path):
+            return JSONResponse(
+                status_code=402,
+                content={
+                    "success": False,
+                    "error_code": "LICENSE_EXPIRED",
+                    "detail": lic["message"],
+                },
+            )
+
+        # Bind the single hospital tenant (cached after the first request).
+        try:
+            if _DEDICATED_TENANT_CACHE is None:
+                with get_master_db_context() as db:
+                    tenant = get_or_create_dedicated_tenant(db)
+                    # Touch the attributes we need so the detached instance
+                    # keeps them loaded after the session closes.
+                    _ = (tenant.id, tenant.code, tenant.name,
+                         tenant.db_connection_string)
+                    _DEDICATED_TENANT_CACHE = tenant
+            set_current_tenant(_DEDICATED_TENANT_CACHE)
+        except Exception as exc:  # pragma: no cover — never block requests
+            logger.error("Dedicated tenant binding failed: %s", exc)
+
+        response = await call_next(request)
+        if lic["message"]:
+            # HTTP headers are latin-1; strip anything outside it.
+            safe = lic["message"].encode("latin-1", "replace").decode("latin-1")
+            response.headers["X-License-Notice"] = safe
+            if lic["days_left"] is not None:
+                response.headers["X-License-Days-Left"] = str(lic["days_left"])
+        return response
+
     async def dispatch(self, request: Request, call_next):
         path = request.url.path
+
+        # 0. Dedicated single-hospital install: one static tenant, one
+        #    database, no subscriptions — access governed by the annual
+        #    licence. SaaS-platform surfaces are not exposed at all.
+        if settings.is_dedicated:
+            return await self._dispatch_dedicated(request, call_next, path)
 
         # 1. System / SaaS paths bypass tenant context entirely.
         if _is_ignored_path(path):

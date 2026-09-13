@@ -711,6 +711,17 @@ def sync_tenant_schema(db_url: str) -> dict[str, list[str]]:
         seeded_flows = _seed_builtin_approval_flows(engine)
         if seeded_flows:
             summary["seeded:approval_flows"] = seeded_flows
+        # Default hospital chart of accounts (idempotent, additive).
+        try:
+            from sqlalchemy.orm import Session as _S
+            from app.seeds.accounting_seed import seed_default_chart_of_accounts
+            with _S(engine) as _db:
+                coa = seed_default_chart_of_accounts(_db)
+                _db.commit()
+            if coa.get("created"):
+                summary["seeded:chart_of_accounts"] = [str(coa["created"])]
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("CoA seeding skipped: %s", exc)
         return summary
     finally:
         engine.dispose()
@@ -1042,4 +1053,13 @@ def _tenant_enum_extensions() -> dict[str, list[str]]:
         # Approval engine gained "return for correction".
         "approvallogaction": ["RETURN"],
         "approvalrequeststatus": ["RETURNED"],
+        # Maker-checker journal approval.
+        "journalentrystatus": ["PENDING_APPROVAL"],
+        # HMO / advanced-accounting auto-posting sources.
+        "journalsourcetype": [
+            "INSURANCE_CLAIM", "CLAIM_PAYMENT", "DISALLOWANCE",
+            "CAPITATION", "CAPITATION_PAYMENT", "INVENTORY", "TAX",
+            "BANK", "PETTY_CASH", "CASHIER", "CREDIT_NOTE", "REFUND",
+            "WRITE_OFF",
+        ],
     }

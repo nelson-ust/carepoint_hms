@@ -110,3 +110,15 @@ Carepoint HMS supports highly customizable visit flows. A standard Outpatient (O
 For detailed information on integrating with the Carepoint HMS API:
 * **[API Usage Guide](file:///Users/nelsonattah/Projects/carepoint_hms/API_USAGE_GUIDE.md)**: A comprehensive guide covering the application flow, request payloads, and response structures.
 * **[Postman Collection](file:///Users/nelsonattah/Projects/carepoint_hms/carepoint_hms_postman_collection.json)**: The complete API collection for local testing and environment setup.
+
+
+## Finance & HMO modules
+
+The HMO/insurance and full-accounting modules (plans & tariffs, coverage
+splitting, capitation, remittances, banking & reconciliation, petty cash,
+cashier sessions, credit notes/refunds, cost centers, cash flow, maker-checker)
+are documented in:
+
+- `../FINANCE_HMO_RUNBOOK.md` — operator runbook (rollout, daily/monthly routines, troubleshooting)
+- `../IMPLEMENTATION_NOTES.md` — engineering notes and design decisions
+- `FULL_API_REFERENCE.md` — endpoint reference (§ HMO / Insurance & Advanced Accounting)

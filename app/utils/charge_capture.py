@@ -60,9 +60,20 @@ def get_or_create_open_billing(
     if existing is not None:
         return existing
 
+    # Tag the billing with the patient's active insurance enrollment so every
+    # charge captured on this visit can be split HMO-vs-patient automatically.
+    patient_insurance_id = None
+    try:
+        from app.services.coverage_engine import CoverageEngine
+        enrollment = CoverageEngine(db).active_insurance_for_patient(visit.patient_id)
+        patient_insurance_id = enrollment.id if enrollment is not None else None
+    except Exception:
+        patient_insurance_id = None
+
     billing = Billing(
         patient_id=visit.patient_id,
         visit_id=visit.id,
+        patient_insurance_id=patient_insurance_id,
         billing_no=_generate_billing_no(),
         billing_date=datetime.now(timezone.utc),
         status=str(BillingStatus.OPEN),
@@ -107,6 +118,30 @@ def add_charge(
         if existing is not None:
             return existing
 
+    # --- HMO coverage split -------------------------------------------------
+    # When the billing belongs to an insured visit, price from the plan tariff
+    # and split the line into an HMO-covered portion and a patient co-pay.
+    coverage = None
+    if getattr(billing, "patient_insurance_id", None):
+        try:
+            from app.models.all_models import PatientInsurance as _PI
+            from app.services.coverage_engine import CoverageEngine
+            enrollment = (
+                db.query(_PI).filter(_PI.id == billing.patient_insurance_id).first()
+            )
+            if enrollment is not None:
+                coverage = CoverageEngine(db).evaluate(
+                    enrollment=enrollment,
+                    unit_price=unit_price,
+                    quantity=quantity,
+                    billable_service_id=billable_service_id,
+                    service_code=service_code,
+                    visit_billing_id=billing.id,
+                )
+                unit_price = coverage.unit_price  # negotiated tariff price
+        except Exception:
+            coverage = None
+
     line_total = (unit_price * quantity) - discount_amount
     if line_total < 0:
         line_total = Decimal("0")
@@ -138,6 +173,17 @@ def add_charge(
         account_code=account_code,
         account_name=account_name,
     )
+    if coverage is not None:
+        covered = min(coverage.covered_amount, line_total)
+        item.covered_amount = covered
+        item.patient_amount = line_total - covered
+        item.coverage_source = coverage.coverage_source
+        item.is_covered = covered > 0
+        item.preauth_required = coverage.requires_preauth
+    else:
+        item.covered_amount = Decimal("0")
+        item.patient_amount = line_total
+        item.is_covered = False
     db.add(item)
     db.flush()
     db.refresh(item)

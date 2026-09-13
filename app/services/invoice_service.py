@@ -65,19 +65,62 @@ class InvoiceService:
             note=payload.note,
         )
 
-        for line in (billing.items or []):
-            if line.is_deleted:
-                continue
-            self.repository.add_item(
-                invoice=invoice,
-                service_name=line.service_name,
-                service_code=line.service_code,
-                quantity=Decimal(line.quantity),
-                unit_price=Decimal(line.unit_price),
-                discount_amount=Decimal(line.discount_amount),
-                billable_service_id=line.billable_service_id,
-                source_reference=line.source_reference,
-            )
+        # HMO SPLIT: for insured visits the CoverageEngine has already stamped
+        # covered_amount / patient_amount on every billing line. The patient
+        # invoice carries ONLY the patient's co-pay portion; the HMO-covered
+        # portion becomes the insurance claim (the payer receivable stream)
+        # created below.
+        live_lines = [l for l in (billing.items or []) if not l.is_deleted]
+        covered_total = sum(
+            (Decimal(str(l.covered_amount or 0)) for l in live_lines), Decimal("0"))
+        split_mode = bool(billing.patient_insurance_id) and covered_total > 0
+
+        if split_mode:
+            added_any = False
+            for line in live_lines:
+                patient_part = Decimal(str(line.patient_amount
+                                           if line.patient_amount is not None
+                                           else line.line_total or 0))
+                if patient_part <= 0:
+                    continue
+                self.repository.add_item(
+                    invoice=invoice,
+                    service_name=(f"{line.service_name} (co-pay)"
+                                  if Decimal(str(line.covered_amount or 0)) > 0
+                                  else line.service_name),
+                    service_code=line.service_code,
+                    quantity=Decimal("1"),
+                    unit_price=patient_part,
+                    discount_amount=Decimal("0"),
+                    billable_service_id=line.billable_service_id,
+                    source_reference=line.source_reference,
+                )
+                added_any = True
+            if not added_any:
+                # Fully covered visit — issue a zero-balance patient invoice
+                # so the workflow (and receipt trail) stays consistent.
+                self.repository.add_item(
+                    invoice=invoice,
+                    service_name="Services fully covered by insurance",
+                    service_code=None,
+                    quantity=Decimal("1"),
+                    unit_price=Decimal("0"),
+                    discount_amount=Decimal("0"),
+                    billable_service_id=None,
+                    source_reference=None,
+                )
+        else:
+            for line in live_lines:
+                self.repository.add_item(
+                    invoice=invoice,
+                    service_name=line.service_name,
+                    service_code=line.service_code,
+                    quantity=Decimal(line.quantity),
+                    unit_price=Decimal(line.unit_price),
+                    discount_amount=Decimal(line.discount_amount),
+                    billable_service_id=line.billable_service_id,
+                    source_reference=line.source_reference,
+                )
 
         self.repository.recompute_totals(invoice)
 
@@ -143,20 +186,38 @@ class InvoiceService:
             
             claim_service = InsuranceClaimService(self.db)
             
-            # Prepare items for claim
+            # Prepare items for the claim. With coverage data present the
+            # claim carries ONLY the HMO-covered portion of each line (the
+            # patient co-pay was invoiced above); legacy billings without
+            # coverage data fall back to claiming the full invoice lines.
             claim_items = []
-            for inv_item in invoice.items:
-                if inv_item.is_deleted:
-                    continue
-                claim_items.append(InsuranceClaimItemCreateSchema(
-                    invoice_item_id=inv_item.id,
-                    billable_service_id=inv_item.billable_service_id,
-                    service_date=invoice.invoice_date.date() if invoice.invoice_date else None,
-                    description=inv_item.service_name,
-                    quantity=inv_item.quantity,
-                    unit_price=inv_item.unit_price,
-                    procedure_code=inv_item.service_code
-                ))
+            if split_mode:
+                for line in live_lines:
+                    covered_part = Decimal(str(line.covered_amount or 0))
+                    if covered_part <= 0:
+                        continue
+                    claim_items.append(InsuranceClaimItemCreateSchema(
+                        invoice_item_id=None,
+                        billable_service_id=line.billable_service_id,
+                        service_date=invoice.invoice_date.date() if invoice.invoice_date else None,
+                        description=line.service_name,
+                        quantity=Decimal("1"),
+                        unit_price=covered_part,
+                        procedure_code=line.service_code
+                    ))
+            else:
+                for inv_item in invoice.items:
+                    if inv_item.is_deleted:
+                        continue
+                    claim_items.append(InsuranceClaimItemCreateSchema(
+                        invoice_item_id=inv_item.id,
+                        billable_service_id=inv_item.billable_service_id,
+                        service_date=invoice.invoice_date.date() if invoice.invoice_date else None,
+                        description=inv_item.service_name,
+                        quantity=inv_item.quantity,
+                        unit_price=inv_item.unit_price,
+                        procedure_code=inv_item.service_code
+                    ))
             
             if claim_items:
                 try:

@@ -29,7 +29,15 @@ class SubscriptionService:
         
         Effective access is computed as:
         plan.has_<feature> AND (TenantModuleAccess.is_enabled if exists else True)
+
+        Dedicated (single-hospital) installs have no subscription plan — the
+        client pays an annual deployment licence and gets every module, so
+        the gate always passes there (the licence itself is enforced by the
+        tenant middleware).
         """
+        from app.core.config import settings
+        if settings.is_dedicated:
+            return True
         plan = self.get_active_plan(tenant_id)
         if not plan:
             return False

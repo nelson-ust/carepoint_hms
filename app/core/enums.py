@@ -1939,6 +1939,7 @@ class MedicalAccessAuditEvent(StringEnum):
 
 class JournalEntryStatus(StringEnum):
     DRAFT = "DRAFT"
+    PENDING_APPROVAL = "PENDING_APPROVAL"   # maker-checker: awaiting a second user
     POSTED = "POSTED"
     REVERSED = "REVERSED"
 
@@ -1951,6 +1952,20 @@ class JournalSourceType(StringEnum):
     SALARY_ADVANCE = "SALARY_ADVANCE"
     ADJUSTMENT = "ADJUSTMENT"
     OPENING_BALANCE = "OPENING_BALANCE"
+    # --- HMO / advanced accounting sources ---
+    INSURANCE_CLAIM = "INSURANCE_CLAIM"
+    CLAIM_PAYMENT = "CLAIM_PAYMENT"
+    DISALLOWANCE = "DISALLOWANCE"
+    CAPITATION = "CAPITATION"
+    CAPITATION_PAYMENT = "CAPITATION_PAYMENT"
+    INVENTORY = "INVENTORY"
+    TAX = "TAX"
+    BANK = "BANK"
+    PETTY_CASH = "PETTY_CASH"
+    CASHIER = "CASHIER"
+    CREDIT_NOTE = "CREDIT_NOTE"
+    REFUND = "REFUND"
+    WRITE_OFF = "WRITE_OFF"
 
 
 class AccountingPeriodStatus(StringEnum):
@@ -2014,3 +2029,114 @@ class WhatsAppConversationStatus(StringEnum):
 
 class DepreciationMethod(StringEnum):
     STRAIGHT_LINE = "STRAIGHT_LINE"
+
+
+# ============================================================
+# HMO / HEALTH INSURANCE (plans, eligibility, capitation)
+# ============================================================
+
+
+class InsuranceProviderType(StringEnum):
+    """Kind of payer the hospital bills for insured care."""
+
+    PRIVATE_HMO = "PRIVATE_HMO"
+    NHIA = "NHIA"
+    STATE_SCHEME = "STATE_SCHEME"
+    CORPORATE_RETAINER = "CORPORATE_RETAINER"
+    OTHER = "OTHER"
+
+
+class PlanCoverageType(StringEnum):
+    CAPITATION = "CAPITATION"
+    FEE_FOR_SERVICE = "FEE_FOR_SERVICE"
+    HYBRID = "HYBRID"
+
+
+class BenefitLimitPeriod(StringEnum):
+    PER_VISIT = "PER_VISIT"
+    PER_ANNUM = "PER_ANNUM"
+    LIFETIME = "LIFETIME"
+
+
+class EligibilityCheckMethod(StringEnum):
+    PHONE = "PHONE"
+    PORTAL = "PORTAL"
+    CARD = "CARD"
+    API = "API"
+
+
+class EligibilityCheckResult(StringEnum):
+    ELIGIBLE = "ELIGIBLE"
+    INELIGIBLE = "INELIGIBLE"
+    NEEDS_AUTH = "NEEDS_AUTH"
+
+
+class InsuranceVerificationStatus(StringEnum):
+    UNVERIFIED = "UNVERIFIED"
+    VERIFIED = "VERIFIED"
+    EXPIRED = "EXPIRED"
+    SUSPENDED = "SUSPENDED"
+
+
+class CapitationContractStatus(StringEnum):
+    ACTIVE = "ACTIVE"
+    SUSPENDED = "SUSPENDED"
+    TERMINATED = "TERMINATED"
+
+
+class CapitationScheduleStatus(StringEnum):
+    DRAFT = "DRAFT"
+    CONFIRMED = "CONFIRMED"       # receivable posted
+    PARTIALLY_PAID = "PARTIALLY_PAID"
+    PAID = "PAID"
+    CANCELLED = "CANCELLED"
+
+
+class RemittanceAdviceStatus(StringEnum):
+    DRAFT = "DRAFT"
+    PARTIALLY_ALLOCATED = "PARTIALLY_ALLOCATED"
+    ALLOCATED = "ALLOCATED"
+    CANCELLED = "CANCELLED"
+
+
+# ============================================================
+# ACCOUNTING EXTENSIONS (banking, cash, AR/AP documents)
+# ============================================================
+
+
+class CashFlowCategory(StringEnum):
+    OPERATING = "OPERATING"
+    INVESTING = "INVESTING"
+    FINANCING = "FINANCING"
+    NONE = "NONE"
+
+
+class BankReconciliationStatus(StringEnum):
+    IN_PROGRESS = "IN_PROGRESS"
+    COMPLETED = "COMPLETED"
+    CANCELLED = "CANCELLED"
+
+
+class PettyCashVoucherStatus(StringEnum):
+    PENDING = "PENDING"
+    APPROVED = "APPROVED"
+    REJECTED = "REJECTED"
+    RETIRED = "RETIRED"
+
+
+class CashierSessionStatus(StringEnum):
+    OPEN = "OPEN"
+    CLOSED = "CLOSED"
+
+
+class CreditNoteStatus(StringEnum):
+    DRAFT = "DRAFT"
+    ISSUED = "ISSUED"          # posted to the ledger
+    APPLIED = "APPLIED"        # fully consumed against invoices / refunds
+    CANCELLED = "CANCELLED"
+
+
+class RefundStatus(StringEnum):
+    PENDING = "PENDING"
+    PAID = "PAID"
+    CANCELLED = "CANCELLED"

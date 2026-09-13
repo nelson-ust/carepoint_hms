@@ -2174,6 +2174,14 @@ class InsuranceProvider(TenantTable):
     address: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
+    # --- HMO module extensions (plain columns; enum-like values validated in services) ---
+    provider_type: Mapped[Optional[str]] = mapped_column(String(30), nullable=True, index=True)  # InsuranceProviderType
+    nhia_accreditation_no: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    bank_account_details: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    default_payment_terms_days: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    capitation_supported: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false", nullable=False)
+    fee_for_service_supported: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true", nullable=False)
+
     patient_insurance_records: Mapped[list["PatientInsurance"]] = relationship(
         back_populates="insurance_provider"
     )
@@ -2212,6 +2220,14 @@ class PatientInsurance(TenantTable):
 
     is_primary: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
+    # --- HMO module extensions ---
+    hmo_plan_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)  # -> hmo_plan.id
+    principal_patient_insurance_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
+    relationship_to_principal: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    verification_status: Mapped[Optional[str]] = mapped_column(String(20), nullable=True, index=True)  # InsuranceVerificationStatus
+    last_verified_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_verified_by_user_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+
     patient: Mapped["Patient"] = relationship(back_populates="insurance_records")
     insurance_provider: Mapped["InsuranceProvider"] = relationship(back_populates="patient_insurance_records")
 
@@ -2239,6 +2255,14 @@ class Account(TenantTable):
         Enum(AccountType), default=AccountType.REVENUE, nullable=False, index=True
     )
     description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+
+    # --- Accounting module extensions ---
+    parent_account_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)  # hierarchy
+    is_postable: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true", nullable=False)
+    is_system: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false", nullable=False)
+    cash_flow_category: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)  # CashFlowCategory
+    currency: Mapped[str] = mapped_column(String(10), nullable=False, default="NGN", server_default="NGN")
 
 
 class AccountingPeriod(TenantTable):
@@ -2301,6 +2325,8 @@ class JournalEntryLine(TenantTable):
     debit: Mapped[Decimal] = mapped_column(Numeric(14, 2), default=0, nullable=False)
     credit: Mapped[Decimal] = mapped_column(Numeric(14, 2), default=0, nullable=False)
 
+    cost_center_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)  # -> cost_center.id
+
     entry: Mapped["JournalEntry"] = relationship(back_populates="lines")
     account: Mapped["Account"] = relationship()
 
@@ -2334,6 +2360,8 @@ class VendorBill(TenantTable):
     status: Mapped[VendorBillStatus] = mapped_column(
         Enum(VendorBillStatus), default=VendorBillStatus.OPEN, nullable=False, index=True
     )
+
+    cost_center_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)  # -> cost_center.id
 
     vendor: Mapped["Vendor"] = relationship()
     expense_account: Mapped["Account"] = relationship()
@@ -2383,6 +2411,7 @@ class BudgetLine(TenantTable):
     account_id: Mapped[int] = mapped_column(ForeignKey("account.id"), nullable=False, index=True)
     period_code: Mapped[str] = mapped_column(String(10), nullable=False, index=True)
     amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)
+    cost_center_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)  # -> cost_center.id
 
     account: Mapped["Account"] = relationship()
 
@@ -2463,6 +2492,15 @@ class BillingItem(TenantTable):
     service_delivery_point_id: Mapped[Optional[int]] = mapped_column(
         Integer, nullable=True, index=True)
     rendered_by_user_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+
+    # --- HMO coverage split (filled by the CoverageEngine for insured visits) ---
+    covered_amount: Mapped[Optional[Decimal]] = mapped_column(Numeric(14, 2), nullable=True)
+    patient_amount: Mapped[Optional[Decimal]] = mapped_column(Numeric(14, 2), nullable=True)
+    coverage_source: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
+    is_covered: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false", nullable=False)
+    preauth_required: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false", nullable=False)
+    preauth_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # -> claim_authorization.id
+    cost_center_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)  # -> cost_center.id
 
     billing: Mapped["Billing"] = relationship(back_populates="items")
     billable_service: Mapped[Optional["BillableService"]] = relationship()
@@ -2556,6 +2594,10 @@ class Payment(TenantTable):
     invoice: Mapped["Invoice"] = relationship(back_populates="payments")
     visit_flow_step: Mapped[Optional["VisitFlowStep"]] = relationship()
     received_by_staff: Mapped[Optional["StaffProfile"]] = relationship()
+    cashier_session_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)  # -> cashier_session.id
+    bank_account_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)  # -> bank_account.id
+    receipt_no: Mapped[Optional[str]] = mapped_column(String(50), nullable=True, index=True)
+
     membership_card_transaction: Mapped[Optional["MembershipCardTransaction"]] = relationship(back_populates="payment")
 
 
@@ -2587,6 +2629,10 @@ class BillingPayment(TenantTable):
     # payment method so every monetary movement carries an account code.
     account_code: Mapped[Optional[str]] = mapped_column(String(50), nullable=True, index=True)
     account_name: Mapped[Optional[str]] = mapped_column(String(150), nullable=True)
+
+    cashier_session_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)  # -> cashier_session.id
+    bank_account_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)  # -> bank_account.id
+    receipt_no: Mapped[Optional[str]] = mapped_column(String(50), nullable=True, index=True)
 
     billing: Mapped["Billing"] = relationship(back_populates="billing_payments")
     received_by_staff: Mapped[Optional["StaffProfile"]] = relationship()
@@ -5516,6 +5562,9 @@ class InsuranceClaim(TenantTable):
 
     submitted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    #: When this claim is a corrected resubmission of a rejected claim.
+    resubmission_of_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
 
     batch: Mapped[Optional["ClaimBatch"]] = relationship(back_populates="claims")
     patient: Mapped["Patient"] = relationship()
@@ -9501,3 +9550,11 @@ class WhatsAppMessage(TenantTable):
     sent_by_user_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     wa_timestamp: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     raw_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+
+
+# ---------------------------------------------------------------------------
+# HMO / advanced-accounting models live in a companion module; importing it
+# here registers those tables on TenantBase.metadata for every existing
+# import path (create_all, db_sync, tests).
+# ---------------------------------------------------------------------------
+from app.models import finance_models  # noqa: E402,F401  (intentional tail import)

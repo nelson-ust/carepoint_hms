@@ -53,16 +53,16 @@ _SYSTEM_ACCOUNTS = {
 
 
 def get_or_create_system_account(db: Session, key: str) -> Account:
-    code, name, acc_type = _SYSTEM_ACCOUNTS[key]
-    acct = db.query(Account).filter(Account.code == code, Account.is_deleted.is_(False)).first()
-    if acct is None:
-        acct = db.query(Account).filter(Account.name == name, Account.is_deleted.is_(False)).first()
-    if acct is None:
-        acct = Account(code=code, name=name, account_type=acc_type,
-                       description="Auto-created system account.")
-        db.add(acct)
-        db.flush()
-    return acct
+    """Resolve a well-known ledger account.
+
+    Delegates to the tenant-editable ``SystemAccountMapping`` resolver so a
+    hospital can repoint any system posting at its own chart of accounts;
+    ``_SYSTEM_ACCOUNTS`` above is kept only as documentation of the legacy
+    keys (they are a subset of
+    ``system_accounts_service.DEFAULT_SYSTEM_ACCOUNTS``).
+    """
+    from app.services.system_accounts_service import resolve_system_account
+    return resolve_system_account(db, key)
 
 
 def _bill_read(b: VendorBill) -> dict:
@@ -172,7 +172,19 @@ class VendorService:
 
     def pay_bill(self, *, bill_id: int, amount, paid_at: date,
                  payment_method: Optional[str] = None, reference: Optional[str] = None,
+                 cash_account_id: Optional[int] = None,
+                 wht_rate_percent=None,
                  user_id: Optional[int] = None) -> dict:
+        """Pay (part of) a vendor bill.
+
+        With ``wht_rate_percent`` set, withholding tax is deducted at source
+        the Nigerian way: the vendor's account is settled for the FULL
+        ``amount``, the bank pays out ``amount - WHT``, and the WHT goes to
+        the Withholding Tax Payable account until it is remitted to the tax
+        authority (Statutory Remittances). A ``WithholdingTaxRecord`` is
+        created so the WHT register / FIRS schedule and the vendor's credit
+        note trail stay complete.
+        """
         bill = (self.db.query(VendorBill)
                 .options(joinedload(VendorBill.vendor))
                 .filter(VendorBill.id == bill_id, VendorBill.is_deleted.is_(False)).first())
@@ -187,6 +199,17 @@ class VendorService:
         if pay > balance:
             raise BadRequestError(message=f"Payment exceeds the outstanding balance ({balance}).")
 
+        # Withholding tax deducted at source (Nigerian practice: 5% services /
+        # 10% professional fees for companies — the caller supplies the rate).
+        wht_amount = Decimal("0")
+        if wht_rate_percent is not None:
+            rate = _d(wht_rate_percent)
+            if rate <= 0 or rate >= 100:
+                raise BadRequestError(message="wht_rate_percent must be between 0 and 100.")
+            wht_amount = (pay * rate / Decimal("100")).quantize(Decimal("0.01"))
+            if wht_amount >= pay:
+                raise BadRequestError(message="WHT cannot exceed the payment amount.")
+
         payment = VendorBillPayment(
             vendor_bill_id=bill.id, amount=pay, paid_at=paid_at,
             payment_method=payment_method, reference=reference,
@@ -196,21 +219,48 @@ class VendorService:
 
         from app.utils.charge_capture import resolve_cash_account
         ap = get_or_create_system_account(self.db, "AP")
-        cash = resolve_cash_account(self.db, payment_method=payment_method)
+        cash = None
+        if cash_account_id is not None:
+            cash = self.db.query(Account).filter(
+                Account.id == cash_account_id, Account.is_deleted.is_(False)).first()
+        if cash is None:
+            cash = resolve_cash_account(self.db, payment_method=payment_method)
         if cash is None:
             raise BadRequestError(message="No cash/bank account is configured.")
+
+        je_lines = [
+            {"account_id": ap.id, "debit": pay, "credit": 0,
+             "description": f"Settle {bill.bill_no}"},
+            {"account_id": cash.id, "debit": 0, "credit": pay - wht_amount,
+             "description": reference or payment_method or "Bill payment"},
+        ]
+        if wht_amount > 0:
+            wht_payable = get_or_create_system_account(self.db, "WHT_PAYABLE")
+            je_lines.append({
+                "account_id": wht_payable.id, "debit": 0, "credit": wht_amount,
+                "description": f"WHT {wht_rate_percent}% withheld on {bill.bill_no}"})
         self.accounting.create_entry(
             entry_date=paid_at,
             memo=f"Payment on {bill.bill_no} — {bill.vendor.name if bill.vendor else ''}".strip(),
-            lines=[
-                {"account_id": ap.id, "debit": pay, "credit": 0,
-                 "description": f"Settle {bill.bill_no}"},
-                {"account_id": cash.id, "debit": 0, "credit": pay,
-                 "description": reference or payment_method or "Bill payment"},
-            ],
+            lines=je_lines,
             source_type=JournalSourceType.ADJUSTMENT,
             source_ref=f"vendor_bill_payment:{payment.id}", user_id=user_id, auto_post=True,
         )
+
+        if wht_amount > 0:
+            try:
+                from app.services.statutory_service import record_vendor_wht
+                record_vendor_wht(
+                    self.db, vendor=bill.vendor, gross_amount=pay,
+                    rate_percent=_d(wht_rate_percent), wht_amount=wht_amount,
+                    reference=f"{bill.bill_no}/{payment.id}",
+                    notes=f"Withheld on payment of bill {bill.bill_no}"
+                          + (f" ({reference})" if reference else ""))
+            except Exception:  # pragma: no cover — the ledger entry is authoritative
+                import logging
+                logging.getLogger(__name__).warning(
+                    "WHT ledger line posted but the WHT register record failed",
+                    exc_info=True)
 
         bill.amount_paid = _d(bill.amount_paid) + pay
         bill.status = (VendorBillStatus.PAID if bill.amount_paid >= _d(bill.total_amount)

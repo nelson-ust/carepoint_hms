@@ -28,6 +28,8 @@ from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.core.dependencies import AdminUser, AnyAuthenticatedUser, require_plan_feature
+from app.dependencies.role import require_permission
+from app.models.all_models import User
 
 from app.schemas.visit_schemas import (
     VisitActionResponseSchema,
@@ -76,7 +78,7 @@ def get_visit_service(
 )
 def initiate_visit(
     payload: VisitInitiateSchema,
-    current_user: AdminUser,
+    current_user: Annotated[User, Depends(require_permission("VISIT_INITIATE"))],
     service: Annotated[VisitService, Depends(get_visit_service)],
 ):
     """
@@ -159,7 +161,7 @@ def resend_visit_tag_email(
 def reroute_visit(
     visit_id: int,
     payload: VisitRerouteSchema,
-    _: AdminUser,
+    _: Annotated[User, Depends(require_permission("VISIT_ROUTE"))],
     service: Annotated[VisitService, Depends(get_visit_service)],
 ):
     """
@@ -186,7 +188,7 @@ def reroute_visit(
 def advance_visit(
     visit_id: int,
     payload: VisitAdvanceSchema,
-    current_user: AdminUser,
+    current_user: Annotated[User, Depends(require_permission("VISIT_ROUTE"))],
     service: Annotated[VisitService, Depends(get_visit_service)],
 ):
     """

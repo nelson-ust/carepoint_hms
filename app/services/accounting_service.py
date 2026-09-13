@@ -184,6 +184,21 @@ class AccountingService:
         if period.status == AccountingPeriodStatus.CLOSED:
             raise BadRequestError(message=f"Period {period.code} is closed.")
 
+        # Go-live guard: ordinary postings cannot pre-date the opening
+        # balance date (opening-balance entries themselves are exempt).
+        if source_type != JournalSourceType.OPENING_BALANCE:
+            try:
+                from app.services.system_accounts_service import get_accounting_config
+                cfg = get_accounting_config(self.db)
+                if cfg.opening_balance_date and entry_date < cfg.opening_balance_date:
+                    raise BadRequestError(
+                        message=f"Postings before the opening-balance date "
+                                f"({cfg.opening_balance_date}) are not allowed.")
+            except BadRequestError:
+                raise
+            except Exception:
+                pass
+
         # Resolve accounts up front so bad ids fail cleanly.
         entry = JournalEntry(
             entry_no=f"JE-{entry_date.strftime('%Y%m')}-{uuid.uuid4().hex[:8].upper()}",
@@ -200,11 +215,16 @@ class AccountingService:
             ).first()
             if account is None:
                 raise BadRequestError(message=f"Unknown account id {ln.get('account_id')}.")
+            if getattr(account, "is_postable", True) is False:
+                raise BadRequestError(
+                    message=f"Account {account.code} · {account.name} is a header "
+                            "account and cannot take postings.")
             self.db.add(JournalEntryLine(
                 journal_entry_id=entry.id, account_id=account.id,
                 account_code=account.code, account_name=account.name,
                 description=ln.get("description"),
                 debit=_d(ln.get("debit")), credit=_d(ln.get("credit")),
+                cost_center_id=ln.get("cost_center_id"),
             ))
         self.db.flush()
         if auto_post:
@@ -224,7 +244,45 @@ class AccountingService:
 
     def post_entry(self, entry_id: int, *, user_id: Optional[int] = None) -> dict:
         entry = self._get(entry_id)
+        # Maker-checker: a MANUAL entry at/above the configured threshold is
+        # parked as PENDING_APPROVAL for a second person instead of posting.
+        try:
+            from app.services.system_accounts_service import get_accounting_config
+            cfg = get_accounting_config(self.db)
+            threshold = cfg.journal_approval_threshold
+        except Exception:
+            threshold = None
+        if (threshold is not None
+                and entry.source_type == JournalSourceType.MANUAL
+                and entry.status == JournalEntryStatus.DRAFT
+                and _d(entry.total_debit) >= _d(threshold)):
+            entry.status = JournalEntryStatus.PENDING_APPROVAL
+            self.db.commit()
+            self.db.refresh(entry)
+            return _entry_read(entry)
         self._post(entry, user_id=user_id)
+        self.db.commit()
+        self.db.refresh(entry)
+        return _entry_read(entry)
+
+    def approve_entry(self, entry_id: int, *, user_id: Optional[int] = None) -> dict:
+        """Second-person approval for a PENDING_APPROVAL manual entry."""
+        entry = self._get(entry_id)
+        if entry.status != JournalEntryStatus.PENDING_APPROVAL:
+            raise BadRequestError(message="Entry is not awaiting approval.")
+        if user_id is not None and entry.created_by_user_id is not None \
+                and user_id == entry.created_by_user_id:
+            raise BadRequestError(message="The maker of an entry cannot approve it.")
+        entry.status = JournalEntryStatus.DRAFT  # _post() requires DRAFT
+        self._post(entry, user_id=user_id)
+        try:
+            from app.services.system_accounts_service import audit
+            audit(self.db, action="JOURNAL_APPROVED", entity_type="journal_entry",
+                  entity_id=entry.id, user_id=user_id,
+                  summary=f"Maker-checker approval of {entry.entry_no} "
+                          f"({entry.total_debit})")
+        except Exception:
+            pass
         self.db.commit()
         self.db.refresh(entry)
         return _entry_read(entry)

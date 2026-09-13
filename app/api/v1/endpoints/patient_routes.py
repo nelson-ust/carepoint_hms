@@ -34,6 +34,8 @@ from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.core.dependencies import AdminUser, AnyAuthenticatedUser, require_plan_feature
+from app.dependencies.role import require_permission
+from app.models.all_models import User
 
 from app.schemas.patient_schemas import (
     PatientActionResponseSchema,
@@ -98,7 +100,7 @@ def get_patient_service(
 )
 def create_patient(
     payload: PatientCreateSchema,
-    current_user: AdminUser,
+    current_user: Annotated[User, Depends(require_permission("PATIENT_CREATE"))],
     service: Annotated[PatientService, Depends(get_patient_service)],
     force_create_if_possible_duplicate: bool = Query(
         False,
@@ -143,7 +145,7 @@ def create_patient(
 )
 def check_for_possible_duplicates(
     payload: PatientDuplicateCheckSchema,
-    _: AdminUser,
+    _: Annotated[User, Depends(require_permission("PATIENT_CREATE"))],
     service: Annotated[PatientService, Depends(get_patient_service)],
 ):
     """

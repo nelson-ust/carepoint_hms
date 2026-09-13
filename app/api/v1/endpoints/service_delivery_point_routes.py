@@ -29,7 +29,7 @@ from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.core.dependencies import AdminUser
+from app.core.dependencies import AdminUser, AnyAuthenticatedUser
 from app.schemas.service_delivery_point_schemas import (
     ServiceDeliveryPointActionResponseSchema,
     ServiceDeliveryPointCreateSchema,
@@ -96,7 +96,7 @@ def create_service_delivery_point(
     summary="List service delivery points",
 )
 def list_service_delivery_points(
-    _: AdminUser,
+    _: AnyAuthenticatedUser,
     service: Annotated[ServiceDeliveryService, Depends(get_service_delivery_service)],
     skip: int = Query(0, ge=0, description="Pagination offset."),
     limit: int = Query(20, ge=1, le=1000, description="Pagination size."),
@@ -139,7 +139,7 @@ def list_service_delivery_points(
     summary="List active service delivery points",
 )
 def list_active_service_delivery_points(
-    _: AdminUser,
+    _: AnyAuthenticatedUser,
     service: Annotated[ServiceDeliveryService, Depends(get_service_delivery_service)],
     skip: int = Query(0, ge=0, description="Pagination offset."),
     limit: int = Query(100, ge=1, le=1000, description="Pagination size."),
@@ -171,7 +171,7 @@ def list_active_service_delivery_points(
     summary="Live queue metrics per service delivery point",
 )
 def service_delivery_point_queue_stats(
-    _: AdminUser,
+    _: AnyAuthenticatedUser,
     service: Annotated[ServiceDeliveryService, Depends(get_service_delivery_service)],
 ):
     """
@@ -189,7 +189,7 @@ def service_delivery_point_queue_stats(
 )
 def get_service_delivery_point_by_code(
     code: str,
-    _: AdminUser,
+    _: AnyAuthenticatedUser,
     service: Annotated[ServiceDeliveryService, Depends(get_service_delivery_service)],
 ):
     """
@@ -206,7 +206,7 @@ def get_service_delivery_point_by_code(
 )
 def get_service_delivery_point(
     service_delivery_point_id: int,
-    _: AdminUser,
+    _: AnyAuthenticatedUser,
     service: Annotated[ServiceDeliveryService, Depends(get_service_delivery_service)],
 ):
     """

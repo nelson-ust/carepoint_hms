@@ -96,7 +96,23 @@ class PatientIdentityRepository:
     # ── Patient Insurance ─────────────────────────────────────────────
 
     def create_patient_insurance(self, patient_id: int, data: PatientInsuranceCreateSchema) -> PatientInsurance:
-        record = PatientInsurance(patient_id=patient_id, **data.model_dump())
+        # Map schema fields to the model explicitly: the schema's public
+        # names (member_name, start/expiry dates) differ from the ORM
+        # columns, and a blind **model_dump() raised TypeError.
+        d = data.model_dump()
+        record = PatientInsurance(
+            patient_id=patient_id,
+            insurance_provider_id=d["insurance_provider_id"],
+            policy_number=d["policy_number"],
+            member_id=d.get("member_name"),
+            relationship_to_principal=d.get("relationship_to_member"),
+            plan_name=d.get("plan_name"),
+            valid_from=d.get("start_date"),
+            valid_to=d.get("expiry_date"),
+            coverage_start_date=d.get("start_date"),
+            coverage_end_date=d.get("expiry_date"),
+            is_active=d.get("is_active", True),
+        )
         self.db.add(record)
         self.db.flush()
         self.db.refresh(record)

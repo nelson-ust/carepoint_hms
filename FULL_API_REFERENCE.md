@@ -188,3 +188,52 @@
 
 ---
 *Documentation v1.1 — Comprehensive Reference*
+
+---
+
+# HMO / Insurance & Advanced Accounting (added by the HMO+Accounting build)
+
+Full details in `../IMPLEMENTATION_NOTES.md`. Highlights (all under `/api/v1`, JWT + permission gated):
+
+## /hmo — HMO / Health Insurance (perm: CLAIM_READ / CLAIM_MANAGE / CLAIM_REVIEW)
+- `GET/PUT /hmo/providers` — payer profiles (type, NHIA no, capitation/FFS support)
+- `GET/POST/PUT /hmo/plans`, `/hmo/benefits`, `/hmo/tariffs`; `POST /hmo/plans/{id}/tariffs/import?dry_run=` (CSV)
+- `GET /hmo/enrollees`, `POST /hmo/enrollees/{id}/link-plan|dependent`, `GET /hmo/enrollees/expiring`
+- `POST/GET /hmo/eligibility-checks`; `POST /hmo/coverage/preview` (HMO-vs-patient split for any item)
+- Capitation: `GET/POST/PUT /hmo/capitation/contracts`, `POST /hmo/capitation/run`,
+  `GET /hmo/capitation/schedule`, `POST .../confirm`, `POST .../import-hmo-list`,
+  `POST /hmo/capitation/payments`, `GET /hmo/capitation/utilization`
+- Remittances: `GET/POST /hmo/remittances`, `GET /hmo/remittances/{id}/suggestions`, `POST .../allocate`
+- Payer ledger: `GET /hmo/payers/balances`, `GET /hmo/payers/{id}/statement`
+- Claims ext: `POST /hmo/claims/{id}/write-off|resubmit|push-patient-responsibility`,
+  `GET/POST/PUT /hmo/rejection-reasons`, `POST /hmo/batches/generate-monthly`,
+  `GET /hmo/batches/{id}/export.xlsx`
+- Reports: `GET /hmo/reports/claim-aging|rejection-analysis|settlement`, `GET /hmo/dashboard`
+
+## /banking — Bank & Cash (perm: ACCOUNTING_*)
+- `GET/POST/PUT /banking/accounts`, `POST /banking/deposits`, `POST /banking/transfers`
+- `POST /banking/accounts/{id}/statements/import` (CSV)
+- `GET/POST /banking/reconciliations`, `GET /banking/reconciliations/{id}`,
+  `POST .../auto-match|match|adjustments|complete`
+- Petty cash: `GET/POST /banking/petty-cash/floats`, `POST .../top-up|vouchers|retire`,
+  `GET /banking/petty-cash/vouchers`, `POST /banking/petty-cash/vouchers/{id}/decide`
+- Cashier: `GET /banking/cashier-sessions[/mine|/daily-summary]`,
+  `POST /banking/cashier-sessions/open`, `POST .../attach-payment|close`
+
+## /accounting-ext — Accounting completeness (perm: ACCOUNTING_*)
+- `GET /accounting-ext/accounts/tree`, `PUT /accounting-ext/accounts/{id}`
+- `GET/PUT /accounting-ext/system-accounts` (posting map), `GET/PUT /accounting-ext/config`
+- `POST /accounting-ext/opening-balances`, `POST /accounting-ext/seed-default-coa`, `POST .../seed-demo-hmos`
+- `GET/POST/PUT /accounting-ext/cost-centers`, `POST .../generate-from-departments`
+- Reports: `GET /accounting-ext/reports/cash-flow|general-ledger[.xlsx]|departmental-pnl|ar-segments`
+- Controls: `GET /accounting-ext/periods/{id}/pre-close-checklist`, `GET /accounting-ext/posting-status`,
+  `GET /accounting-ext/audit-log`
+- AR/AP docs: `GET/POST /accounting-ext/credit-notes`, `POST .../issue`,
+  `GET/POST /accounting-ext/refunds`, `POST .../pay`, `POST /accounting-ext/invoices/{id}/write-off`,
+  `GET /accounting-ext/patients/{id}/statement`, `GET /accounting-ext/vendors/{id}/statement`,
+  `POST /accounting-ext/vendor-credit-notes`, `POST /accounting-ext/payment-runs`
+
+## /accounting additions
+- `POST /accounting/journal-entries/{id}/approve` — maker-checker approval for PENDING_APPROVAL entries
+- `POST /accounting/auto-post` — now also sweeps claims, capitation, disallowances, payroll
+  statutory liabilities, pharmacy COGS and VAT (idempotent via `source_ref`)

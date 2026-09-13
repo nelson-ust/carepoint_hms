@@ -26,6 +26,7 @@ Implementation notes
 - Exposes computed helper properties for convenience
 """
 
+from datetime import date as dt_date
 from functools import lru_cache
 from typing import Annotated, List, Optional
 
@@ -91,6 +92,44 @@ class Settings(BaseSettings):
     # =========================================================
     HOST: str = "0.0.0.0"
     PORT: int = 8005
+
+    # =========================================================
+    # DEPLOYMENT MODE (SaaS platform vs dedicated single-hospital)
+    # =========================================================
+    #: "saas"  — multi-tenant platform: master DB + one DB per hospital,
+    #:           subscription-gated, SaaS admin portal active (default).
+    #: "dedicated" — one hospital, one database (DATABASE_URL), no
+    #:           subscriptions; access is governed by an annual licence.
+    DEPLOYMENT_MODE: str = Field(
+        "saas",
+        validation_alias=AliasChoices("DEPLOYMENT_MODE", "CAREPOINT_HMS_DEPLOYMENT_MODE"),
+        description="'saas' (multi-tenant platform) or 'dedicated' (single-hospital install).",
+    )
+    DEDICATED_TENANT_CODE: str = Field(
+        "main",
+        validation_alias=AliasChoices("DEDICATED_TENANT_CODE", "CAREPOINT_HMS_DEDICATED_TENANT_CODE"),
+        description="Tenant code used for the single hospital in dedicated mode.",
+    )
+    DEDICATED_TENANT_NAME: str = Field(
+        "Hospital",
+        validation_alias=AliasChoices("DEDICATED_TENANT_NAME", "CAREPOINT_HMS_DEDICATED_TENANT_NAME"),
+        description="Display name of the hospital in dedicated mode.",
+    )
+    #: Annual licence end date (ISO date). Empty = licence never enforced.
+    LICENSE_EXPIRES_AT: Optional[dt_date] = Field(
+        None,
+        validation_alias=AliasChoices("LICENSE_EXPIRES_AT", "CAREPOINT_HMS_LICENSE_EXPIRES_AT"),
+        description="Dedicated mode: date the annual deployment licence ends.",
+    )
+    LICENSE_GRACE_DAYS: int = Field(
+        30,
+        validation_alias=AliasChoices("LICENSE_GRACE_DAYS", "CAREPOINT_HMS_LICENSE_GRACE_DAYS"),
+        description="Days after LICENSE_EXPIRES_AT before access is blocked.",
+    )
+
+    @property
+    def is_dedicated(self) -> bool:
+        return str(self.DEPLOYMENT_MODE).strip().lower() == "dedicated"
 
     # =========================================================
     # FRONTEND / CLIENT SETTINGS

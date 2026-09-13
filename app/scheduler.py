@@ -130,6 +130,28 @@ def _run_daily_bed_day_rollover():
             logger.error(f"Error during rollover for tenant {tenant_code}: {e}")
 
 
+def _run_policy_expiry_sweep():
+    """Flip lapsed insurance policies to EXPIRED and post the extended
+    auto-posting sweep across all active tenants (claims, capitation,
+    COGS, payroll liabilities — all idempotent)."""
+    logger.info("Starting insurance policy-expiry + extended posting sweep.")
+    for tenant_code, engine in _get_active_tenant_engines():
+        try:
+            with Session(engine) as tenant_db:
+                from app.services.hmo_plan_service import HmoPlanService
+                out = HmoPlanService(tenant_db).expire_lapsed_policies()
+                try:
+                    from app.services.posting_rules_service import PostingRulesService
+                    swept = PostingRulesService(tenant_db).sweep_extended()
+                except Exception as post_err:  # pragma: no cover
+                    swept = {"error": str(post_err)}
+                logger.info(
+                    f"Tenant {tenant_code}: {out.get('expired', 0)} policies expired, "
+                    f"posting sweep: {swept}")
+        except Exception as e:
+            logger.error(f"Policy-expiry sweep failed for tenant {tenant_code}: {e}")
+
+
 def _run_leave_reminders():
     """Execute leave reminders for all active tenants."""
     logger.info("Starting leave reminders dispatch across all tenants.")
@@ -244,6 +266,16 @@ def start_scheduler() -> None:
         replace_existing=True,
     )
     
+    # Nightly insurance policy expiry + extended ledger sweep at 01:30
+    _scheduler.add_job(
+        _run_policy_expiry_sweep,
+        trigger="cron",
+        hour=1,
+        minute=30,
+        id="nightly_policy_expiry_posting_sweep",
+        replace_existing=True,
+    )
+
     # Schedule OTP & Session Cleanup every hour
     _scheduler.add_job(
         _run_otp_cleanup,
