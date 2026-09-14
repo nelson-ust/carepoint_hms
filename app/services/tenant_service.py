@@ -15,6 +15,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Optional
 
 from sqlalchemy import create_engine, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -25,7 +26,7 @@ from app.core.enums import (
     SubscriptionStatus,
     UserStatus,
 )
-from app.core.exceptions import BadRequestError, NotFoundError
+from app.core.exceptions import AlreadyExistsError, BadRequestError, NotFoundError
 from app.core.logger import get_logger
 from app.core.security import get_password_hash
 from app.init_db import create_new_database, run_tenant_initialization
@@ -134,10 +135,24 @@ class TenantService:
         if not plan:
             raise NotFoundError(message="Selected subscription plan not found.")
 
-        # 2. Check if tenant code exists (Idempotency)
-        existing = self.db.query(Tenant).filter(Tenant.code == payload.tenant_code.lower()).first()
+        # 2. Enforce tenant-code uniqueness. Codes are stored lower-cased, so
+        # this check is case-insensitive ("STNICHOLAS" and "stnicholas" are the
+        # same tenant). A duplicate is rejected outright rather than silently
+        # returning the existing tenancy, so no two tenancies can share a code.
+        normalized_code = payload.tenant_code.strip().lower()
+        existing = (
+            self.db.query(Tenant)
+            .filter(func.lower(Tenant.code) == normalized_code)
+            .first()
+        )
         if existing:
-            return existing
+            raise AlreadyExistsError(
+                message=(
+                    f"A hospital with tenant code '{payload.tenant_code.strip().upper()}' "
+                    "already exists. Please choose a different code."
+                ),
+                detail={"field": "tenant_code", "tenant_code": payload.tenant_code},
+            )
 
         # 3. Create Tenant in Master DB
         db_name = f"hms_tenant_{payload.tenant_code.lower()}"
@@ -178,7 +193,20 @@ class TenantService:
             tax_id=payload.tax_id,
         )
         self.db.add(tenant)
-        self.db.flush()
+        try:
+            self.db.flush()
+        except IntegrityError:
+            # A concurrent registration won the race and inserted the same
+            # code (or name / domain). The DB unique constraint is the final
+            # guarantee — surface it as a clean conflict, not a 500.
+            self.db.rollback()
+            raise AlreadyExistsError(
+                message=(
+                    f"A hospital with tenant code '{payload.tenant_code.strip().upper()}' "
+                    "already exists. Please choose a different code."
+                ),
+                detail={"field": "tenant_code", "tenant_code": payload.tenant_code},
+            )
 
         # 4. Add Primary Domain
         domain = TenantDomain(
