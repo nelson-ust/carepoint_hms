@@ -226,7 +226,25 @@ class SubscriptionBillingService:
             period_end_for_interval,
         )
 
-        interval = normalize_interval(getattr(subscription, "billing_interval", None) or plan.interval)
+        # Deferred downgrade: when a tenant scheduled a plan change, the *next*
+        # period is billed on the new (lower) plan. The plan actually switches
+        # on the subscription when this renewal invoice is paid (see
+        # _roll_subscription_period_forward), so access is unchanged until then.
+        interval_override = None
+        scheduled_id = getattr(subscription, "scheduled_plan_id", None)
+        if scheduled_id:
+            scheduled_plan = self.db.query(SubscriptionPlan).filter(
+                SubscriptionPlan.id == scheduled_id
+            ).first()
+            if scheduled_plan is not None:
+                plan = scheduled_plan
+                interval_override = getattr(subscription, "scheduled_interval", None)
+
+        interval = normalize_interval(
+            interval_override
+            or getattr(subscription, "billing_interval", None)
+            or plan.interval
+        )
 
         # Determine the next period.
         now = datetime.now(timezone.utc)
@@ -453,6 +471,21 @@ class SubscriptionBillingService:
         sub.current_period_start = invoice.period_start
         sub.current_period_end = invoice.period_end
         sub.next_invoice_at = invoice.period_end - timedelta(days=self.pre_issue_days)
+
+        # If this renewal invoice was billed on a different plan than the
+        # subscription currently holds (a scheduled downgrade taking effect),
+        # switch the plan now that the new period is paid, and clear the
+        # scheduled change so it is not re-applied.
+        if invoice.plan_id and invoice.plan_id != sub.plan_id:
+            from app.services.billing_interval import normalize_interval
+
+            sub.plan_id = invoice.plan_id
+            if invoice.plan_interval_snapshot:
+                sub.billing_interval = normalize_interval(invoice.plan_interval_snapshot)
+        if getattr(sub, "scheduled_plan_id", None) == invoice.plan_id:
+            sub.scheduled_plan_id = None
+            sub.scheduled_interval = None
+
         # PENDING / TRIALING → ACTIVE on first paid invoice.
         if sub.status != SubscriptionStatus.ACTIVE:
             sub.status = SubscriptionStatus.ACTIVE
@@ -673,6 +706,226 @@ class SubscriptionBillingService:
 
         # No open invoice — issue one for the current period immediately.
         return self.issue_invoice_for_subscription(subscription, send_email=False)
+
+    # ------------------------------------------------------------------
+    # SELF-SERVICE PLAN CHANGE (tenant admin): upgrade vs downgrade
+    # ------------------------------------------------------------------
+
+    def change_plan_self_service(
+        self,
+        tenant_id: int,
+        plan_code: str,
+        billing_interval: str = "MONTHLY",
+    ) -> dict:
+        """
+        Tenant-driven plan change with upgrade / downgrade semantics.
+
+        * **Upgrade** (target period price > current): the plan switches
+          immediately and a prorated invoice is issued for the price
+          difference over the days remaining in the current period. The
+          tenant settles it through the normal checkout.
+        * **Downgrade** (target price < current): the current plan runs to
+          the end of the paid period; the target plan is recorded on the
+          subscription and applied automatically at the next renewal.
+        * **Lateral** (same plan + interval): no-op, clears any pending
+          scheduled change.
+
+        Returns a JSON-serialisable summary describing the outcome.
+        """
+        from app.services.billing_interval import effective_price, normalize_interval
+
+        interval = normalize_interval(billing_interval)
+
+        subscription = self.get_active_subscription(tenant_id)
+        if subscription is None:
+            raise BadRequestError(
+                message="No active subscription found. Select a plan before changing it."
+            )
+
+        current_plan = subscription.plan or self.db.query(SubscriptionPlan).filter(
+            SubscriptionPlan.id == subscription.plan_id
+        ).first()
+        if current_plan is None:
+            raise BadRequestError(message="Current subscription has no plan attached.")
+
+        target_plan = (
+            self.db.query(SubscriptionPlan)
+            .filter(
+                SubscriptionPlan.code == plan_code.upper().strip(),
+                SubscriptionPlan.is_active.is_(True),
+            )
+            .first()
+        )
+        if target_plan is None:
+            raise NotFoundError(message=f"Active subscription plan '{plan_code}' not found.")
+
+        current_interval = normalize_interval(
+            getattr(subscription, "billing_interval", None) or current_plan.interval
+        )
+        current_price = effective_price(current_plan, current_interval)
+        target_price = effective_price(target_plan, interval)
+        currency = str(target_plan.currency or "NGN").upper()
+        now = datetime.now(timezone.utc)
+
+        same = target_plan.id == current_plan.id and interval == current_interval
+
+        # ---- Lateral / already on this plan ----
+        if same:
+            subscription.scheduled_plan_id = None
+            subscription.scheduled_interval = None
+            self.db.commit()
+            return {
+                "direction": "none",
+                "effective": "immediate",
+                "plan_code": target_plan.code,
+                "plan_name": target_plan.name,
+                "billing_interval": interval,
+                "amount_due": 0.0,
+                "currency": currency,
+                "invoice_id": None,
+                "message": f"You are already on the {target_plan.name} plan.",
+            }
+
+        # ---- Downgrade: defer to end of the current paid period ----
+        if target_price < current_price:
+            period_end = subscription.current_period_end
+            subscription.scheduled_plan_id = target_plan.id
+            subscription.scheduled_interval = interval
+            self.db.commit()
+            return {
+                "direction": "downgrade",
+                "effective": "period_end",
+                "plan_code": target_plan.code,
+                "plan_name": target_plan.name,
+                "billing_interval": interval,
+                "amount_due": 0.0,
+                "currency": currency,
+                "invoice_id": None,
+                "effective_date": period_end.isoformat() if period_end else None,
+                "message": (
+                    f"Downgrade to {target_plan.name} scheduled. Your current "
+                    f"{current_plan.name} plan stays active until it expires, then "
+                    "the new plan takes effect automatically at renewal."
+                ),
+            }
+
+        # ---- Upgrade: switch now, invoice the prorated difference ----
+        period_start = subscription.current_period_start
+        period_end = subscription.current_period_end
+        remaining_ratio = Decimal("1")
+        if period_start and period_end:
+            if period_start.tzinfo is None:
+                period_start = period_start.replace(tzinfo=timezone.utc)
+            if period_end.tzinfo is None:
+                period_end = period_end.replace(tzinfo=timezone.utc)
+            total = (period_end - period_start).total_seconds()
+            remaining = (period_end - now).total_seconds()
+            if total > 0:
+                ratio = max(0.0, min(1.0, remaining / total))
+                remaining_ratio = Decimal(str(ratio))
+
+        diff = ((target_price - current_price) * remaining_ratio).quantize(Decimal("0.01"))
+        if diff < 0:
+            diff = Decimal("0.00")
+
+        # Switch immediately; keep the same renewal window.
+        subscription.plan_id = target_plan.id
+        subscription.billing_interval = interval
+        subscription.scheduled_plan_id = None
+        subscription.scheduled_interval = None
+        if subscription.status != SubscriptionStatus.ACTIVE:
+            subscription.status = SubscriptionStatus.ACTIVE
+        self.db.flush()
+
+        invoice = None
+        if diff > 0:
+            invoice = self._issue_proration_invoice(
+                subscription=subscription,
+                from_plan=current_plan,
+                to_plan=target_plan,
+                interval=interval,
+                amount=diff,
+                currency=currency,
+                period_start=period_start or now,
+                period_end=period_end or now,
+            )
+        self.db.commit()
+        if invoice is not None:
+            self.db.refresh(invoice)
+
+        return {
+            "direction": "upgrade",
+            "effective": "immediate",
+            "plan_code": target_plan.code,
+            "plan_name": target_plan.name,
+            "billing_interval": interval,
+            "amount_due": float(diff),
+            "currency": currency,
+            "invoice_id": invoice.id if invoice else None,
+            "invoice_number": invoice.invoice_number if invoice else None,
+            "message": (
+                f"Upgraded to {target_plan.name}. A prorated invoice for the "
+                "difference has been issued \u2014 settle it to complete the upgrade."
+                if diff > 0
+                else f"Upgraded to {target_plan.name}. No proration was due."
+            ),
+        }
+
+    def _issue_proration_invoice(
+        self,
+        *,
+        subscription: TenantSubscription,
+        from_plan: SubscriptionPlan,
+        to_plan: SubscriptionPlan,
+        interval: str,
+        amount: Decimal,
+        currency: str,
+        period_start: datetime,
+        period_end: datetime,
+    ) -> SubscriptionInvoice:
+        """Issue a one-off invoice for an upgrade's prorated difference."""
+        tenant = self.db.query(Tenant).filter(Tenant.id == subscription.tenant_id).first()
+        if tenant is None:
+            raise NotFoundError(message="Tenant for subscription was not found.")
+        now = datetime.now(timezone.utc)
+        line_items = [
+            {
+                "description": (
+                    f"Plan upgrade proration: {from_plan.name} -> {to_plan.name} "
+                    "(prorated over the remaining period)"
+                ),
+                "period_start": period_start.isoformat(),
+                "period_end": period_end.isoformat(),
+                "quantity": 1,
+                "unit_price": float(amount),
+                "amount": float(amount),
+            }
+        ]
+        invoice = SubscriptionInvoice(
+            tenant_id=tenant.id,
+            subscription_id=subscription.id,
+            plan_id=to_plan.id,
+            invoice_number=_generate_invoice_number(tenant),
+            plan_code_snapshot=to_plan.code,
+            plan_name_snapshot=to_plan.name,
+            plan_interval_snapshot=interval,
+            currency=currency,
+            subtotal=amount,
+            tax_amount=Decimal("0.00"),
+            discount_amount=Decimal("0.00"),
+            total_amount=amount,
+            amount_paid=Decimal("0.00"),
+            amount_due=amount,
+            period_start=period_start,
+            period_end=period_end,
+            issued_at=now,
+            due_date=now + timedelta(days=self.payment_terms_days),
+            status=SubscriptionInvoiceStatus.ISSUED,
+            line_items=line_items,
+        )
+        self.db.add(invoice)
+        self.db.flush()
+        return invoice
 
     # ==================================================================
     # MANUAL (bank counter / transfer) PAYMENT + SaaS CONFIRMATION

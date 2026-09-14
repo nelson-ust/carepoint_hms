@@ -111,6 +111,19 @@ def seed_standard_visit_flow(db: Session) -> dict:
             "skipped_types": skipped_types,
         }
 
+    # Flag this as the tenant default only if no other template already is.
+    has_default = (
+        db.execute(
+            select(VisitFlowTemplate).filter(
+                VisitFlowTemplate.is_default.is_(True),
+                VisitFlowTemplate.is_deleted.is_(False),
+            )
+        )
+        .scalars()
+        .first()
+        is not None
+    )
+
     template = VisitFlowTemplate(
         name=STANDARD_TEMPLATE_NAME,
         code=STANDARD_TEMPLATE_CODE,
@@ -118,6 +131,7 @@ def seed_standard_visit_flow(db: Session) -> dict:
             "Default sequential outpatient pathway: Registration → Triage → "
             "Consultation → Laboratory → Radiology → Pharmacy → Billing."
         ),
+        is_default=not has_default,
     )
     db.add(template)
     db.flush()  # assign template.id

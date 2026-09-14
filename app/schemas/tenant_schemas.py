@@ -115,6 +115,9 @@ class TenantUpdateStatusSchema(BaseModel):
 
 class TenantChangePlanSchema(BaseModel):
     plan_code: str
+    # Billing cycle for the new subscription. Coerced to MONTHLY/YEARLY
+    # by the service; defaults to MONTHLY when omitted.
+    billing_interval: Optional[str] = "MONTHLY"
 
 
 class TenantListResponseSchema(BaseModel):

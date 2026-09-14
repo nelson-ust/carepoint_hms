@@ -505,48 +505,176 @@ class TenantService:
 
     def _notify_saas_admins_of_registration(self, tenant: Tenant) -> None:
         """
-        Dispatch Email, SMS, and In-App notifications to all active SaaS Admins.
+        Notify all active SaaS administrators that a new tenant onboarding
+        application requires review and approval.
+
+        Sends a detailed, branded HTML email (with a plain-text fallback),
+        records an in-app SaaS notification, and \u2014 where a phone number is
+        on file \u2014 an SMS alert. Every channel is best-effort: a failure in
+        any one of them must never abort the registration flow.
         """
-        saas_admins = self.db.query(SaaSAdmin).filter(SaaSAdmin.status == UserStatus.ACTIVE).all()
-        
-        subject = f"New Tenancy Onboarding Request: {tenant.name}"
-        body = (
-            f"A new tenant ({tenant.name} - Code: {tenant.code}) has registered "
-            f"and is awaiting approval and provisioning."
+        saas_admins = self.db.query(SaaSAdmin).filter(
+            SaaSAdmin.status == UserStatus.ACTIVE
+        ).all()
+
+        subject = f"New tenant onboarding request \u2014 {tenant.name}"
+
+        onboarding = tenant.onboarding_data or {}
+
+        # Resolve the plan the applicant selected (via their subscription).
+        subscription = (
+            self.db.query(TenantSubscription)
+            .filter(TenantSubscription.tenant_id == tenant.id)
+            .order_by(TenantSubscription.id.desc())
+            .first()
+        )
+        plan = (
+            self.db.query(SubscriptionPlan)
+            .filter(SubscriptionPlan.id == subscription.plan_id)
+            .first()
+            if subscription
+            else None
+        )
+
+        def _fmt_money(value, currency: str = "NGN") -> str:
+            try:
+                return f"{currency} {float(value):,.2f}"
+            except (TypeError, ValueError):
+                return "\u2014"
+
+        plan_line = "\u2014"
+        if plan is not None:
+            interval = str(getattr(plan.interval, "value", plan.interval) or "").title()
+            price = _fmt_money(plan.price, getattr(plan, "currency", "NGN") or "NGN")
+            plan_line = f"{plan.name} ({plan.code}) \u2014 {price}"
+            if interval:
+                plan_line += f" / {interval}"
+
+        admin_name = " ".join(
+            p for p in [onboarding.get("admin_first_name"),
+                        onboarding.get("admin_last_name")] if p
+        ) or "\u2014"
+
+        submitted_at = (
+            tenant.date_created.strftime("%d %b %Y, %H:%M UTC")
+            if getattr(tenant, "date_created", None)
+            else "\u2014"
+        )
+
+        details = [
+            ("Hospital / Organization", tenant.name),
+            ("Tenant code", (tenant.code or "").upper()),
+            ("Status", "PENDING \u2014 awaiting approval"),
+            ("Selected plan", plan_line),
+            ("Primary domain", tenant.domain_url or "\u2014"),
+            ("Admin contact", admin_name),
+            ("Admin email", onboarding.get("admin_email") or "\u2014"),
+            ("Admin username", onboarding.get("admin_username") or "\u2014"),
+            ("Billing contact", tenant.billing_contact_name or "\u2014"),
+            ("Billing email", tenant.billing_email or "\u2014"),
+            ("Billing phone", tenant.billing_phone or "\u2014"),
+            ("Billing address", tenant.billing_address or "\u2014"),
+            ("Tax ID", tenant.tax_id or "\u2014"),
+            ("Submitted", submitted_at),
+        ]
+
+        # Direct link to review/approve the tenant in the SaaS console.
+        base_url = (
+            getattr(settings, "FRONTEND_URL", None) or "https://www.carepointhms.com"
+        ).rstrip("/")
+        review_url = f"{base_url}/tenants/{tenant.id}"
+
+        intro = (
+            "A new hospital has applied to join CarePoint HMS. Their application "
+            "is pending your review \u2014 no tenant database has been provisioned "
+            "yet, and the applicant cannot sign in until you approve it."
+        )
+        body_paragraphs = [
+            "Review the application details below, then approve it to provision "
+            "the tenant's isolated workspace \u2014 or reject it if the information "
+            "looks incorrect.",
+        ]
+        footer_note = (
+            "You are receiving this because you are an active CarePoint HMS "
+            "platform administrator."
+        )
+
+        # --- Compose the branded email bodies -----------------------------
+        html_body = None
+        text_body = (
+            f"New tenant onboarding request: {tenant.name} "
+            f"(code {(tenant.code or '').upper()}). Selected plan: {plan_line}. "
+            f"Status: PENDING \u2014 awaiting approval. Review & approve: {review_url}"
+        )
+        if render_branded_email is not None:
+            try:
+                html_body = render_branded_email(
+                    title="New tenant onboarding request",
+                    intro=intro,
+                    body_paragraphs=body_paragraphs,
+                    details=details,
+                    details_heading="Application details",
+                    cta_label="Review & approve tenant",
+                    cta_url=review_url,
+                    footer_note=footer_note,
+                    preheader=f"{tenant.name} is awaiting approval",
+                )
+            except Exception as exc:  # pragma: no cover - renderer is best-effort
+                logger.warning("Could not render onboarding email HTML: %s", exc)
+        if render_branded_email_text is not None:
+            try:
+                text_body = render_branded_email_text(
+                    title="New tenant onboarding request",
+                    intro=intro,
+                    body_paragraphs=body_paragraphs,
+                    details=details,
+                    cta_label="Review & approve tenant",
+                    cta_url=review_url,
+                    footer_note=footer_note,
+                )
+            except Exception as exc:  # pragma: no cover
+                logger.warning("Could not render onboarding email text: %s", exc)
+
+        # In-app notification body \u2014 concise but informative.
+        inapp_body = (
+            f"{tenant.name} (code {(tenant.code or '').upper()}) submitted an "
+            f"onboarding application on the {plan_line} plan and is awaiting "
+            "approval and provisioning."
         )
 
         for admin in saas_admins:
-            # 1. In-App Notification (Master DB)
-            notification = SaaSNotification(
+            # 1. In-app notification (master DB)
+            self.db.add(SaaSNotification(
                 saas_admin_id=admin.id,
                 subject=subject,
-                body=body,
+                body=inapp_body,
                 status=NotificationStatus.PENDING,
-                is_read=False
-            )
-            self.db.add(notification)
-            
-            # 2. Email Notification
+                is_read=False,
+            ))
+
+            # 2. Email (best-effort)
             if send_email and admin.email:
                 try:
                     send_email(
                         subject=subject,
                         recipients=[admin.email],
-                        body_text=body
+                        body_text=text_body,
+                        body_html=html_body,
                     )
-                except Exception as e:
-                    # Log but do not interrupt the registration flow
-                    print(f"Failed to send email to {admin.email}: {e}")
-                    
-            # 3. SMS Notification
-            # Note: Assuming SaaSAdmin model has a phone_number in the future,
-            # or if it exists now, we use it. Currently SaaSAdmin model only has email.
+                except Exception as exc:
+                    logger.warning(
+                        "Failed to send onboarding email to %s: %s", admin.email, exc
+                    )
+
+            # 3. SMS (best-effort, only when a number is on file)
             phone_number = getattr(admin, "phone_number", None)
             if send_sms and phone_number:
                 try:
-                    send_sms(to=phone_number, body=body)
-                except Exception as e:
-                    print(f"Failed to send SMS to {phone_number}: {e}")
+                    send_sms(to=phone_number, body=inapp_body)
+                except Exception as exc:
+                    logger.warning(
+                        "Failed to send onboarding SMS to %s: %s", phone_number, exc
+                    )
 
         self.db.commit()
 

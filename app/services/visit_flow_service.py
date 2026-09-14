@@ -82,8 +82,26 @@ class VisitFlowService:
             code=payload.code,
             description=payload.description,
         )
+        if getattr(payload, "is_default", False):
+            self._apply_default_flag(template, True)
         self.db.commit()
         return self.repository.get_template_by_id(template.id)
+
+    def _apply_default_flag(self, template, is_default: bool) -> None:
+        """Set/clear the default flag, keeping at most one default per tenant."""
+        from app.models.all_models import VisitFlowTemplate
+
+        if is_default:
+            self.db.query(VisitFlowTemplate).filter(
+                VisitFlowTemplate.id != template.id,
+                VisitFlowTemplate.is_default.is_(True),
+            ).update(
+                {VisitFlowTemplate.is_default: False},
+                synchronize_session=False,
+            )
+        template.is_default = is_default
+        self.db.add(template)
+        self.db.flush()
 
     def get_template(self, template_id: int):
         """
@@ -143,6 +161,9 @@ class VisitFlowService:
 
         if payload.description is not None:
             template.description = payload.description
+
+        if getattr(payload, "is_default", None) is not None:
+            self._apply_default_flag(template, bool(payload.is_default))
 
         updated = self.repository.update_template(template)
         self.db.commit()

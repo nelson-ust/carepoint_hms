@@ -11,7 +11,7 @@ from typing import Optional
 from sqlalchemy import func, and_
 from sqlalchemy.orm import Session, joinedload
 
-from app.core.enums import QueueStatus
+from app.core.enums import QueueStatus, VisitPriority
 from app.core.exceptions import NotFoundError
 from app.models.all_models import (
     QueueTicket,
@@ -19,6 +19,26 @@ from app.models.all_models import (
     Visit,
 )
 from app.utils.queue_number import generate_queue_number, normalize_queue_prefix
+
+
+# Map a visit's clinical acuity to a numeric queue priority. Higher wins:
+# emergencies and urgent cases are pulled ahead of the normal FIFO line, while
+# LOW/NORMAL keep pure arrival order.
+_VISIT_PRIORITY_RANK: dict = {
+    VisitPriority.LOW: 0,
+    VisitPriority.NORMAL: 0,
+    VisitPriority.HIGH: 10,
+    VisitPriority.URGENT: 20,
+    VisitPriority.EMERGENCY: 30,
+}
+
+
+def _priority_for_visit(db: Session, visit_id: int) -> int:
+    """Resolve the numeric queue priority for a visit from its acuity."""
+    visit = db.query(Visit).filter(Visit.id == visit_id).first()
+    if visit is None:
+        return 0
+    return int(_VISIT_PRIORITY_RANK.get(getattr(visit, "priority", None), 0))
 
 
 class QueueRepository:
@@ -133,6 +153,7 @@ class QueueRepository:
             queue_number=queue_number or self.next_queue_number(service_delivery_point_id),
             queue_position=queue_position or self.next_queue_position(service_delivery_point_id),
             status=status,
+            priority=_priority_for_visit(self.db, visit_id),
             transferred_from_ticket_id=transferred_from_ticket_id,
         )
         self.db.add(ticket)
@@ -173,6 +194,7 @@ class QueueRepository:
         items = (
             query.order_by(
                 QueueTicket.status.asc(),
+                QueueTicket.priority.desc(),
                 QueueTicket.queue_position.asc().nullslast(),
                 QueueTicket.id.asc(),
             )

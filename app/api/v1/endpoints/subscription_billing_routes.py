@@ -487,28 +487,25 @@ def change_my_plan(
     """
     Self-service plan change for tenant administrators. The tenant is taken
     from the request context (never from the payload), so an admin can only
-    ever change their own hospital's plan. Module availability updates
-    immediately — the sidebar re-reads /tenant-modules/me/list.
+    ever change their own hospital's plan.
+
+    Upgrades apply immediately (module availability updates at once \u2014 the
+    sidebar re-reads /tenant-modules/me/list) and a prorated invoice is issued
+    for the price difference over the remaining period. Downgrades are deferred:
+    the current plan runs to the end of the paid period and the new plan takes
+    effect automatically at the next renewal. The response's ``direction`` and
+    ``effective`` fields tell the client which path was taken.
     """
     tenant_id = get_current_tenant_id()
     if tenant_id is None:
         raise NotFoundError(message="No tenant context resolved for this request.")
 
-    from app.services.tenant_service import TenantService
-
-    service = TenantService(db)
-    subscription = service.change_subscription_plan(
+    service = SubscriptionBillingService(db)
+    result = service.change_plan_self_service(
         tenant_id, payload.plan_code, billing_interval=payload.billing_interval
     )
-    plan = subscription.plan
-    return {
-        "success": True,
-        "message": f"Subscription changed to '{plan.name if plan else payload.plan_code}'.",
-        "plan_code": plan.code if plan else payload.plan_code.upper(),
-        "status": subscription.status.value if hasattr(subscription.status, "value") else str(subscription.status),
-        "billing_interval": getattr(subscription, "billing_interval", "MONTHLY"),
-        "start_date": subscription.start_date,
-    }
+    result["success"] = True
+    return result
 
 
 # ===========================================================================

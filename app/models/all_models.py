@@ -1242,6 +1242,10 @@ class VisitFlowTemplate(TenantTable):
     name: Mapped[str] = mapped_column(String(150), nullable=False, unique=True)
     code: Mapped[str] = mapped_column(String(100), nullable=False, unique=True, index=True)
     description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # Marks the tenant's default care pathway. A visit started without an
+    # explicit template/service point falls back to the default. At most one
+    # template is default at a time (enforced by the service layer).
+    is_default: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false", nullable=False)
 
     steps: Mapped[list["VisitFlowTemplateStep"]] = relationship(
         back_populates="template",
@@ -1341,6 +1345,10 @@ class QueueTicket(TenantTable):
 
     queue_number: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
     queue_position: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    # Clinical priority, derived from the visit's acuity when the ticket is
+    # created (0 = normal, higher = more urgent). Worklists order by this first
+    # so urgent/emergency patients are attended to ahead of the FIFO line.
+    priority: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False, index=True)
 
     status: Mapped[QueueStatus] = mapped_column(
         Enum(QueueStatus),
@@ -4195,8 +4203,20 @@ class TenantSubscription(MasterTable):
 
     auto_renew: Mapped[bool] = mapped_column(Boolean, default=True)
 
+    # Deferred (downgrade) plan change. When a tenant downgrades, the new plan
+    # does not take effect immediately: we record the target here and apply it
+    # when the current period expires (at the next renewal invoice). Cleared
+    # once applied. Upgrades never use these — they switch immediately.
+    scheduled_plan_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("subscription_plan.id"), nullable=True, index=True
+    )
+    scheduled_interval: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+
     tenant: Mapped["Tenant"] = relationship(back_populates="subscriptions")
-    plan: Mapped["SubscriptionPlan"] = relationship()
+    plan: Mapped["SubscriptionPlan"] = relationship(foreign_keys=[plan_id])
+    scheduled_plan: Mapped[Optional["SubscriptionPlan"]] = relationship(
+        foreign_keys=[scheduled_plan_id]
+    )
 
 
 class SubscriptionInvoice(MasterTable):

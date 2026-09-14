@@ -288,7 +288,11 @@ def change_tenant_plan(
     Switch a tenant to a different subscription plan.
     Requires SaaS Superuser access.
     """
-    subscription = service.change_subscription_plan(tenant_id, payload.plan_code)
+    subscription = service.change_subscription_plan(
+        tenant_id,
+        payload.plan_code,
+        billing_interval=payload.billing_interval or "MONTHLY",
+    )
     return {
         "success": True,
         "message": f"Tenant plan successfully changed to '{payload.plan_code}'.",

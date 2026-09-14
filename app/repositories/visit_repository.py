@@ -262,17 +262,35 @@ class VisitRepository:
         Return the tenant's default visit flow template (care pathway).
 
         Preference order:
-        1. The standard outpatient pathway (code ``STANDARD_OPD``)
-        2. The earliest active template that actually has steps
+        1. A template explicitly flagged ``is_default`` (the hospital's choice)
+        2. The standard outpatient pathway (code ``STANDARD_OPD``)
+        3. The earliest active template that actually has steps
 
         Returns ``None`` when no usable template exists. Templates are returned
         with their ordered, non-deleted steps eagerly loaded so the caller can
         resolve the first service delivery point immediately.
         """
+        # 1. An explicitly-flagged default template (hospital's own choice).
+        flagged = (
+            self.db.query(VisitFlowTemplate)
+            .filter(
+                VisitFlowTemplate.is_default.is_(True),
+                VisitFlowTemplate.is_deleted.is_(False),
+            )
+            .order_by(VisitFlowTemplate.id.asc())
+            .all()
+        )
+        for row in flagged:
+            full = self.get_visit_flow_template_by_id(row.id)
+            if full is not None and full.steps:
+                return full
+
+        # 2. The seeded standard outpatient pathway.
         standard = self.get_visit_flow_template_by_code("STANDARD_OPD")
         if standard is not None and standard.steps:
             return standard
 
+        # 3. The earliest active template that actually has steps.
         rows = (
             self.db.query(VisitFlowTemplate)
             .filter(VisitFlowTemplate.is_deleted.is_(False))
@@ -633,6 +651,21 @@ class VisitRepository:
 
         return created_steps
 
+    _VISIT_PRIORITY_RANK = {
+        VisitPriority.LOW: 0,
+        VisitPriority.NORMAL: 0,
+        VisitPriority.HIGH: 10,
+        VisitPriority.URGENT: 20,
+        VisitPriority.EMERGENCY: 30,
+    }
+
+    def _queue_priority_for_visit(self, visit_id: int) -> int:
+        """Numeric queue priority derived from the visit's clinical acuity."""
+        visit = self.db.query(Visit).filter(Visit.id == visit_id).first()
+        if visit is None:
+            return 0
+        return int(self._VISIT_PRIORITY_RANK.get(getattr(visit, "priority", None), 0))
+
     def create_queue_ticket(
         self,
         *,
@@ -656,6 +689,7 @@ class VisitRepository:
             queue_number=queue_number,
             queue_position=queue_position,
             status=status,
+            priority=self._queue_priority_for_visit(visit_id),
             transferred_from_ticket_id=transferred_from_ticket_id,
         )
         self.db.add(ticket)

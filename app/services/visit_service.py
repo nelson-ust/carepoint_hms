@@ -452,41 +452,50 @@ class VisitService:
                 detail={"service_delivery_point_id": payload.service_delivery_point_id},
             )
 
-        previous_ticket = self.repository.get_latest_queue_ticket_for_visit(visit_id)
-
-        new_flow_step = self.repository.create_rerouted_flow_step(
-            visit_id=visit.id,
-            service_delivery_point_id=target_service_point.id,
-            routed_by_id=payload.routed_by_id,
-            status=VisitFlowStepStatus.PENDING,
-            is_required=True,
-            notes=payload.reason,
-            mark_as_current=payload.mark_as_current,
-        )
-
-        new_queue_ticket = None
-        if payload.create_queue_ticket:
-            new_queue_ticket = self.repository.create_rerouted_queue_ticket(
-                visit_id=visit.id,
-                visit_flow_step_id=new_flow_step.id,
-                patient_id=visit.patient_id,
-                service_delivery_point=target_service_point,
-                status=self._resolve_queue_status(payload.queue_status),
-                queue_position=payload.queue_position,
-                transferred_from_ticket_id=previous_ticket.id if previous_ticket else None,
-            )
-
-        visit.current_service_delivery_point_id = target_service_point.id
         if visit.status in {VisitStatus.COMPLETED, VisitStatus.CANCELLED}:
             raise BadRequestError(
                 message="Completed or cancelled visits cannot be rerouted.",
                 detail={"visit_id": visit.id},
             )
 
-        if visit.status == VisitStatus.INITIATED:
-            visit.status = VisitStatus.WAITING
+        previous_ticket = self.repository.get_latest_queue_ticket_for_visit(visit_id)
 
-        self.repository.update_visit(visit)
+        # Unified routing: both the queue "complete-and-route" verb and this
+        # visit-level reroute now go through the single shared helper, so the
+        # flow step + queue ticket bookkeeping is identical whichever surface
+        # staff use (the queue board or the visit page).
+        from app.utils.visit_routing import route_visit_to_next_sdp
+
+        new_flow_step, new_queue_ticket = route_visit_to_next_sdp(
+            self.db,
+            visit_id=visit.id,
+            target_service_delivery_point_id=target_service_point.id,
+            routed_by_id=payload.routed_by_id,
+            notes=payload.reason,
+        )
+
+        now = datetime.now(timezone.utc)
+
+        # Close the prior open ticket (the patient is being moved away from it)
+        # and link the new ticket back to it for traceability.
+        if previous_ticket is not None and previous_ticket.id != new_queue_ticket.id:
+            if previous_ticket.status in {
+                QueueStatus.WAITING,
+                QueueStatus.CALLED,
+                QueueStatus.SERVING,
+            }:
+                previous_ticket.status = QueueStatus.TRANSFERRED
+                previous_ticket.service_ended_at = now
+                self.repository.update_queue_ticket(previous_ticket)
+            new_queue_ticket.transferred_from_ticket_id = previous_ticket.id
+            self.repository.update_queue_ticket(new_queue_ticket)
+
+        # Honour an explicit opt-out of queue ticketing (rare).
+        if not payload.create_queue_ticket:
+            new_queue_ticket.status = QueueStatus.CANCELLED
+            self.repository.update_queue_ticket(new_queue_ticket)
+            new_queue_ticket = None
+
         self.db.commit()
 
         detailed_visit = self.repository.get_detailed_visit_by_id(visit.id)

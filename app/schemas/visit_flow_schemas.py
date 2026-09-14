@@ -65,6 +65,10 @@ class VisitFlowTemplateBaseSchema(BaseModel):
     name: str = Field(..., min_length=1, max_length=150)
     code: str = Field(..., min_length=1, max_length=100)
     description: Optional[str] = None
+    is_default: bool = Field(
+        default=False,
+        description="Mark this template as the tenant's default care pathway.",
+    )
 
     @field_validator("name")
     @classmethod
@@ -106,6 +110,7 @@ class VisitFlowTemplateUpdateSchema(BaseModel):
     name: Optional[str] = Field(None, min_length=1, max_length=150)
     code: Optional[str] = Field(None, min_length=1, max_length=100)
     description: Optional[str] = None
+    is_default: Optional[bool] = None
 
     @field_validator("name")
     @classmethod
@@ -219,6 +224,7 @@ class VisitFlowTemplateReadSchema(BaseModel):
     name: str
     code: str
     description: Optional[str] = None
+    is_default: bool = False
     steps: list[VisitFlowTemplateStepReadSchema] = Field(default_factory=list)
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None

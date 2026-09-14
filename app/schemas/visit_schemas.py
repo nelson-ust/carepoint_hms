@@ -130,6 +130,7 @@ class VisitFlowTemplateReadSchema(BaseModel):
     name: str
     code: str
     description: Optional[str] = None
+    is_default: bool = False
     steps: list[VisitFlowTemplateStepReadSchema] = Field(default_factory=list)
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
@@ -318,6 +319,7 @@ class QueueTicketReadSchema(BaseModel):
     service_delivery_point_id: int
     queue_number: str
     queue_position: Optional[int] = None
+    priority: int = 0
     status: str
     called_at: Optional[datetime] = None
     service_started_at: Optional[datetime] = None
