@@ -40,6 +40,7 @@ from typing import Optional
 from sqlalchemy import and_, func, or_
 from sqlalchemy.orm import Session, joinedload, selectinload
 
+from app.core.enums import PatientClass
 from app.models.all_models import (
     Patient,
     PatientAttachment,
@@ -225,6 +226,7 @@ class PatientRepository:
         patient_type=None,
         preferred_payer_id: Optional[int] = None,
         payer_type: Optional[str] = None,
+        patient_class: Optional["PatientClass"] = None,
         national_identifier: Optional[str] = None,
         national_identifier_type: Optional[str] = None,
         identification_details: Optional[dict] = None,
@@ -259,6 +261,7 @@ class PatientRepository:
             patient_type=patient_type,
             preferred_payer_id=preferred_payer_id,
             payer_type=payer_type,
+            patient_class=patient_class or PatientClass.SELF_PAY,
             national_identifier=national_identifier,
             national_identifier_type=national_identifier_type,
             identification_details=identification_details,

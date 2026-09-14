@@ -736,6 +736,10 @@ class PatientBaseSchema(BaseModel):
 
     preferred_payer_id: Optional[int] = None
     payer_type: Optional[str] = Field(None, max_length=100)
+    patient_class: Optional[str] = Field(
+        None,
+        description="Billing class: SELF_PAY (normal), HMO, or RETAINERSHIP.",
+    )
 
     national_identifier: Optional[str] = Field(None, max_length=100)
     national_identifier_type: Optional[str] = Field(None, max_length=50)
@@ -904,6 +908,10 @@ class PatientUpdateSchema(BaseModel):
 
     preferred_payer_id: Optional[int] = None
     payer_type: Optional[str] = Field(None, max_length=100)
+    patient_class: Optional[str] = Field(
+        None,
+        description="Billing class: SELF_PAY (normal), HMO, or RETAINERSHIP.",
+    )
 
     national_identifier: Optional[str] = Field(None, max_length=100)
     national_identifier_type: Optional[str] = Field(None, max_length=50)
@@ -1050,6 +1058,7 @@ class PatientReadSchema(BaseModel):
 
     preferred_payer_id: Optional[int] = None
     payer_type: Optional[str] = None
+    patient_class: Optional[str] = None
     preferred_payer: Optional[PayerLiteSchema] = None
 
     national_identifier: Optional[str] = None

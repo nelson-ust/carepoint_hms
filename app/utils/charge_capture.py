@@ -462,10 +462,35 @@ def resolve_billable_service(
     return svc
 
 
+def patient_responsible_amount(item: "BillingItem") -> Decimal:
+    """
+    The portion of a billing line the PATIENT must pay out of pocket.
+
+    For an insured/retainership line the CoverageEngine has already split the
+    line into a covered portion (billed to the HMO / corporate retainer) and a
+    ``patient_amount`` co-pay — the patient owes only the co-pay. For a
+    self-pay line (no coverage split recorded) the patient owes the full line
+    total.
+    """
+    if getattr(item, "patient_amount", None) is not None:
+        try:
+            return Decimal(str(item.patient_amount))
+        except (TypeError, ValueError):  # pragma: no cover - defensive
+            return Decimal("0")
+    return Decimal(str(item.line_total or 0))
+
+
 def has_outstanding_charges(db: Session, *, visit_id: int, source_prefix: Optional[str] = None) -> bool:
     """
-    Return True if the visit has any OPEN/DRAFT billing items not yet covered
-    by a SETTLED invoice. Optionally restrict to a `source_prefix` (e.g. "LAB").
+    Return True if the visit has any OPEN/DRAFT billing items whose
+    PATIENT-RESPONSIBLE portion is still unpaid. Optionally restrict to a
+    ``source_prefix`` (e.g. "LAB").
+
+    Coverage-aware: a line fully covered by the patient's HMO or corporate
+    retainer (``patient_amount == 0``) is NOT outstanding for the patient, so
+    insured / retainership patients are never blocked at the lab / pharmacy for
+    charges their sponsor is settling. Self-pay patients (no coverage split)
+    and any co-pay still gate normally.
     """
     query = (
         db.query(BillingItem)
@@ -479,7 +504,11 @@ def has_outstanding_charges(db: Session, *, visit_id: int, source_prefix: Option
     )
     if source_prefix:
         query = query.filter(BillingItem.source_reference.like(f"{source_prefix.strip().upper()}%"))
-    return query.first() is not None
+
+    for item in query.all():
+        if patient_responsible_amount(item) > 0:
+            return True
+    return False
 
 
 # ============================================================

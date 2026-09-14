@@ -465,6 +465,23 @@ class VisitPriority(StringEnum):
     EMERGENCY = "EMERGENCY"
 
 
+class PatientClass(StringEnum):
+    """How a patient's bills are settled.
+
+    * ``SELF_PAY`` — a normal patient who pays for services themselves
+      (hospital card or any other means).
+    * ``HMO`` — an insured patient; the HMO settles covered charges after
+      validation and the patient pays only uncovered portions / co-pays.
+    * ``RETAINERSHIP`` — a patient whose employer/company is on retainership;
+      covered charges are billed to the company, the patient pays any
+      uncovered portion.
+    """
+
+    SELF_PAY = "SELF_PAY"
+    HMO = "HMO"
+    RETAINERSHIP = "RETAINERSHIP"
+
+
 class VisitFlowStepStatus(StringEnum):
     PENDING = "PENDING"
     QUEUED = "QUEUED"

@@ -178,6 +178,7 @@ from app.core.enums import (
     SupportAccessStatus,
     VisitFlowStepStatus,
     VisitPriority,
+    PatientClass,
     VisitStatus,
     WarehouseExportType,
     WarehouseJobStatus,
@@ -849,6 +850,16 @@ class Patient(TenantTable):
         nullable=True,
         index=True,
         doc="Optional quick payer-type snapshot, e.g. SELF_PAY, HMO, SPONSOR.",
+    )
+    # Billing class declared at registration. SELF_PAY (normal), HMO (insured),
+    # or RETAINERSHIP (company-billed). The effective class is reconciled with
+    # the patient's active coverage enrolment by resolve_patient_class().
+    patient_class: Mapped[PatientClass] = mapped_column(
+        Enum(PatientClass),
+        default=PatientClass.SELF_PAY,
+        server_default="SELF_PAY",
+        nullable=False,
+        index=True,
     )
 
     # Generic identity summary

@@ -105,6 +105,12 @@ class BillingItemReadSchema(BaseModel):
     source_reference: Optional[str] = None
     account_code: Optional[str] = None
     account_name: Optional[str] = None
+    # HMO / retainership coverage split (filled by the CoverageEngine for
+    # insured / company-covered visits). ``patient_amount`` is what the patient
+    # pays out of pocket; ``covered_amount`` is billed to the sponsor.
+    covered_amount: Optional[Decimal] = None
+    patient_amount: Optional[Decimal] = None
+    is_covered: bool = False
     created_at: Optional[datetime] = None
 
 

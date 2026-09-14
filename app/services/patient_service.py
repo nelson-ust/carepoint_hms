@@ -44,6 +44,7 @@ from sqlalchemy.orm import Session
 import uuid
 
 from app.core.exceptions import AlreadyExistsError, BadRequestError, NotFoundError
+from app.core.enums import PatientClass
 from app.models.all_models import Patient
 from app.repositories.patient_repository import PatientRepository
 from app.schemas.patient_schemas import (
@@ -62,6 +63,18 @@ from app.schemas.patient_schemas import (
 )
 
 from app.utils.audit_util import log_entity_change, build_audit_payload
+
+
+def _coerce_patient_class(value):
+    """Coerce a patient-class string from the API into the PatientClass enum."""
+    if value is None or value == "":
+        return PatientClass.SELF_PAY
+    if isinstance(value, PatientClass):
+        return value
+    try:
+        return PatientClass(str(value).strip().upper())
+    except ValueError:
+        return PatientClass.SELF_PAY
 
 
 class PatientService:
@@ -183,6 +196,7 @@ class PatientService:
             patient_type=payload.patient_type,
             preferred_payer_id=payload.preferred_payer_id,
             payer_type=payload.payer_type,
+            patient_class=_coerce_patient_class(payload.patient_class),
             national_identifier=payload.national_identifier,
             national_identifier_type=payload.national_identifier_type,
             identification_details=payload.identification_details,
@@ -535,6 +549,8 @@ class PatientService:
             patient.preferred_payer_id = payload.preferred_payer_id
         if payload.payer_type is not None:
             patient.payer_type = payload.payer_type
+        if getattr(payload, "patient_class", None) is not None:
+            patient.patient_class = _coerce_patient_class(payload.patient_class)
 
         if payload.national_identifier is not None:
             patient.national_identifier = payload.national_identifier
@@ -913,6 +929,7 @@ class PatientService:
             "patient_type": str(patient.patient_type) if patient.patient_type is not None else None,
             "preferred_payer_id": patient.preferred_payer_id,
             "payer_type": patient.payer_type,
+            "patient_class": getattr(patient.patient_class, "value", patient.patient_class),
             "national_identifier": patient.national_identifier,
             "national_identifier_type": patient.national_identifier_type,
             "identification_details": patient.identification_details,
