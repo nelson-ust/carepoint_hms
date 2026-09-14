@@ -482,6 +482,16 @@ class PatientClass(StringEnum):
     RETAINERSHIP = "RETAINERSHIP"
 
 
+class ProblemStatus(StringEnum):
+    """Lifecycle status of a chronic condition on a patient's problem list."""
+
+    ACTIVE = "ACTIVE"          # newly/again active, not yet controlled
+    CONTROLLED = "CONTROLLED"  # stable and well-managed
+    IMPROVING = "IMPROVING"    # trending better under management
+    WORSENING = "WORSENING"    # trending worse; needs attention
+    RESOLVED = "RESOLVED"      # no longer active
+
+
 class VisitFlowStepStatus(StringEnum):
     PENDING = "PENDING"
     QUEUED = "QUEUED"

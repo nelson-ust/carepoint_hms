@@ -231,6 +231,7 @@ from app.api.v1.endpoints.insurance_claim_routes import (
 # Aggregated patient medical history (read-only)
 from app.api.v1.endpoints.medical_history_routes import router as medical_history_router
 from app.api.v1.endpoints.baseline_profile_routes import router as baseline_profile_router
+from app.api.v1.endpoints.patient_clinical_routes import router as patient_clinical_router
 from app.api.v1.endpoints.medical_exam_routes import router as medical_exam_router
 
 
@@ -424,4 +425,5 @@ api_router.include_router(insurance_appeal_router)
 # surgeries, admissions, vitals).
 api_router.include_router(medical_history_router)
 api_router.include_router(baseline_profile_router)
+api_router.include_router(patient_clinical_router)
 api_router.include_router(medical_exam_router)

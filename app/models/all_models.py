@@ -179,6 +179,7 @@ from app.core.enums import (
     VisitFlowStepStatus,
     VisitPriority,
     PatientClass,
+    ProblemStatus,
     VisitStatus,
     WarehouseExportType,
     WarehouseJobStatus,
@@ -1490,6 +1491,43 @@ class Diagnosis(TenantTable):
 
     visit: Mapped["Visit"] = relationship(back_populates="diagnoses")
     consultation: Mapped[Optional["Consultation"]] = relationship()
+
+
+class PatientProblem(TenantTable):
+    """
+    An entry on a patient's chronic problem list.
+
+    Distinct from a per-visit :class:`Diagnosis` (which records what was found
+    at one encounter), a problem is a longitudinal condition the care team
+    manages over time — hypertension, diabetes, asthma, etc. — with a status
+    that reflects whether it is improving, controlled, or worsening.
+    """
+
+    patient_id: Mapped[int] = mapped_column(ForeignKey("patient.id"), nullable=False, index=True)
+
+    condition_name: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    condition_code: Mapped[Optional[str]] = mapped_column(String(50), nullable=True, index=True)  # ICD-10, etc.
+    category: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+
+    status: Mapped[ProblemStatus] = mapped_column(
+        Enum(ProblemStatus),
+        default=ProblemStatus.ACTIVE,
+        server_default="ACTIVE",
+        nullable=False,
+        index=True,
+    )
+    is_chronic: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true", nullable=False)
+
+    onset_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+    resolved_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+
+    severity: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)  # MILD / MODERATE / SEVERE
+    notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    diagnosed_by_user_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    last_reviewed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    patient: Mapped["Patient"] = relationship()
 
 
 class Referral(TenantTable):
