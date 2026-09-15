@@ -1,4 +1,8 @@
+import hashlib
 import os
+import re
+import secrets
+
 import boto3
 from botocore.config import Config
 from botocore.exceptions import ClientError
@@ -27,33 +31,124 @@ class S3Service:
         self.is_enabled = settings.S3_ENABLED
         #: Human-readable reason for the most recent failed operation.
         self.last_error: Optional[str] = None
+        #: Cached deployment-scoped bucket-name suffix (see _account_suffix).
+        self._account_suffix_cache: Optional[str] = None
+
+    # S3 bucket names: 3-63 chars, lowercase letters/digits/hyphens, must
+    # start and end alphanumeric. Reserve room for the "carepoint-hms-" prefix
+    # (14), the "-<env>" segment and the "-<suffix>" segment.
+    _BUCKET_PREFIX = "carepoint-hms-"
+
+    @staticmethod
+    def _slug(value: str) -> str:
+        """Lowercase and reduce to the S3-legal character set."""
+        slug = re.sub(r"[^a-z0-9-]+", "-", (value or "").lower())
+        slug = re.sub(r"-{2,}", "-", slug).strip("-")
+        return slug or "tenant"
+
+    def _account_suffix(self) -> str:
+        """A short, deployment-scoped suffix that makes tenant bucket names
+        globally unique WITHOUT colliding with other AWS accounts.
+
+        Derived (and cached) from the AWS account id via STS so it is stable
+        across retries — critical for idempotency: re-provisioning the same
+        tenant always resolves to the same bucket name. Falls back to a hash
+        of the access key id, then to a fixed token, if STS is unavailable.
+        """
+        if self._account_suffix_cache:
+            return self._account_suffix_cache
+        seed = None
+        try:
+            sts = boto3.client(
+                "sts",
+                aws_access_key_id=settings.AWS_ACCESS_KEY_ID.get_secret_value() if settings.AWS_ACCESS_KEY_ID else None,
+                aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY.get_secret_value() if settings.AWS_SECRET_ACCESS_KEY else None,
+                region_name=self.region,
+                endpoint_url=settings.AWS_ENDPOINT_URL,
+            )
+            seed = sts.get_caller_identity().get("Account")
+        except Exception as exc:  # STS not permitted / offline — fall back
+            logger.info("STS get_caller_identity unavailable (%s); using key-derived bucket suffix.", exc)
+        if not seed and settings.AWS_ACCESS_KEY_ID:
+            seed = settings.AWS_ACCESS_KEY_ID.get_secret_value()
+        seed = seed or "carepoint-hms"
+        self._account_suffix_cache = hashlib.sha256(seed.encode()).hexdigest()[:8]
+        return self._account_suffix_cache
+
+    def _build_bucket_name(self, tenant_code: str, env: str, unique: str) -> str:
+        """Assemble a legal bucket name, truncating the tenant slug so the
+        whole name stays within the 63-character S3 limit."""
+        tail = f"-{env}-{unique}"
+        max_code = 63 - len(self._BUCKET_PREFIX) - len(tail)
+        code = self._slug(tenant_code)[:max_code].strip("-") or "tenant"
+        return f"{self._BUCKET_PREFIX}{code}{tail}"
+
+    def _try_create_bucket(self, bucket_name: str) -> None:
+        """Issue the raw create_bucket call for the active region."""
+        if self.region == "us-east-1":
+            self.s3_client.create_bucket(Bucket=bucket_name)
+        else:
+            self.s3_client.create_bucket(
+                Bucket=bucket_name,
+                CreateBucketConfiguration={"LocationConstraint": self.region},
+            )
 
     def create_tenant_bucket(self, tenant_code: str) -> Optional[str]:
         """
         Provision an S3 bucket for a specific tenant.
         Returns the bucket name if successful, None otherwise.
+
+        The name is ``carepoint-hms-<tenant>-<env>-<account-suffix>``. The
+        account-scoped suffix guarantees global uniqueness across AWS accounts
+        while staying stable across retries. In the rare event the name is
+        still taken, we retry with random suffixes before giving up.
         """
         if not self.is_enabled:
             logger.info("S3 is disabled. Skipping bucket creation.")
             return None
 
-        # S3 bucket names must be globally unique
+        # S3 bucket names must be globally unique. Primary candidate uses the
+        # deterministic account suffix; fallbacks use random tokens.
         env = "dev" if settings.is_development else "prod"
-        bucket_name = f"carepoint-hms-{tenant_code.lower()}-{env}"
-        
-        try:
-            if self.region == "us-east-1":
-                self.s3_client.create_bucket(Bucket=bucket_name)
-            else:
-                self.s3_client.create_bucket(
-                    Bucket=bucket_name,
-                    CreateBucketConfiguration={'LocationConstraint': self.region}
-                )
+        candidates = [self._build_bucket_name(tenant_code, env, self._account_suffix())]
+        for _ in range(3):
+            candidates.append(
+                self._build_bucket_name(tenant_code, env, secrets.token_hex(4))
+            )
 
-            # Optionally configure CORS or Bucket Policies here if needed
-            logger.info(f"Successfully provisioned S3 bucket: {bucket_name}")
-            self.last_error = None
-            return bucket_name
+        last_taken: Optional[str] = None
+        bucket_name = candidates[0]
+        try:
+            for idx, bucket_name in enumerate(candidates):
+                try:
+                    self._try_create_bucket(bucket_name)
+                    logger.info(f"Successfully provisioned S3 bucket: {bucket_name}")
+                    self.last_error = None
+                    return bucket_name
+                except ClientError as inner:
+                    inner_code = (inner.response or {}).get("Error", {}).get("Code", "")
+                    if inner_code == "BucketAlreadyOwnedByYou":
+                        logger.info(f"S3 bucket {bucket_name} already owned by us — reusing.")
+                        self.last_error = None
+                        return bucket_name
+                    if inner_code == "BucketAlreadyExists":
+                        # Only the deterministic name is worth reporting; for the
+                        # random fallbacks just keep trying the next candidate.
+                        last_taken = bucket_name
+                        logger.warning(
+                            "S3 bucket name %s already taken by another account; "
+                            "trying an alternative.", bucket_name,
+                        )
+                        continue
+                    raise  # any other error: handle in the outer except
+            # Exhausted all candidates on BucketAlreadyExists.
+            self.last_error = (
+                f"The bucket name '{last_taken or bucket_name}' is already taken by another "
+                "AWS account (S3 names are global), and automatic alternatives were also "
+                "unavailable. Set a distinct tenant code or configure a dedicated bucket."
+            )
+            logger.error(self.last_error)
+            return None
         except ClientError as e:
             code = (e.response or {}).get("Error", {}).get("Code", "")
             message = (e.response or {}).get("Error", {}).get("Message", str(e))
