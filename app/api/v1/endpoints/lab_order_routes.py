@@ -37,6 +37,7 @@ from app.schemas.lab_order_schema import (
     LabOrderItemSpecimenSchema,
     LabOrderListResponseSchema,
     LabOrderReadSchema,
+    LabOrderTrackResponseSchema,
 )
 from app.services.lab_order_service import LabOrderService
 from app.utils.pagination import paginate_response
@@ -111,6 +112,37 @@ def list_worklist(
         limit=limit,
         message="Lab worklist fetched successfully.",
     )
+
+
+@router.get(
+    "/track",
+    response_model=LabOrderTrackResponseSchema,
+    summary="Track lab orders across the hospital",
+)
+def track_orders(
+    _: Annotated[
+        User,
+        Depends(
+            require_permission(
+                "VISIT_READ", "PATIENT_READ", "LAB_ORDER_CREATE",
+                "LAB_RESULT_ENTER", "LAB_RESULT_VERIFY", "LAB_RESULT_RELEASE",
+            )
+        ),
+    ],
+    service: Annotated[LabOrderService, Depends(get_lab_order_service)],
+    query: Optional[str] = Query(
+        None, description="Search by order number, patient name or hospital number."
+    ),
+    status: Optional[str] = Query(None, description="Filter by order status."),
+    skip: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=200),
+):
+    """Search laboratory orders across visits and see live per-test progress.
+
+    Open to any clinical or front-desk role (doctor, receptionist, nurse,
+    laboratory) so results can be tracked from anywhere in the hospital.
+    """
+    return service.track_orders(query=query, status=status, skip=skip, limit=limit)
 
 
 @router.get(

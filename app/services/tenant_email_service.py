@@ -723,20 +723,32 @@ def send_tenant_email(
     if not recipients_list:
         return False
 
+    # Resolve the tenant's signature/footer up front so we can apply it even
+    # when we fall back to the platform SMTP. The tenant "signature" is the
+    # active email configuration's footer (text/html).
+    footer_text: Optional[str] = None
+    footer_html: Optional[str] = None
+
     # 1. Try tenant configuration when we have a tenant DB session.
     if db is not None:
         try:
             svc = TenantEmailService(db)
-            ok = svc.send_email(
-                subject=subject,
-                recipients=recipients_list,
-                body_text=body_text,
-                body_html=body_html,
-                cc=list(cc or []),
-                bcc=list(bcc or []),
-            )
-            if ok:
-                return True
+            active = svc.get_active_config()
+            if active is not None:
+                footer_text = active.footer_text
+                footer_html = active.footer_html
+                # svc.send_email appends the footer internally on success.
+                ok = svc.send_email(
+                    subject=subject,
+                    recipients=recipients_list,
+                    body_text=body_text,
+                    body_html=body_html,
+                    cc=list(cc or []),
+                    bcc=list(bcc or []),
+                    config=active,
+                )
+                if ok:
+                    return True
         except Exception as exc:
             logger.warning(
                 "Tenant email dispatch failed; falling back to platform: %s", exc
@@ -745,20 +757,34 @@ def send_tenant_email(
     if not fall_back_to_platform:
         return False
 
-    # 2. Fall back to the platform-wide send_email helper.
+    # 2. Fall back to the platform-wide (environment) SMTP helper. Apply the
+    #    tenant signature here too so notifications always carry it, regardless
+    #    of which transport actually delivered the message.
     try:
         from app.utils.email_utils import send_email  # type: ignore
     except Exception:
         logger.warning("Platform send_email helper unavailable.")
         return False
 
+    body_text_out = f"{body_text}\n\n{footer_text}" if footer_text else body_text
+    if body_html and footer_html:
+        body_html_out = f"{body_html}<br><br>{footer_html}"
+    else:
+        body_html_out = body_html
+
     try:
-        send_email(
+        result = send_email(
             subject=subject,
             recipients=recipients_list,
-            body_text=body_text,
-            body_html=body_html,
+            body_text=body_text_out,
+            body_html=body_html_out,
+            cc=list(cc or []),
+            bcc=list(bcc or []),
         )
+        # send_email returns a structured dict; treat an explicit success flag
+        # as authoritative, otherwise assume it raised on hard failure.
+        if isinstance(result, dict):
+            return bool(result.get("success"))
         return True
     except Exception as exc:
         logger.warning("Platform send_email failed: %s", exc)

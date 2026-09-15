@@ -270,27 +270,11 @@ class LabResultService:
                 # Notifications are best-effort. The release stands.
                 pass
 
-        # ----- Best-effort notification to the patient ---------
+        # ----- Notify the patient by email that their result is ready -----
+        # Robust + best-effort: never let a notification failure block release.
         try:
-            from app.services.notification_service import NotificationService
-            from app.schemas.notification_schema import NotificationDispatchSchema
-
-            visit = order.visit
-            if visit and visit.patient_id:
-                ns = NotificationService(self.db)
-                ns.dispatch_from_template(
-                    NotificationDispatchSchema(
-                        template_code="PATIENT_LAB_RESULT_READY",
-                        patient_id=visit.patient_id,
-                        context={
-                            "test_name": item.service_name or "Lab Test",
-                            "date": result.released_at.strftime("%Y-%m-%d %H:%M") if result.released_at else "N/A"
-                        },
-                    ),
-                    actor_user_id=actor_user_id,
-                )
-        except Exception as e:
-            print(f"Error sending patient lab notification: {e}")
+            self._notify_patient_result_ready(order, actor_user_id=actor_user_id)
+        except Exception:
             pass
 
         # ----- Route the patient back to the originating clinic SDP -------
@@ -310,6 +294,121 @@ class LabResultService:
 
         self.db.commit()
         return self.repository.get_required_by_id(result.id)
+
+    # ============================================================
+    # PATIENT NOTIFICATION
+    # ============================================================
+
+    def _notify_patient_result_ready(
+        self, order, *, actor_user_id: Optional[int] = None
+    ) -> None:
+        """Email the patient that their laboratory result is ready.
+
+        Primary path is the configurable ``PATIENT_LAB_RESULT_READY`` template
+        (logged as a Notification and admin-editable); if that template is not
+        present or dispatch fails, we fall back to a direct branded email so the
+        patient is still reliably informed. Silently no-ops when the patient has
+        no email on file.
+        """
+        from app.models.all_models import Patient, Visit
+
+        visit = getattr(order, "visit", None) or (
+            self.db.query(Visit).filter(Visit.id == order.visit_id).first()
+        )
+        if visit is None or not visit.patient_id:
+            return
+        patient = self.db.query(Patient).filter(Patient.id == visit.patient_id).first()
+        patient_email = getattr(patient, "email", None) if patient else None
+        if not patient_email:
+            return  # nothing to send to
+
+        # Names of the tests whose results are now released on this order.
+        released_tests: list[str] = []
+        for it in (order.items or []):
+            res = getattr(it, "result", None)
+            if res is not None and getattr(res, "released_at", None) is not None:
+                catalog = getattr(it, "lab_test_catalog", None)
+                released_tests.append(
+                    getattr(catalog, "name", None) or f"Test #{it.lab_test_catalog_id}"
+                )
+        test_names = ", ".join(dict.fromkeys(released_tests)) or "your laboratory test"
+
+        patient_name = " ".join(
+            x for x in (
+                getattr(patient, "first_name", None),
+                getattr(patient, "last_name", None),
+            ) if x
+        ) or "Patient"
+
+        # Hospital branding + portal link.
+        hospital_name = "your hospital"
+        try:
+            from app.core.multitenancy import get_current_tenant
+            tenant = get_current_tenant()
+            if tenant is not None:
+                hospital_name = getattr(tenant, "name", None) or hospital_name
+        except Exception:
+            pass
+        base_url = (getattr(settings, "FRONTEND_URL", "") or "").rstrip("/")
+        portal_url = f"{base_url}/portal/lab-results" if base_url else "the patient portal"
+
+        context = {
+            "hospital_name": hospital_name,
+            "patient_name": patient_name,
+            "order_no": order.order_no,
+            "test_names": test_names,
+            "portal_url": portal_url,
+            "date": (
+                order.items[0].result.released_at.strftime("%Y-%m-%d %H:%M")
+                if order.items and getattr(order.items[0], "result", None)
+                and order.items[0].result.released_at else ""
+            ),
+        }
+
+        # Primary: configurable template via the notification service (EMAIL).
+        try:
+            from app.services.notification_service import NotificationService
+            from app.schemas.notification_schema import NotificationDispatchSchema
+
+            NotificationService(self.db).dispatch_from_template(
+                NotificationDispatchSchema(
+                    template_code="PATIENT_LAB_RESULT_READY",
+                    patient_id=patient.id,
+                    recipient_address=patient_email,
+                    channel_override="EMAIL",
+                    context=context,
+                ),
+                actor_user_id=actor_user_id,
+            )
+            return
+        except Exception:
+            # Fall through to a direct email so the patient is still notified
+            # even if the template has not been seeded for this tenant yet.
+            pass
+
+        try:
+            from app.services.tenant_email_service import send_tenant_email
+        except Exception:
+            return
+        subject = f"Your lab result is ready — {hospital_name}"
+        body = (
+            f"Dear {patient_name},\n\n"
+            f"Your laboratory result for order {order.order_no} ({test_names}) is now ready.\n\n"
+            f"You can view and download your report securely from the patient portal:\n"
+            f"{portal_url}\n\n"
+            f"If you have any questions, please contact {hospital_name}.\n\n"
+            f"Regards,\n{hospital_name}"
+        )
+        try:
+            # Tenant SMTP first (with tenant signature), else platform SMTP.
+            send_tenant_email(
+                self.db,
+                subject=subject,
+                recipients=[patient_email],
+                body_text=body,
+            )
+        except Exception:
+            pass
 
     def cancel_result(
         self,

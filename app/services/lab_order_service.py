@@ -70,6 +70,95 @@ class LabOrderService:
         """
         return self.repository.list_for_visit(visit_id, skip=skip, limit=limit)
 
+    def track_orders(
+        self,
+        *,
+        query: Optional[str] = None,
+        status: Optional[str] = None,
+        skip: int = 0,
+        limit: int = 50,
+    ) -> dict:
+        """Hospital-wide lab order tracker.
+
+        Lets any authorised staff member (doctor, receptionist, nurse, lab
+        scientist, ...) look up laboratory orders across visits by order number,
+        patient name or hospital number, and see live per-test progress plus
+        whether the branded report is ready to download.
+        """
+        from sqlalchemy import or_
+
+        from app.core.enums import LabResultStatus
+        from app.models.all_models import LabResult, Patient, Visit
+
+        q = (
+            self.db.query(LabOrder)
+            .join(Visit, Visit.id == LabOrder.visit_id)
+            .join(Patient, Patient.id == Visit.patient_id)
+            .filter(LabOrder.is_deleted.is_(False))
+        )
+        if query and query.strip():
+            like = f"%{query.strip()}%"
+            q = q.filter(
+                or_(
+                    LabOrder.order_no.ilike(like),
+                    Patient.hospital_number.ilike(like),
+                    Patient.first_name.ilike(like),
+                    Patient.last_name.ilike(like),
+                )
+            )
+        if status and status.strip():
+            try:
+                q = q.filter(LabOrder.status == OrderStatus(status.strip().upper()))
+            except ValueError:
+                raise BadRequestError(message=f"Unknown status '{status}'.")
+
+        total = q.count()
+        orders = (
+            q.order_by(LabOrder.ordered_at.desc()).offset(skip).limit(limit).all()
+        )
+
+        rows: list[dict] = []
+        for order in orders:
+            visit = getattr(order, "visit", None)
+            patient = getattr(visit, "patient", None) if visit else None
+            patient_name = " ".join(
+                x for x in (
+                    getattr(patient, "first_name", None),
+                    getattr(patient, "last_name", None),
+                ) if x
+            ) or "-"
+            items = []
+            report_available = False
+            for it in (order.items or []):
+                res = getattr(it, "result", None)
+                catalog = getattr(it, "lab_test_catalog", None)
+                released = res is not None and getattr(res, "released_at", None) is not None
+                if released:
+                    report_available = True
+                items.append({
+                    "item_id": it.id,
+                    "test": getattr(catalog, "name", None) or f"Test #{it.lab_test_catalog_id}",
+                    "item_status": getattr(it.status, "value", str(it.status)),
+                    "result_status": (
+                        getattr(res.result_status, "value", str(res.result_status))
+                        if res is not None else "PENDING"
+                    ),
+                    "released_at": getattr(res, "released_at", None) if res else None,
+                })
+            rows.append({
+                "order_id": order.id,
+                "order_no": order.order_no,
+                "status": getattr(order.status, "value", str(order.status)),
+                "ordered_at": order.ordered_at,
+                "visit_id": order.visit_id,
+                "patient_id": getattr(patient, "id", None),
+                "patient_name": patient_name,
+                "hospital_number": getattr(patient, "hospital_number", None),
+                "items": items,
+                "report_available": report_available,
+            })
+        return {"total": total, "skip": skip, "limit": limit, "items": rows}
+
     def get(self, order_id: int) -> LabOrder:
         """
         Retrieve a specific lab order header with all line items.

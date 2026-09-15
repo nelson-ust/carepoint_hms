@@ -58,6 +58,11 @@ except Exception:
     send_email = None  # type: ignore[assignment]
 
 try:
+    from app.services.tenant_email_service import send_tenant_email  # type: ignore
+except Exception:
+    send_tenant_email = None  # type: ignore[assignment]
+
+try:
     from app.utils.sms_util import send_sms, send_whatsapp_message  # type: ignore[import-not-found]
 except Exception:
     send_sms = None  # type: ignore[assignment]
@@ -426,16 +431,32 @@ class NotificationService:
                 # for unread rows.
                 notification.status = NotificationStatus.SENT
             elif channel == NotificationChannel.EMAIL:
-                if send_email is None:
-                    raise RuntimeError("Email transport not configured.")
                 if not notification.recipient_address:
                     raise RuntimeError("No email recipient resolved.")
-                send_email(
-                    subject=notification.subject or "(no subject)",
-                    recipients=[notification.recipient_address],
-                    body_text=notification.body,
-                    body_html=body_html,
-                )
+                # Prefer the tenant's own email configuration (their SMTP /
+                # provider + signature); fall back to the platform SMTP from
+                # the environment when the tenant has none configured. The
+                # tenant signature/footer is applied on either transport.
+                if send_tenant_email is not None:
+                    sent = send_tenant_email(
+                        self.db,
+                        subject=notification.subject or "(no subject)",
+                        recipients=[notification.recipient_address],
+                        body_text=notification.body,
+                        body_html=body_html,
+                    )
+                elif send_email is not None:
+                    result = send_email(
+                        subject=notification.subject or "(no subject)",
+                        recipients=[notification.recipient_address],
+                        body_text=notification.body,
+                        body_html=body_html,
+                    )
+                    sent = bool(result.get("success")) if isinstance(result, dict) else bool(result)
+                else:
+                    raise RuntimeError("Email transport not configured.")
+                if not sent:
+                    raise RuntimeError("Email delivery failed (no transport succeeded).")
                 notification.status = NotificationStatus.SENT
             elif channel == NotificationChannel.SMS:
                 if send_sms is None:

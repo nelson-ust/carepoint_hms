@@ -446,6 +446,21 @@ DEMO_NOTIFICATION_TEMPLATES: list[dict[str, str]] = [
         ),
     },
     {
+        "code": "PATIENT_LAB_RESULT_READY",
+        "name": "Patient - Lab Result Ready",
+        "channel": "EMAIL",
+        "subject_template": "Your lab result is ready - {hospital_name}",
+        "body_template": (
+            "Dear {patient_name},\n\n"
+            "Your laboratory result for order {order_no} ({test_names}) is now "
+            "ready.\n\n"
+            "You can view and download your report securely from the patient "
+            "portal:\n{portal_url}\n\n"
+            "If you have any questions, please contact {hospital_name}.\n\n"
+            "Regards,\n{hospital_name}"
+        ),
+    },
+    {
         "code": "RADIOLOGY_REPORT_RELEASED",
         "name": "Radiology Report Released",
         "channel": "IN_APP",

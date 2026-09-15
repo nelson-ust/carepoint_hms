@@ -107,3 +107,45 @@ class LabOrderListResponseSchema(BaseModel):
     items: list[LabOrderReadSchema]
     count: int
     meta: dict
+
+
+# ---------------------------------------------------------------------------
+# Hospital-wide lab result tracker
+# ---------------------------------------------------------------------------
+
+class LabOrderTrackItemSchema(BaseModel):
+    """A single test line within a tracked lab order."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    item_id: int
+    test: str
+    item_status: str
+    result_status: str
+    released_at: Optional[datetime] = None
+
+
+class LabOrderTrackRowSchema(BaseModel):
+    """One lab order as seen from the cross-hospital tracker."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    order_id: int
+    order_no: str
+    status: str
+    ordered_at: Optional[datetime] = None
+    visit_id: Optional[int] = None
+    patient_id: Optional[int] = None
+    patient_name: str
+    hospital_number: Optional[str] = None
+    items: list[LabOrderTrackItemSchema] = Field(default_factory=list)
+    report_available: bool = False
+
+
+class LabOrderTrackResponseSchema(BaseModel):
+    """Paginated tracker response."""
+
+    total: int
+    skip: int
+    limit: int
+    items: list[LabOrderTrackRowSchema] = Field(default_factory=list)
