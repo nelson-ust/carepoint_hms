@@ -9627,3 +9627,5 @@ class WhatsAppMessage(TenantTable):
 # import path (create_all, db_sync, tests).
 # ---------------------------------------------------------------------------
 from app.models import finance_models  # noqa: E402,F401  (intentional tail import)
+from app.models import home_health_models  # noqa: E402,F401  (home-health tables)
+from app.models import telemedicine_models  # noqa: E402,F401  (telemedicine tables)

@@ -102,6 +102,7 @@ ROLE_SEEDS: list[dict[str, Any]] = [
     {"code": "THEATRE_NURSE", "name": "Theatre Nurse", "description": "Surgical support."},
     {"code": "INSURANCE_OFFICER", "name": "Insurance Officer", "description": "Claims management."},
     {"code": "INSURANCE_REVIEWER", "name": "Insurance Reviewer", "description": "Claims adjudication."},
+    {"code": "HOME_HEALTH_COORDINATOR", "name": "Home Health Coordinator", "description": "Coordinates home visits, care plans and remote monitoring."},
     {"code": "PATIENT", "name": "Patient", "description": "Patient portal access."},
 ]
 
@@ -291,6 +292,41 @@ PERMISSION_SEEDS: list[dict[str, Any]] = [
     {"code": "ACCOUNTING_MANAGE", "name": "Manage accounting periods and run auto-posting", "module": "ACCOUNTING"},
 ]
 
+# ---------------------------------------------------------------------------
+# Home Health (home visits, care plans, remote monitoring, clinical alerts)
+# ---------------------------------------------------------------------------
+HOME_HEALTH_PERMISSION_SEEDS: list[dict[str, Any]] = [
+    {"code": "HOME_VISIT_READ", "name": "View home visits", "module": "HOME_HEALTH"},
+    {"code": "HOME_VISIT_CREATE", "name": "Request/schedule home visits", "module": "HOME_HEALTH"},
+    {"code": "HOME_VISIT_UPDATE", "name": "Update home visits", "module": "HOME_HEALTH"},
+    {"code": "HOME_VISIT_ASSIGN", "name": "Assign home-visit caregivers", "module": "HOME_HEALTH"},
+    {"code": "HOME_VISIT_DOCUMENT", "name": "Document home visits", "module": "HOME_HEALTH"},
+    {"code": "HOME_VISIT_CANCEL", "name": "Cancel home visits", "module": "HOME_HEALTH"},
+    {"code": "CARE_PLAN_READ", "name": "View care plans", "module": "HOME_HEALTH"},
+    {"code": "CARE_PLAN_CREATE", "name": "Create care plans", "module": "HOME_HEALTH"},
+    {"code": "CARE_PLAN_UPDATE", "name": "Update care plans", "module": "HOME_HEALTH"},
+    {"code": "CARE_PLAN_MANAGE", "name": "Manage care-plan goals, interventions, tasks and reviews", "module": "HOME_HEALTH"},
+    {"code": "REMOTE_MONITORING_READ", "name": "View remote monitoring data", "module": "HOME_HEALTH"},
+    {"code": "REMOTE_MONITORING_RECORD", "name": "Record remote monitoring readings", "module": "HOME_HEALTH"},
+    {"code": "REMOTE_MONITORING_MANAGE", "name": "Manage monitoring devices and thresholds", "module": "HOME_HEALTH"},
+    {"code": "CLINICAL_ALERT_READ", "name": "View clinical alerts", "module": "HOME_HEALTH"},
+    {"code": "CLINICAL_ALERT_MANAGE", "name": "Acknowledge, resolve and escalate clinical alerts", "module": "HOME_HEALTH"},
+    {"code": "ALERT_RULE_MANAGE", "name": "Manage early-warning rules", "module": "HOME_HEALTH"},
+]
+PERMISSION_SEEDS += HOME_HEALTH_PERMISSION_SEEDS
+
+# ---------------------------------------------------------------------------
+# Telemedicine (virtual consultations: video/audio/chat, SOAP notes)
+# ---------------------------------------------------------------------------
+TELEMEDICINE_PERMISSION_SEEDS: list[dict[str, Any]] = [
+    {"code": "TELEMEDICINE_READ", "name": "View telemedicine sessions", "module": "TELEMEDICINE"},
+    {"code": "TELEMEDICINE_CREATE", "name": "Schedule telemedicine sessions", "module": "TELEMEDICINE"},
+    {"code": "TELEMEDICINE_UPDATE", "name": "Update telemedicine sessions", "module": "TELEMEDICINE"},
+    {"code": "TELEMEDICINE_CONDUCT", "name": "Conduct telemedicine sessions and document notes", "module": "TELEMEDICINE"},
+    {"code": "TELEMEDICINE_CANCEL", "name": "Cancel telemedicine sessions", "module": "TELEMEDICINE"},
+]
+PERMISSION_SEEDS += TELEMEDICINE_PERMISSION_SEEDS
+
 ROLE_PERMISSION_MAP: dict[str, list[str]] = {
     "TENANT_ADMIN": [p["code"] for p in PERMISSION_SEEDS],
     "ADMIN": [
@@ -367,6 +403,40 @@ ROLE_PERMISSION_MAP: dict[str, list[str]] = {
         "PATIENT_READ", "CLAIM_READ", "CLAIM_REVIEW",
     ],
 }
+
+# --- Home Health role grants (TENANT_ADMIN already receives every permission) ---
+_HH_ALL = [p["code"] for p in HOME_HEALTH_PERMISSION_SEEDS]
+ROLE_PERMISSION_MAP["HOME_HEALTH_COORDINATOR"] = _HH_ALL
+ROLE_PERMISSION_MAP.setdefault("DOCTOR", []).extend(_HH_ALL)
+ROLE_PERMISSION_MAP.setdefault("NURSE", []).extend([
+    "HOME_VISIT_READ", "HOME_VISIT_UPDATE", "HOME_VISIT_DOCUMENT",
+    "CARE_PLAN_READ", "CARE_PLAN_MANAGE",
+    "REMOTE_MONITORING_READ", "REMOTE_MONITORING_RECORD",
+    "CLINICAL_ALERT_READ", "CLINICAL_ALERT_MANAGE",
+])
+ROLE_PERMISSION_MAP.setdefault("CLINICIAN", []).extend([
+    "HOME_VISIT_READ", "HOME_VISIT_DOCUMENT",
+    "CARE_PLAN_READ", "REMOTE_MONITORING_READ", "REMOTE_MONITORING_RECORD",
+    "CLINICAL_ALERT_READ",
+])
+ROLE_PERMISSION_MAP.setdefault("RECEPTIONIST", []).extend([
+    "HOME_VISIT_READ", "HOME_VISIT_CREATE", "HOME_VISIT_UPDATE",
+    "HOME_VISIT_ASSIGN", "HOME_VISIT_CANCEL", "CARE_PLAN_READ",
+])
+
+# --- Telemedicine role grants (TENANT_ADMIN already receives every permission) ---
+_TM_ALL = [p["code"] for p in TELEMEDICINE_PERMISSION_SEEDS]
+ROLE_PERMISSION_MAP.setdefault("HOME_HEALTH_COORDINATOR", []).extend(_TM_ALL)
+ROLE_PERMISSION_MAP.setdefault("DOCTOR", []).extend(_TM_ALL)
+ROLE_PERMISSION_MAP.setdefault("NURSE", []).extend([
+    "TELEMEDICINE_READ", "TELEMEDICINE_CONDUCT",
+])
+ROLE_PERMISSION_MAP.setdefault("CLINICIAN", []).extend([
+    "TELEMEDICINE_READ", "TELEMEDICINE_CONDUCT",
+])
+ROLE_PERMISSION_MAP.setdefault("RECEPTIONIST", []).extend([
+    "TELEMEDICINE_READ", "TELEMEDICINE_CREATE", "TELEMEDICINE_UPDATE", "TELEMEDICINE_CANCEL",
+])
 
 DEPARTMENT_SEEDS: list[dict[str, str]] = [
     {"name": "Administration", "code": "ADMIN", "description": "Hospital administration"},

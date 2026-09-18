@@ -85,13 +85,18 @@ class AuthMiddleware(BaseHTTPMiddleware):
                     # Resolve tenant context from JWT if present
                     tenant_id = payload.get("tenant_id")
                     if tenant_id:
-                        from app.core.multitenancy import set_current_tenant
-                        from app.repositories.tenant_repository import TenantRepository
-                        from app.core.database import get_master_db_context
-                        
-                        with get_master_db_context() as db:
-                            repo = TenantRepository(db)
-                            tenant = repo.get_tenant_by_id(tenant_id)
+                        from app.core.multitenancy import (
+                            get_current_tenant,
+                            set_current_tenant,
+                        )
+                        from app.core import tenant_cache
+
+                        # TenantMiddleware (outer) has normally already bound the
+                        # tenant for this request; only resolve here when it has
+                        # not, and use the short-TTL cache so we don't issue a
+                        # master-DB lookup on every authenticated request.
+                        if get_current_tenant() is None:
+                            tenant = tenant_cache.get_tenant_by_id(tenant_id)
                             if tenant:
                                 set_current_tenant(tenant)
 

@@ -2167,3 +2167,283 @@ class RefundStatus(StringEnum):
     PENDING = "PENDING"
     PAID = "PAID"
     CANCELLED = "CANCELLED"
+
+
+# ============================================================
+# HOME HEALTH — Home Visits, Care Plans, Remote Patient
+# Monitoring and Clinical Alerts / Early Warning
+# ------------------------------------------------------------
+# These enums back the home-health "core spine" models declared
+# in app/models/home_health_models.py. They follow the same
+# StringEnum convention as the rest of this module so they map
+# cleanly onto SQLAlchemy Enum(...) columns and Pydantic schemas.
+# ============================================================
+
+
+class HomeVisitStatus(StringEnum):
+    """Lifecycle of a scheduled home (domiciliary) visit."""
+
+    REQUESTED = "REQUESTED"
+    APPROVED = "APPROVED"
+    ASSIGNED = "ASSIGNED"
+    EN_ROUTE = "EN_ROUTE"
+    ARRIVED = "ARRIVED"
+    IN_PROGRESS = "IN_PROGRESS"
+    COMPLETED = "COMPLETED"
+    CANCELLED = "CANCELLED"
+    MISSED = "MISSED"
+
+
+class HomeVisitType(StringEnum):
+    """Clinical nature of a home visit."""
+
+    ROUTINE = "ROUTINE"
+    FOLLOW_UP = "FOLLOW_UP"
+    ASSESSMENT = "ASSESSMENT"
+    RECURRING = "RECURRING"
+    EMERGENCY = "EMERGENCY"
+    WOUND_CARE = "WOUND_CARE"
+    MEDICATION = "MEDICATION"
+    REHABILITATION = "REHABILITATION"
+    PALLIATIVE = "PALLIATIVE"
+
+
+class HomeVisitPriority(StringEnum):
+    """Scheduling priority for a home visit."""
+
+    LOW = "LOW"
+    NORMAL = "NORMAL"
+    HIGH = "HIGH"
+    URGENT = "URGENT"
+
+
+class CarePlanStatus(StringEnum):
+    """State of an individualized patient care plan."""
+
+    DRAFT = "DRAFT"
+    ACTIVE = "ACTIVE"
+    ON_HOLD = "ON_HOLD"
+    COMPLETED = "COMPLETED"
+    CANCELLED = "CANCELLED"
+
+
+class CarePlanGoalType(StringEnum):
+    """Short- vs long-term horizon of a care-plan goal."""
+
+    SHORT_TERM = "SHORT_TERM"
+    LONG_TERM = "LONG_TERM"
+
+
+class CarePlanGoalStatus(StringEnum):
+    """Progress state of a care-plan goal."""
+
+    PENDING = "PENDING"
+    IN_PROGRESS = "IN_PROGRESS"
+    ACHIEVED = "ACHIEVED"
+    NOT_ACHIEVED = "NOT_ACHIEVED"
+    ABANDONED = "ABANDONED"
+
+
+class CarePlanInterventionStatus(StringEnum):
+    """State of a planned care intervention."""
+
+    PLANNED = "PLANNED"
+    ACTIVE = "ACTIVE"
+    COMPLETED = "COMPLETED"
+    DISCONTINUED = "DISCONTINUED"
+
+
+class CareTaskStatus(StringEnum):
+    """State of an individual care task / checklist item."""
+
+    PENDING = "PENDING"
+    IN_PROGRESS = "IN_PROGRESS"
+    COMPLETED = "COMPLETED"
+    MISSED = "MISSED"
+    CANCELLED = "CANCELLED"
+
+
+class CareFrequency(StringEnum):
+    """How often an intervention or task recurs."""
+
+    ONCE = "ONCE"
+    DAILY = "DAILY"
+    TWICE_DAILY = "TWICE_DAILY"
+    WEEKLY = "WEEKLY"
+    BIWEEKLY = "BIWEEKLY"
+    MONTHLY = "MONTHLY"
+    AS_NEEDED = "AS_NEEDED"
+    CUSTOM = "CUSTOM"
+
+
+class CarePlanReviewOutcome(StringEnum):
+    """Decision recorded at a care-plan review."""
+
+    CONTINUE = "CONTINUE"
+    MODIFY = "MODIFY"
+    ESCALATE = "ESCALATE"
+    DISCHARGE = "DISCHARGE"
+
+
+class MonitoringReadingType(StringEnum):
+    """Measurement captured by remote patient monitoring."""
+
+    BLOOD_PRESSURE = "BLOOD_PRESSURE"
+    PULSE = "PULSE"
+    TEMPERATURE = "TEMPERATURE"
+    BLOOD_GLUCOSE = "BLOOD_GLUCOSE"
+    OXYGEN_SATURATION = "OXYGEN_SATURATION"
+    RESPIRATORY_RATE = "RESPIRATORY_RATE"
+    WEIGHT = "WEIGHT"
+    ECG = "ECG"
+    PAIN_SCORE = "PAIN_SCORE"
+    SLEEP = "SLEEP"
+    ACTIVITY = "ACTIVITY"
+    OTHER = "OTHER"
+
+
+class MonitoringSource(StringEnum):
+    """Origin of a remote monitoring reading."""
+
+    MANUAL = "MANUAL"
+    PATIENT_APP = "PATIENT_APP"
+    CAREGIVER = "CAREGIVER"
+    DEVICE_BLUETOOTH = "DEVICE_BLUETOOTH"
+    WEARABLE = "WEARABLE"
+    IMPORT = "IMPORT"
+
+
+class MonitoringDeviceType(StringEnum):
+    """Class of connected/monitoring device."""
+
+    BP_MONITOR = "BP_MONITOR"
+    GLUCOSE_METER = "GLUCOSE_METER"
+    PULSE_OXIMETER = "PULSE_OXIMETER"
+    THERMOMETER = "THERMOMETER"
+    ECG_DEVICE = "ECG_DEVICE"
+    WEIGHING_SCALE = "WEIGHING_SCALE"
+    WEARABLE = "WEARABLE"
+    OTHER = "OTHER"
+
+
+class AlertSeverity(StringEnum):
+    """Escalating clinical-alert severity tiers (Information -> Emergency)."""
+
+    INFORMATION = "INFORMATION"
+    WARNING = "WARNING"
+    URGENT = "URGENT"
+    EMERGENCY = "EMERGENCY"
+
+
+class AlertStatus(StringEnum):
+    """Workflow state of a clinical alert."""
+
+    OPEN = "OPEN"
+    ACKNOWLEDGED = "ACKNOWLEDGED"
+    IN_REVIEW = "IN_REVIEW"
+    ESCALATED = "ESCALATED"
+    RESOLVED = "RESOLVED"
+    DISMISSED = "DISMISSED"
+
+
+class AlertType(StringEnum):
+    """Category of condition that raised a clinical alert."""
+
+    ABNORMAL_VITALS = "ABNORMAL_VITALS"
+    LOW_OXYGEN = "LOW_OXYGEN"
+    HIGH_GLUCOSE = "HIGH_GLUCOSE"
+    LOW_GLUCOSE = "LOW_GLUCOSE"
+    HIGH_BLOOD_PRESSURE = "HIGH_BLOOD_PRESSURE"
+    LOW_BLOOD_PRESSURE = "LOW_BLOOD_PRESSURE"
+    WEIGHT_CHANGE = "WEIGHT_CHANGE"
+    MISSED_MEDICATION = "MISSED_MEDICATION"
+    MISSED_VISIT = "MISSED_VISIT"
+    MISSED_MONITORING = "MISSED_MONITORING"
+    MISSED_TASK = "MISSED_TASK"
+    PATIENT_DETERIORATION = "PATIENT_DETERIORATION"
+    CARE_PLAN_DEVIATION = "CARE_PLAN_DEVIATION"
+    FALL = "FALL"
+    WOUND_DETERIORATION = "WOUND_DETERIORATION"
+    DEVICE = "DEVICE"
+    SOS = "SOS"
+    OTHER = "OTHER"
+
+
+class AlertComparator(StringEnum):
+    """Comparator used by a configurable early-warning rule."""
+
+    GREATER_THAN = "GT"
+    GREATER_OR_EQUAL = "GTE"
+    LESS_THAN = "LT"
+    LESS_OR_EQUAL = "LTE"
+    EQUAL = "EQ"
+    OUTSIDE_RANGE = "OUTSIDE_RANGE"
+
+
+# ============================================================
+# HOME HEALTH — Home lab orders & home medication delivery
+# ============================================================
+
+
+class HomeLabOrderStatus(StringEnum):
+    """Lifecycle of a home (domiciliary) laboratory order."""
+
+    REQUESTED = "REQUESTED"
+    SCHEDULED = "SCHEDULED"
+    SAMPLE_COLLECTED = "SAMPLE_COLLECTED"
+    IN_TRANSIT = "IN_TRANSIT"
+    RECEIVED = "RECEIVED"
+    RESULTED = "RESULTED"
+    CANCELLED = "CANCELLED"
+
+
+class HomeMedicationStatus(StringEnum):
+    """Lifecycle of home medication supply from prescription to the bedside."""
+
+    PRESCRIBED = "PRESCRIBED"
+    DISPENSED = "DISPENSED"
+    OUT_FOR_DELIVERY = "OUT_FOR_DELIVERY"
+    DELIVERED = "DELIVERED"
+    ADMINISTERED = "ADMINISTERED"
+    CANCELLED = "CANCELLED"
+    RETURNED = "RETURNED"
+
+
+# ============================================================
+# TELEMEDICINE
+# ============================================================
+
+
+class TelemedicineStatus(StringEnum):
+    """Lifecycle of a telemedicine session."""
+
+    SCHEDULED = "SCHEDULED"
+    WAITING = "WAITING"
+    IN_PROGRESS = "IN_PROGRESS"
+    COMPLETED = "COMPLETED"
+    CANCELLED = "CANCELLED"
+    NO_SHOW = "NO_SHOW"
+
+
+class TelemedicineModality(StringEnum):
+    """How the consultation is conducted."""
+
+    VIDEO = "VIDEO"
+    AUDIO = "AUDIO"
+    CHAT = "CHAT"
+
+
+class TelemedicineProvider(StringEnum):
+    """Video backend that hosts the session room."""
+
+    JITSI = "JITSI"
+    TWILIO = "TWILIO"
+    EXTERNAL = "EXTERNAL"
+
+
+class TelemedicineSenderRole(StringEnum):
+    """Who sent a secure message in a session."""
+
+    CLINICIAN = "CLINICIAN"
+    PATIENT = "PATIENT"
+    SYSTEM = "SYSTEM"

@@ -151,6 +151,16 @@ from app.api.v1.endpoints.whatsapp_routes import router as whatsapp_router
 from app.api.v1.endpoints.clinician_routes import router as clinician_router
 from app.api.v1.endpoints.triage_routes import router as triage_router
 from app.api.v1.endpoints.vital_sign_routes import router as vital_sign_router
+
+# Home Health - core spine (home visits, care plans, remote monitoring, alerts)
+from app.api.v1.endpoints.home_visit_routes import router as home_visit_router
+from app.api.v1.endpoints.care_plan_routes import router as care_plan_router
+from app.api.v1.endpoints.remote_monitoring_routes import router as remote_monitoring_router
+from app.api.v1.endpoints.clinical_alert_routes import router as clinical_alert_router
+from app.api.v1.endpoints.home_orders_routes import lab_router as home_lab_router, med_router as home_medication_router
+from app.api.v1.endpoints.patient_portal_home_health_routes import router as portal_home_health_router
+from app.api.v1.endpoints.telemedicine_routes import router as telemedicine_router
+from app.api.v1.endpoints.patient_portal_telemedicine_routes import router as portal_telemedicine_router
 from app.api.v1.endpoints.consultation_routes import router as consultation_router
 from app.api.v1.endpoints.diagnosis_routes import router as diagnosis_router
 from app.api.v1.endpoints.referral_routes import router as referral_router
@@ -427,3 +437,16 @@ api_router.include_router(medical_history_router)
 api_router.include_router(baseline_profile_router)
 api_router.include_router(patient_clinical_router)
 api_router.include_router(medical_exam_router)
+
+# ---- Home Health ----
+api_router.include_router(home_visit_router)
+api_router.include_router(care_plan_router)
+api_router.include_router(remote_monitoring_router)
+api_router.include_router(clinical_alert_router)
+api_router.include_router(home_lab_router)
+api_router.include_router(home_medication_router)
+api_router.include_router(portal_home_health_router)
+
+# ---- Telemedicine ----
+api_router.include_router(telemedicine_router)
+api_router.include_router(portal_telemedicine_router)

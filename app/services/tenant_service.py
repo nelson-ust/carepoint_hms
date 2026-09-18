@@ -843,6 +843,11 @@ class TenantService:
 
         # 5. Update Status in Master DB
         tenant.status = UserStatus.ACTIVE
+        try:
+            from app.core import tenant_cache
+            tenant_cache.invalidate(tenant)
+        except Exception:
+            pass
         tenant.is_provisioned = True
         self._record_step(tenant, "Activate Tenant", "Tenant marked ACTIVE and provisioned")
 

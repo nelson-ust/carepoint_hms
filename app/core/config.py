@@ -181,6 +181,9 @@ class Settings(BaseSettings):
     DB_POOL_TIMEOUT: int = 30
     DB_POOL_RECYCLE: int = 1800
     DB_POOL_PRE_PING: bool = True
+    #: Seconds to cache tenant resolution in middleware (0 disables). Tenant
+    #: records change rarely; this removes a master-DB lookup per request.
+    TENANT_CACHE_TTL_SECONDS: int = 60
     DB_ISOLATION_LEVEL: str = "READ COMMITTED"
     AUTO_SYNC_TENANT_SCHEMAS: bool = True
 
