@@ -11,15 +11,77 @@ from app.schemas.tenant_schemas import (
     TenantReadSchema, 
     TenantListResponseSchema, 
     TenantUpdateStatusSchema,
-    TenantChangePlanSchema
+    TenantChangePlanSchema,
+    ExtendSubscriptionSchema,
+    GrantFreeSubscriptionSchema,
 )
 from app.services.tenant_service import TenantService
+from app.models.all_models import Tenant
+from app.core.exceptions import NotFoundError
 from typing import Optional
 
 router = APIRouter(prefix="/tenants", tags=["SaaS - Tenants"])
 
 def get_tenant_service(db: Annotated[Session, Depends(get_master_db)]) -> TenantService:
     return TenantService(db)
+
+
+@router.post(
+    "/{tenant_id}/grant-renewal-access",
+    summary="Allow an expired tenant's admin to sign in and renew (SaaS admin)",
+)
+def grant_renewal_access(
+    tenant_id: int,
+    _: CurrentSaaSAdmin,
+    db: Annotated[Session, Depends(get_master_db)],
+    days: int = 7,
+):
+    """Open a temporary renewal-login window for a tenant whose subscription has
+    expired. During the window the tenant admin can sign in and reach only the
+    billing/renewal pages to pay and reactivate; the rest of the app stays
+    locked until the subscription is active again."""
+    from datetime import datetime, timedelta, timezone
+
+    tenant = db.query(Tenant).filter(Tenant.id == tenant_id).first()
+    if not tenant:
+        raise NotFoundError(message="Tenant not found.", detail={"tenant_id": tenant_id})
+    days = max(1, min(int(days or 7), 90))
+    tenant.renewal_access_until = datetime.now(timezone.utc) + timedelta(days=days)
+    db.commit()
+    try:
+        from app.core import tenant_cache
+        tenant_cache.invalidate(tenant)
+    except Exception:
+        pass
+    return {
+        "success": True,
+        "tenant_id": tenant.id,
+        "renewal_access_until": tenant.renewal_access_until,
+        "message": f"Renewal login enabled for {tenant.name} for {days} day(s).",
+    }
+
+
+@router.post(
+    "/{tenant_id}/revoke-renewal-access",
+    summary="Revoke a tenant's renewal-login access (SaaS admin)",
+)
+def revoke_renewal_access(
+    tenant_id: int,
+    _: CurrentSaaSAdmin,
+    db: Annotated[Session, Depends(get_master_db)],
+):
+    tenant = db.query(Tenant).filter(Tenant.id == tenant_id).first()
+    if not tenant:
+        raise NotFoundError(message="Tenant not found.", detail={"tenant_id": tenant_id})
+    tenant.renewal_access_until = None
+    db.commit()
+    try:
+        from app.core import tenant_cache
+        tenant_cache.invalidate(tenant)
+    except Exception:
+        pass
+    return {"success": True, "tenant_id": tenant.id, "renewal_access_until": None,
+            "message": "Renewal login revoked."}
 
 @router.post(
     "/register",
@@ -62,6 +124,7 @@ def register_tenant(
         ),
         "tenant_id": tenant.id,
         "tenant_code": tenant.code,
+        "deployment_model": tenant.deployment_model,
         "status": "PENDING",
     }
 
@@ -300,3 +363,70 @@ def change_tenant_plan(
         "plan_id": subscription.plan_id,
         "status": subscription.status,
     }
+
+
+@router.post(
+    "/{tenant_id}/extend-subscription",
+    response_model=dict,
+    summary="Extend a tenant's subscription or trial by a free duration (SaaS admin)",
+)
+def extend_tenant_subscription(
+    tenant_id: int,
+    payload: ExtendSubscriptionSchema,
+    actor: CurrentSaaSAdmin,
+    service: Annotated[TenantService, Depends(get_tenant_service)],
+):
+    """Push a tenant's current subscription (or free trial) further into the
+    future without charging them \u2013 a goodwill extension."""
+    sub = service.extend_subscription(
+        tenant_id, days=payload.days, months=payload.months,
+        reason=payload.reason, actor=actor,
+    )
+    return {
+        "success": True,
+        "message": "Subscription extended.",
+        "subscription_id": sub.id,
+        "status": sub.status,
+        "trial_end_date": sub.trial_end_date,
+        "current_period_end": sub.current_period_end,
+    }
+
+
+@router.post(
+    "/{tenant_id}/grant-free-subscription",
+    response_model=dict,
+    summary="Grant a tenant a complimentary (free) subscription window (SaaS admin)",
+)
+def grant_free_subscription(
+    tenant_id: int,
+    payload: GrantFreeSubscriptionSchema,
+    actor: CurrentSaaSAdmin,
+    service: Annotated[TenantService, Depends(get_tenant_service)],
+):
+    """Give a tenant active, unbilled access for a set number of days / months
+    (an incentive). The first invoice is deferred until the free window ends."""
+    sub = service.grant_complimentary_subscription(
+        tenant_id, days=payload.days, months=payload.months,
+        reason=payload.reason, plan_code=payload.plan_code, actor=actor,
+    )
+    return {
+        "success": True,
+        "message": "Complimentary subscription granted.",
+        "subscription_id": sub.id,
+        "status": sub.status,
+        "is_complimentary": sub.is_complimentary,
+        "current_period_end": sub.current_period_end,
+    }
+
+
+@router.get(
+    "/{tenant_id}/incentives",
+    response_model=dict,
+    summary="List incentives granted to a tenant (SaaS admin)",
+)
+def list_tenant_incentives(
+    tenant_id: int,
+    _: CurrentSaaSAdmin,
+    service: Annotated[TenantService, Depends(get_tenant_service)],
+):
+    return {"success": True, "items": service.list_incentives(tenant_id)}

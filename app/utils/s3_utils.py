@@ -107,15 +107,9 @@ def get_s3_client():
     """
     _require_s3_config()
 
-    return boto3.client(
-        "s3",
-        aws_access_key_id=_resolve_secret(settings.AWS_ACCESS_KEY_ID),
-        aws_secret_access_key=_resolve_secret(settings.AWS_SECRET_ACCESS_KEY),
-        region_name=settings.AWS_DEFAULT_REGION or "us-east-1",
-        endpoint_url=getattr(settings, "AWS_ENDPOINT_URL", None),  # MinIO / local S3
-        # SigV4 — legacy SigV2 presigned URLs are rejected by newer buckets.
-        config=Config(signature_version="s3v4"),
-    )
+    # Connectivity-aware: AWS S3 when online, on-site MinIO when offline.
+    from app.utils.object_storage import make_client
+    return make_client()
 
 
 def get_bucket_name() -> str:
@@ -152,7 +146,7 @@ def get_bucket_name() -> str:
         with get_master_db_context() as master_db:
             from app.models.all_models import Tenant
             row = master_db.query(Tenant).filter(Tenant.id == tenant.id).first()
-            bucket = S3Service().ensure_tenant_bucket(master_db, row) if row else None
+            bucket = S3Service.for_tenant(row).ensure_tenant_bucket(master_db, row) if row else None
             if bucket:
                 return bucket
     except Exception as exc:  # pragma: no cover - defensive
@@ -256,8 +250,8 @@ def get_s3_object_url(object_name: str, bucket_name: Optional[str] = None) -> st
         This is not the same as a presigned URL.
     """
     bucket = bucket_name or get_bucket_name()
-    region = settings.AWS_DEFAULT_REGION
-    return f"https://{bucket}.s3.{region}.amazonaws.com/{object_name}"
+    from app.utils.object_storage import object_base_url
+    return object_base_url(bucket, object_name)
 
 
 def upload_file_to_s3(
@@ -297,6 +291,11 @@ def upload_file_to_s3(
 
     try:
         client.upload_fileobj(file_obj, bucket_name, object_name, ExtraArgs=extra_args)
+        from app.utils import object_storage
+        if object_storage.active_backend() == "minio":
+            # Written to the on-site store while offline — remember to push it
+            # up to the cloud once connectivity returns.
+            object_storage.record_pending(bucket_name, object_name)
         return get_s3_object_url(object_name, bucket_name=bucket_name)
     except ClientError as exc:
         logger.error("Failed to upload file to S3: %s", exc)

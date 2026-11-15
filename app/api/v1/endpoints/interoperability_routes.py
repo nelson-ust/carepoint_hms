@@ -13,7 +13,7 @@ from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.core.dependencies import CurrentActiveUser, require_plan_feature
+from app.core.dependencies import CurrentActiveUser, require_online, require_plan_feature
 from app.core.exceptions import BadRequestError
 from app.core.multitenancy import get_current_tenant_id
 from app.dependencies.role import require_permission
@@ -55,7 +55,7 @@ def list_partners(
     return {"success": True, "items": service.list_partner_tenants(exclude_tenant_id=tenant_id)}
 
 
-@router.get("/patient-lookup", summary="Confirm a patient exists at a partner hospital")
+@router.get("/patient-lookup", summary="Confirm a patient exists at a partner hospital", dependencies=[Depends(require_online("interoperability.data_exchange"))])
 def patient_lookup(
     actor: CurrentActiveUser,
     service: Annotated[InteroperabilityService, Depends(get_service)],
@@ -69,7 +69,7 @@ def patient_lookup(
 
 # ---------- Data-exchange requests ----------
 
-@router.post("/data-requests", status_code=status.HTTP_201_CREATED, summary="Request a patient's records from another hospital")
+@router.post("/data-requests", status_code=status.HTTP_201_CREATED, summary="Request a patient's records from another hospital", dependencies=[Depends(require_online("interoperability.data_exchange"))])
 def create_data_request(
     payload: DataRequestCreateSchema,
     actor: CurrentActiveUser,
@@ -113,7 +113,7 @@ def list_incoming(
     return {"success": True, "items": service.list_incoming(holding_tenant_id=tenant_id, status=status_filter)}
 
 
-@router.post("/data-requests/{request_id}/approve", summary="Approve a data request (confirms consent + shares the record)")
+@router.post("/data-requests/{request_id}/approve", summary="Approve a data request (confirms consent + shares the record)", dependencies=[Depends(require_online("interoperability.data_exchange"))])
 def approve_data_request(
     request_id: int,
     payload: DataRequestApproveSchema,
@@ -158,7 +158,7 @@ def cancel_data_request(
     return {"success": True, "message": "Request cancelled.", "request": req}
 
 
-@router.get("/data-requests/{request_id}/record", summary="Retrieve the shared patient record")
+@router.get("/data-requests/{request_id}/record", summary="Retrieve the shared patient record", dependencies=[Depends(require_online("interoperability.data_exchange"))])
 def retrieve_record(
     request_id: int,
     actor: CurrentActiveUser,

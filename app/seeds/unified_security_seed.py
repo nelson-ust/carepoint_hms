@@ -132,6 +132,26 @@ ALL_PERMISSIONS: list[dict] = [
     {"code": "DISPATCH_READ", "name": "Read ambulance dispatches", "module": "AMBULANCE"},
     {"code": "DISPATCH_MANAGE", "name": "Manage ambulance dispatches", "module": "AMBULANCE"},
 
+    # Mortuary / Morgue
+    {"code": "MORTUARY_READ", "name": "Read mortuary records", "module": "MORTUARY"},
+    {"code": "MORTUARY_MANAGE", "name": "Manage mortuary records & storage", "module": "MORTUARY"},
+
+    # Dental clinic
+    {"code": "DENTAL_READ", "name": "Read dental charts & procedures", "module": "DENTAL"},
+    {"code": "DENTAL_MANAGE", "name": "Manage dental charts & procedures", "module": "DENTAL"},
+
+    # Eye / Ophthalmology clinic
+    {"code": "EYE_READ", "name": "Read eye exams & prescriptions", "module": "EYE"},
+    {"code": "EYE_MANAGE", "name": "Manage eye exams & prescriptions", "module": "EYE"},
+
+    # Orthopaedics clinic
+    {"code": "ORTHO_READ", "name": "Read orthopaedic assessments & procedures", "module": "ORTHO"},
+    {"code": "ORTHO_MANAGE", "name": "Manage orthopaedic assessments & procedures", "module": "ORTHO"},
+
+    # Data Protection / NDPA
+    {"code": "DATA_PROTECTION_READ", "name": "Read data-protection records", "module": "DATA_PROTECTION"},
+    {"code": "DATA_PROTECTION_MANAGE", "name": "Manage consent, DSRs, breaches & RoPA", "module": "DATA_PROTECTION"},
+
     # Notifications & Messaging
     {"code": "NOTIFICATION_READ", "name": "Read notifications", "module": "NOTIFICATION"},
     {"code": "NOTIFICATION_MANAGE", "name": "Manage notification templates", "module": "NOTIFICATION"},

@@ -128,6 +128,10 @@ class ServicePointWorklistResponseSchema(BaseModel):
     message: str = "Worklist fetched successfully."
     service_delivery_point_id: int
     service_delivery_point_name: Optional[str] = None
+    service_delivery_point_code: Optional[str] = None
+    service_point_type: Optional[str] = Field(
+        None, description="ServicePointType of this desk (TRIAGE, CLINIC, PHARMACY, …) so the UI can open the right workstation."
+    )
     waiting: list[QueueTicketReadSchema] = Field(default_factory=list)
     serving: list[QueueTicketReadSchema] = Field(default_factory=list)
     served_today: int = 0

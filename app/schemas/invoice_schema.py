@@ -52,6 +52,11 @@ class InvoiceReadSchema(BaseModel):
     amount_paid: Decimal
     balance_due: Decimal
     note: Optional[str] = None
+    # Display context for registry grids (resolved from relationships).
+    patient_name: Optional[str] = None
+    hospital_number: Optional[str] = None
+    visit_code: Optional[str] = None
+    payer_name: Optional[str] = None
     items: list[InvoiceItemReadSchema] = Field(default_factory=list)
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None

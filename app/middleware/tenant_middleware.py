@@ -144,6 +144,39 @@ def _is_ignored_path(path: str) -> bool:
     return any(path == p or path.startswith(p + "/") or path.startswith(p) for p in IGNORE_PREFIXES)
 
 
+# Tenant-scoped paths a tenant admin may reach during a SaaS-granted "renewal
+# login" window, so an expired tenant can sign in and pay to renew — but
+# nothing else of the app.
+RENEWAL_SAFE_PREFIXES: tuple[str, ...] = (
+    "/api/v1/auth",
+    "/api/v1/subscription-billing",
+    "/api/v1/subscription-plans",
+    "/api/v1/saas",
+    "/api/v1/payments",
+    "/api/v1/users/me",
+    "/api/v1/permissions/me",
+    "/api/v1/tenant-modules",
+    "/api/v1/system",
+    "/api/v1/notifications",
+    "/api/v1/me",
+)
+
+
+def _renewal_access_allows(tenant, path: str) -> bool:
+    """True when the tenant has an active renewal-login grant and ``path`` is a
+    billing/renewal path that must work for the admin to pay and reactivate."""
+    from datetime import datetime, timezone
+
+    until = getattr(tenant, "renewal_access_until", None)
+    if not until:
+        return False
+    if getattr(until, "tzinfo", None) is None:
+        until = until.replace(tzinfo=timezone.utc)
+    if until <= datetime.now(timezone.utc):
+        return False
+    return any(path == p or path.startswith(p + "/") or path.startswith(p) for p in RENEWAL_SAFE_PREFIXES)
+
+
 def _extract_tenant_id_from_jwt(request: Request) -> Optional[int]:
     """
     Best-effort extraction of ``tenant_id`` from a bearer token.
@@ -231,6 +264,11 @@ class TenantMiddleware(BaseHTTPMiddleware):
                          tenant.db_connection_string)
                     _DEDICATED_TENANT_CACHE = tenant
             set_current_tenant(_DEDICATED_TENANT_CACHE)
+            try:
+                from app.core import tenant_mode
+                tenant_mode.set_current_mode(tenant_mode.resolve_for_tenant(_DEDICATED_TENANT_CACHE))
+            except Exception:
+                pass
         except Exception as exc:  # pragma: no cover — never block requests
             logger.error("Dedicated tenant binding failed: %s", exc)
 
@@ -340,18 +378,26 @@ class TenantMiddleware(BaseHTTPMiddleware):
                     s.status == SubscriptionStatus.TRIALING and s.is_active
                     for s in (tenant.subscriptions or [])
                 )
-                if not trialing:
+                if not trialing and not _renewal_access_allows(tenant, path):
                     return JSONResponse(
                         status_code=403,
                         content={
                             "success": False,
-                            "detail": "Tenant subscription is inactive, suspended, or missing.",
+                            "error_code": "SUBSCRIPTION_INACTIVE",
+                            "detail": "Tenant subscription is inactive, suspended, or missing. "
+                                      "Ask the platform to enable renewal access, then sign in to renew.",
                             "tenant_code": tenant.code,
+                            "renewal_access": _renewal_access_allows(tenant, "/api/v1/subscription-billing"),
                         },
                     )
 
             # 5. Bind tenant to the request context.
             set_current_tenant(tenant)
+            try:
+                from app.core import tenant_mode
+                tenant_mode.set_current_mode(tenant_mode.resolve_for_tenant(tenant))
+            except Exception:
+                pass
 
         except OperationalError as exc:
             err_msg = str(exc.orig) if hasattr(exc, "orig") and exc.orig else str(exc)

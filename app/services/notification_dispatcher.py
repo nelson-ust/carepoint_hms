@@ -54,6 +54,15 @@ QUIET_HOUR_CHANNELS = {"sms", "whatsapp", "push"}
 # Provider helpers (lazy-imported so the module stays import-safe).
 # ---------------------------------------------------------------------------
 
+def _connectivity_online() -> bool:
+    """Best-effort online check; assume online if the probe itself errors."""
+    try:
+        from app.services import connectivity_service
+        return connectivity_service.is_online()
+    except Exception:
+        return True
+
+
 def _send_email_safe(
     db,
     *,
@@ -68,6 +77,9 @@ def _send_email_safe(
     falling back to the platform-wide ``send_email`` helper only when
     no tenant config is set up.
     """
+    if not _connectivity_online():
+        logger.debug("Offline: queuing email; will send when connectivity returns.")
+        return False
     try:
         from app.services.tenant_email_service import send_tenant_email
     except Exception:
@@ -125,6 +137,9 @@ def _wrap_notification_html(subject: str, body: str) -> Optional[str]:
 
 
 def _send_sms_safe(to: str, body: str) -> bool:
+    if not _connectivity_online():
+        logger.debug("Offline: queuing SMS; will send when connectivity returns.")
+        return False
     try:
         from app.utils.sms_util import send_sms  # type: ignore
     except Exception:
@@ -139,6 +154,9 @@ def _send_sms_safe(to: str, body: str) -> bool:
 
 
 def _send_whatsapp_safe(to: str, body: str) -> bool:
+    if not _connectivity_online():
+        logger.debug("Offline: queuing WhatsApp; will send when connectivity returns.")
+        return False
     try:
         from app.utils.sms_util import send_whatsapp_message  # type: ignore
     except Exception:
@@ -153,6 +171,9 @@ def _send_whatsapp_safe(to: str, body: str) -> bool:
 
 
 def _send_push_safe(device_token: str, title: Optional[str], body: str, data: Optional[dict]) -> bool:
+    if not _connectivity_online():
+        logger.debug("Offline: skipping push; will retry when connectivity returns.")
+        return False
     try:
         from app.utils.push_util import send_push  # type: ignore
     except Exception:

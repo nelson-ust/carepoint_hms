@@ -970,6 +970,13 @@ def seed_plans(db: Session) -> None:
         "has_radiology",
         "has_surgical",
         "has_hr",
+        "has_dietary",
+        "has_ambulance",
+        "has_mortuary",
+        "has_compliance",
+        "has_dental",
+        "has_eye",
+        "has_ortho",
     )
 
     for item in PLAN_SEEDS:
@@ -990,6 +997,12 @@ def seed_plans(db: Session) -> None:
         }
         for flag in bool_features:
             kwargs[flag] = item.get(flag, False)
+
+        # The Trial plan is a full-feature trial: every module is enabled so a
+        # trialing tenant can evaluate the whole platform.
+        if item["code"] == "TRIAL":
+            for flag in bool_features:
+                kwargs[flag] = True
 
         if existing:
             for k, v in kwargs.items():

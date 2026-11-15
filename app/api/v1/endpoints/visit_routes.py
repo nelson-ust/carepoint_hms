@@ -180,6 +180,32 @@ def reroute_visit(
 
 
 @router.post(
+    "/{visit_id}/return-to-consultation",
+    response_model=VisitRerouteResultSchema,
+    status_code=status.HTTP_200_OK,
+    summary="Return patient to the consulting room (post-diagnostics review)",
+)
+def return_to_consultation(
+    visit_id: int,
+    current_user: Annotated[User, Depends(require_permission("VISIT_ROUTE"))],
+    service: Annotated[VisitService, Depends(get_visit_service)],
+):
+    """
+    After lab/radiology results are released, send the patient back to the
+    consulting room so the doctor can review the results and prescribe, before
+    they continue to Pharmacy and the Cashier/HMO.
+    """
+    result = service.return_to_consultation(visit_id, routed_by_id=current_user.id)
+    return {
+        "success": True,
+        "message": result["message"],
+        "visit": result["visit"],
+        "new_flow_step": result["new_flow_step"],
+        "new_queue_ticket": result.get("new_queue_ticket"),
+    }
+
+
+@router.post(
     "/{visit_id}/advance",
     response_model=VisitAdvanceResultSchema,
     status_code=status.HTTP_200_OK,

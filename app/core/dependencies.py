@@ -309,3 +309,24 @@ __all__ = [
     "HRStaffUserWithTwoFactor",
     "SuperuserWithTwoFactor",
 ]
+
+# ============================================================
+# CONNECTIVITY (OFFLINE-RESILIENCE) DEPENDENCIES
+# ============================================================
+
+def require_online(operation: str):
+    """Return a FastAPI dependency that blocks a route when this on-site node
+    is offline.
+
+    Use on cross-hospital operations only (inter-facility referrals,
+    interoperability data exchange, A&E online steps). The local clinic flow
+    stays unguarded so it keeps working without internet. ``operation`` is one
+    of ``connectivity_service.GATED_OPERATIONS``.
+    """
+
+    def _require_online_dep() -> None:
+        from app.services import connectivity_service
+        connectivity_service.require_online(operation)
+
+    _require_online_dep.__name__ = "require_online_" + operation.replace(".", "_")
+    return _require_online_dep

@@ -14,7 +14,7 @@ from pydantic import BaseModel
 from typing import Optional
 from app.core.database import get_db
 from app.core.multitenancy import get_current_tenant_id
-from app.core.dependencies import CurrentActiveUser, require_plan_feature
+from app.core.dependencies import CurrentActiveUser, require_online, require_plan_feature
 from app.dependencies.role import require_permission
 from app.models.all_models import User
 from app.schemas.referral_schemas import (
@@ -227,6 +227,7 @@ def cancel_referral(
     response_model=InterFacilityReferralActionResponseSchema,
     status_code=status.HTTP_201_CREATED,
     summary="Create an inter-facility referral",
+    dependencies=[Depends(require_online("referral.inter_facility.create"))],
 )
 def create_inter_facility_referral(
     payload: InterFacilityReferralCreateSchema,
@@ -263,6 +264,7 @@ def create_inter_facility_referral(
 @router.get(
     "/inter-facility/{referral_id}/record",
     summary="Receiving hospital: open the referred patient's record (post-acceptance)",
+    dependencies=[Depends(require_online("referral.inter_facility.read"))],
 )
 def get_inter_facility_referral_record(
     referral_id: int,
@@ -293,6 +295,7 @@ class ReferralImportRequestSchema(BaseModel):
 @router.get(
     "/inter-facility/{referral_id}/import-preview",
     summary="Receiving hospital: preview one-click patient import from an accepted referral",
+    dependencies=[Depends(require_online("referral.inter_facility.import"))],
 )
 def preview_referral_import(
     referral_id: int,
@@ -317,6 +320,7 @@ def preview_referral_import(
 @router.post(
     "/inter-facility/{referral_id}/create-patient",
     summary="Receiving hospital: one-click create local patient from an accepted referral",
+    dependencies=[Depends(require_online("referral.inter_facility.import"))],
 )
 def create_patient_from_referral(
     referral_id: int,
@@ -346,6 +350,7 @@ def create_patient_from_referral(
     "/inter-facility/incoming",
     response_model=InterFacilityReferralListResponseSchema,
     summary="List incoming inter-facility referrals",
+    dependencies=[Depends(require_online("referral.inter_facility.read"))],
 )
 def list_incoming_referrals(
     actor: CurrentActiveUser,
@@ -380,6 +385,7 @@ def list_incoming_referrals(
     "/inter-facility/outgoing",
     response_model=InterFacilityReferralListResponseSchema,
     summary="List outgoing inter-facility referrals",
+    dependencies=[Depends(require_online("referral.inter_facility.read"))],
 )
 def list_outgoing_referrals(
     actor: CurrentActiveUser,
@@ -414,6 +420,7 @@ def list_outgoing_referrals(
     "/inter-facility/{referral_id}/respond",
     response_model=InterFacilityReferralActionResponseSchema,
     summary="Respond to inter-facility referral",
+    dependencies=[Depends(require_online("referral.inter_facility.respond"))],
 )
 def respond_to_inter_facility_referral(
     referral_id: int,

@@ -38,27 +38,44 @@ class SubscriptionService:
         from app.core.config import settings
         if settings.is_dedicated:
             return True
-        plan = self.get_active_plan(tenant_id)
-        if not plan:
-            return False
-            
-        # 1. Check the base plan default
-        plan_default = getattr(plan, f"has_{feature_name}", False)
-        if not plan_default:
-            return False
 
-        # 2. Check for per-tenant overrides (Master DB)
+        # Resolve the current ACTIVE/TRIALING subscription (not just the plan)
+        # so we can treat the free trial specially.
+        subscription = self.db.query(TenantSubscription).filter(
+            TenantSubscription.tenant_id == tenant_id,
+            TenantSubscription.status.in_([SubscriptionStatus.ACTIVE, SubscriptionStatus.TRIALING]),
+            TenantSubscription.is_active == True,  # noqa: E712
+        ).order_by(TenantSubscription.id.desc()).first()
+        if not subscription:
+            return False
+        plan = subscription.plan
+
+        # Per-tenant overrides always win (a SaaS admin may explicitly disable a
+        # module for this tenant even during the trial).
         from app.models.all_models import TenantModuleAccess
         override = self.db.query(TenantModuleAccess).filter(
             TenantModuleAccess.tenant_id == tenant_id,
             TenantModuleAccess.module_code == feature_name,
             TenantModuleAccess.is_deleted.is_(False)
         ).first()
-
         if override is not None:
             return bool(override.is_enabled)
-            
-        return True
+
+        # Free trial: ALL features are available for the whole trial window.
+        # Once the trial has elapsed (and it has not been converted to a paid
+        # ACTIVE subscription), access is withdrawn so the hospital must
+        # subscribe to a plan to continue.
+        if subscription.status == SubscriptionStatus.TRIALING:
+            from datetime import datetime, timezone
+            trial_end = subscription.trial_end_date
+            if trial_end is not None and trial_end.tzinfo is None:
+                trial_end = trial_end.replace(tzinfo=timezone.utc)
+            if trial_end is None or trial_end > datetime.now(timezone.utc):
+                return True
+            return False
+
+        # Paid / active subscription: gate on the plan's feature flags.
+        return bool(getattr(plan, f"has_{feature_name}", False))
 
     def require_feature(
         self, 

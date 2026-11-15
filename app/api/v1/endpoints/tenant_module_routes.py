@@ -11,7 +11,7 @@ from __future__ import annotations
 from typing import Annotated, Optional
 
 from fastapi import APIRouter, Depends, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from sqlalchemy.orm import Session
 
 from app.core.database import get_master_db
@@ -50,6 +50,15 @@ class ModuleSetSchema(BaseModel):
 
 class BulkModuleSetSchema(BaseModel):
     modules: list[ModuleSetSchema]
+
+    @model_validator(mode="before")
+    @classmethod
+    def _accept_bare_list(cls, data):
+        # Tolerate clients that POST a bare array ([...]) as well as the
+        # documented object wrapper ({"modules": [...]}).
+        if isinstance(data, list):
+            return {"modules": data}
+        return data
 
 
 # ---------------------------------------------------------------------------
@@ -125,7 +134,7 @@ def bulk_set_modules_for_tenant(
 ):
     records = service.bulk_set_modules(
         tenant_id,
-        [m.dict() for m in payload.modules],
+        [m.model_dump() for m in payload.modules],
     )
     return {
         "success": True,

@@ -13,12 +13,13 @@ Modules are addressed by short codes that match the ``has_<code>`` flag on
 """
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Iterable, Optional
 
 from sqlalchemy.orm import Session
 
 from app.core.enums import SubscriptionStatus
-from app.core.exceptions import BadRequestError, NotFoundError
+from app.core.exceptions import BadRequestError, NotFoundError, ServiceError
 from app.models.all_models import (
     SubscriptionPlan,
     Tenant,
@@ -46,7 +47,11 @@ SUPPORTED_MODULES: tuple[tuple[str, str], ...] = (
     ("hr", "Human Resources"),
     ("dietary", "Dietary & Meal Management"),
     ("ambulance", "Ambulance & Fleet"),
+    ("mortuary", "Mortuary & Morgue"),
     ("compliance", "Compliance & Audit"),
+    ("dental", "Dental Clinic"),
+    ("eye", "Eye Clinic"),
+    ("ortho", "Orthopaedics"),
 )
 
 
@@ -94,6 +99,28 @@ class TenantModuleService:
         )
         return sub.plan if sub else None
 
+    def _trial_active(self, tenant_id: int) -> bool:
+        """True when the tenant's current subscription is a live (unexpired)
+        trial. During a trial EVERY module is unlocked, mirroring the API-level
+        feature gate, so the tenant can evaluate the whole platform."""
+        from app.models.all_models import TenantSubscription  # local import
+        sub = (
+            self.db.query(TenantSubscription)
+            .filter(
+                TenantSubscription.tenant_id == tenant_id,
+                TenantSubscription.status == SubscriptionStatus.TRIALING,
+                TenantSubscription.is_active.is_(True),
+            )
+            .order_by(TenantSubscription.id.desc())
+            .first()
+        )
+        if not sub:
+            return False
+        end = sub.trial_end_date
+        if end is not None and end.tzinfo is None:
+            end = end.replace(tzinfo=timezone.utc)
+        return end is None or end > datetime.now(timezone.utc)
+
     def list_modules_for_tenant(self, tenant_id: int) -> list[dict]:
         """
         Return a complete view of module access for a tenant.
@@ -106,6 +133,7 @@ class TenantModuleService:
             raise NotFoundError(message="Tenant not found.")
 
         plan = self.get_active_plan(tenant_id)
+        trial = self._trial_active(tenant_id)
         overrides = {
             override.module_code: override
             for override in self.db.query(TenantModuleAccess)
@@ -118,10 +146,15 @@ class TenantModuleService:
 
         result: list[dict] = []
         for code, label in SUPPORTED_MODULES:
-            plan_default = bool(getattr(plan, f"has_{code}", False)) if plan else False
+            plan_default = True if trial else (bool(getattr(plan, f"has_{code}", False)) if plan else False)
             override = overrides.get(code)
             override_value = override.is_enabled if override is not None else None
-            effective = plan_default and (override_value if override_value is not None else True)
+            # A SaaS-admin override wins both ways: it can grant a module the
+            # plan does not include (loyalty benefit) or disable one it does.
+            if override_value is not None:
+                effective = override_value and plan is not None
+            else:
+                effective = plan_default
 
             result.append(
                 {
@@ -143,8 +176,6 @@ class TenantModuleService:
         plan = self.get_active_plan(tenant_id)
         if plan is None:
             return False
-        if not getattr(plan, f"has_{code}", False):
-            return False
 
         override = (
             self.db.query(TenantModuleAccess)
@@ -155,15 +186,19 @@ class TenantModuleService:
             )
             .first()
         )
-        if override is None:
+        # An explicit SaaS-admin override wins: grant (loyalty benefit) or disable.
+        if override is not None:
+            return bool(override.is_enabled)
+        # No override -> a live trial unlocks everything, else gate on the plan.
+        if self._trial_active(tenant_id):
             return True
-        return bool(override.is_enabled)
+        return bool(getattr(plan, f"has_{code}", False))
 
     # ------------------------------------------------------------------
     # WRITE
     # ------------------------------------------------------------------
 
-    def set_module(
+    def _apply_module(
         self,
         tenant_id: int,
         module_code: str,
@@ -171,26 +206,15 @@ class TenantModuleService:
         is_enabled: bool,
         notes: Optional[str] = None,
     ) -> TenantModuleAccess:
-        """
-        Create or update a per-tenant module override.
+        """Create or update a per-tenant module override WITHOUT committing.
+
+        A SaaS-admin override is authoritative: it may enable a module the
+        plan does not include (a loyalty benefit) or disable one it does. The
+        effective-access computation in :meth:`list_modules_for_tenant` and
+        :meth:`is_module_enabled` honours the override, so no plan-membership
+        guard is applied on write.
         """
         code = _normalize(module_code)
-        tenant = self.db.query(Tenant).filter(Tenant.id == tenant_id).first()
-        if not tenant:
-            raise NotFoundError(message="Tenant not found.")
-
-        # Refuse to enable a module the active plan does not include.
-        if is_enabled:
-            plan = self.get_active_plan(tenant_id)
-            if plan is None or not getattr(plan, f"has_{code}", False):
-                raise BadRequestError(
-                    message=(
-                        f"Module '{code}' is not part of the tenant's active "
-                        f"subscription plan and cannot be enabled."
-                    ),
-                    detail={"module": code},
-                )
-
         record = (
             self.db.query(TenantModuleAccess)
             .filter(
@@ -212,8 +236,38 @@ class TenantModuleService:
             record.is_deleted = False
             if notes is not None:
                 record.notes = notes
+        return record
 
-        self.db.commit()
+    def _commit(self, message: str) -> None:
+        """Commit the session, rolling back and surfacing the real DB error
+        (instead of an opaque 500) on failure."""
+        try:
+            self.db.commit()
+        except Exception as exc:
+            self.db.rollback()
+            orig = getattr(exc, "orig", None)
+            raise ServiceError(
+                message=message,
+                detail={"error": str(orig) if orig is not None else str(exc)},
+            ) from exc
+
+    def set_module(
+        self,
+        tenant_id: int,
+        module_code: str,
+        *,
+        is_enabled: bool,
+        notes: Optional[str] = None,
+    ) -> TenantModuleAccess:
+        """Create or update a single per-tenant module override."""
+        tenant = self.db.query(Tenant).filter(Tenant.id == tenant_id).first()
+        if not tenant:
+            raise NotFoundError(message="Tenant not found.")
+        record = self._apply_module(
+            tenant_id, module_code, is_enabled=is_enabled, notes=notes
+        )
+        self._commit("Could not save the module setting.")
+        self.db.refresh(record)
         return record
 
     def bulk_set_modules(
@@ -221,21 +275,26 @@ class TenantModuleService:
         tenant_id: int,
         modules: Iterable[dict],
     ) -> list[TenantModuleAccess]:
-        """
-        Apply a batch of module overrides::
+        """Apply a batch of module overrides atomically (one commit)::
 
             [{"module_code": "pharmacy", "is_enabled": False, "notes": "..."}]
         """
+        tenant = self.db.query(Tenant).filter(Tenant.id == tenant_id).first()
+        if not tenant:
+            raise NotFoundError(message="Tenant not found.")
         out: list[TenantModuleAccess] = []
         for entry in modules or []:
             out.append(
-                self.set_module(
+                self._apply_module(
                     tenant_id,
                     entry["module_code"],
                     is_enabled=bool(entry.get("is_enabled", True)),
                     notes=entry.get("notes"),
                 )
             )
+        self._commit("Could not save the module settings.")
+        for record in out:
+            self.db.refresh(record)
         return out
 
     def reset_module(self, tenant_id: int, module_code: str) -> None:

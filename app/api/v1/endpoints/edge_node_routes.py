@@ -292,3 +292,40 @@ def connectivity_probe():
         "server_time": datetime.utcnow().isoformat() + "Z",
         "supports_offline_sync": True,
     }
+
+
+@connectivity_router.get(
+    "/status",
+    summary="Current cloud-connectivity status for offline-aware clients",
+)
+def connectivity_status():
+    """Report whether this deployment can currently reach the central cloud,
+    plus the list of operations that are gated when offline. The frontend
+    polls this to show an offline banner and disable cross-hospital actions."""
+    from app.services import connectivity_service
+
+    return connectivity_service.get_status()
+
+
+@connectivity_router.post(
+    "/refresh",
+    summary="Force a fresh cloud-connectivity check (bypasses the cache)",
+)
+def connectivity_refresh():
+    from app.services import connectivity_service
+
+    status = connectivity_service.get_status(force_refresh=True)
+    if status.get("online"):
+        # Back online: push any files written to the on-site MinIO store while
+        # offline up to the cloud S3 bucket.
+        try:
+            from app.utils.object_storage import drain_pending_async
+            drain_pending_async()
+        except Exception:
+            pass
+        try:
+            from app.services import entitlement_service
+            entitlement_service.refresh_async()
+        except Exception:
+            pass
+    return status

@@ -127,9 +127,104 @@ class Settings(BaseSettings):
         description="Days after LICENSE_EXPIRES_AT before access is blocked.",
     )
 
+    #: Length (days) of the all-features free trial granted to every new tenant.
+    #: During the trial the tenant has access to every module regardless of the
+    #: plan they selected; after it they must pay for a plan (highest or lower).
+    TRIAL_PERIOD_DAYS: int = Field(
+        30,
+        validation_alias=AliasChoices("TRIAL_PERIOD_DAYS", "CAREPOINT_HMS_TRIAL_PERIOD_DAYS"),
+        description="Length in days of the full-feature free trial for new tenants.",
+    )
+
+    # ---- OFFLINE SIGNED-LEASE LICENSING (edge installs) ----
+    # The cloud signs a short lease (JWT/RS256); the edge node verifies it with
+    # the PUBLIC key only, so it cannot be forged. Clinical/emergency features
+    # are never blocked, even on a lapsed lease.
+    LICENSE_PUBLIC_KEY: Optional[str] = Field(
+        None, validation_alias=AliasChoices("LICENSE_PUBLIC_KEY", "CAREPOINT_HMS_LICENSE_PUBLIC_KEY"),
+        description="RS256 PUBLIC key (PEM or file path) used to VERIFY offline licence leases. Set on every edge node.",
+    )
+    LICENSE_PRIVATE_KEY: Optional[SecretStr] = Field(
+        None, validation_alias=AliasChoices("LICENSE_PRIVATE_KEY", "CAREPOINT_HMS_LICENSE_PRIVATE_KEY"),
+        description="RS256 PRIVATE key (PEM). Set ONLY on the cloud licence authority to SIGN leases; never on an edge node.",
+    )
+    LICENSE_LEASE_DAYS: int = Field(
+        60, validation_alias=AliasChoices("LICENSE_LEASE_DAYS", "CAREPOINT_HMS_LICENSE_LEASE_DAYS"),
+        description="Default lease length (days) issued to an offline hospital.",
+    )
+    LICENSE_DIR: Optional[str] = Field(
+        None, validation_alias=AliasChoices("LICENSE_DIR", "CAREPOINT_HMS_LICENSE_DIR"),
+        description="Directory for the stored lease + clock high-water mark (default: <uploads>/.license).",
+    )
+    LICENSE_OFFLINE_ENFORCED: bool = Field(
+        True, validation_alias=AliasChoices("LICENSE_OFFLINE_ENFORCED", "CAREPOINT_HMS_LICENSE_OFFLINE_ENFORCED"),
+        description="Enforce the signed lease on edge installs. Clinical/emergency features are never blocked regardless.",
+    )
+    LICENSE_CARE_SAFE_FEATURES: str = Field(
+        "clinical,consultation,triage,laboratory,lab,pharmacy,dispense,billing,emergency,vitals,queue,visit",
+        validation_alias=AliasChoices("LICENSE_CARE_SAFE_FEATURES", "CAREPOINT_HMS_LICENSE_CARE_SAFE_FEATURES"),
+        description="Comma-separated features NEVER blocked by a lapsed licence (patient-care safety).",
+    )
+
     @property
     def is_dedicated(self) -> bool:
         return str(self.DEPLOYMENT_MODE).strip().lower() == "dedicated"
+
+    #: Fallback deployment mode for a tenant whose own ``deployment_mode`` is
+    #: unset: "cloud" (online), "onprem" (offline) or "hybrid". When blank it is
+    #: derived (edge -> hybrid, dedicated -> onprem, otherwise cloud).
+    DEFAULT_DEPLOYMENT_MODE: Optional[str] = Field(
+        None,
+        validation_alias=AliasChoices("DEFAULT_DEPLOYMENT_MODE", "CAREPOINT_HMS_DEFAULT_DEPLOYMENT_MODE"),
+        description="Fallback per-tenant deployment mode: cloud | onprem | hybrid.",
+    )
+
+    # =========================================================
+    # CONNECTIVITY / OFFLINE-RESILIENCE
+    # =========================================================
+    #: An on-site ("edge") deployment keeps serving the local clinic flow with
+    #: no internet. A few operations cross the hospital boundary and genuinely
+    #: need the central cloud: inter-facility referrals, cross-hospital data
+    #: exchange (interoperability) and the online steps of A&E care. The
+    #: connectivity service decides at request time whether this instance can
+    #: currently reach the cloud; the central cloud itself has no CLOUD_BASE_URL
+    #: and is always treated as online.
+    CLOUD_BASE_URL: Optional[str] = Field(
+        None,
+        validation_alias=AliasChoices("CLOUD_BASE_URL", "CAREPOINT_HMS_CLOUD_BASE_URL"),
+        description="Central cloud/API base URL this instance syncs to. Set on an on-site edge node; empty on the cloud itself.",
+    )
+    CONNECTIVITY_PROBE_PATH: str = Field(
+        "/api/v1/connectivity/probe",
+        description="Path appended to CLOUD_BASE_URL when probing cloud reachability.",
+    )
+    CONNECTIVITY_PROBE_TIMEOUT_SECONDS: float = Field(
+        3.0, ge=0.5, le=30.0,
+        validation_alias=AliasChoices("CONNECTIVITY_PROBE_TIMEOUT_SECONDS", "CAREPOINT_HMS_CONNECTIVITY_PROBE_TIMEOUT_SECONDS"),
+        description="How long to wait for the cloud probe before treating the node as offline.",
+    )
+    CONNECTIVITY_PROBE_TTL_SECONDS: int = Field(
+        15, ge=0, le=600,
+        validation_alias=AliasChoices("CONNECTIVITY_PROBE_TTL_SECONDS", "CAREPOINT_HMS_CONNECTIVITY_PROBE_TTL_SECONDS"),
+        description="How long a probe result is cached before this node re-probes the cloud.",
+    )
+    CONNECTIVITY_FORCE_OFFLINE: bool = Field(
+        False,
+        validation_alias=AliasChoices("CONNECTIVITY_FORCE_OFFLINE", "CAREPOINT_HMS_CONNECTIVITY_FORCE_OFFLINE"),
+        description="Ops/testing override: treat this instance as offline regardless of actual reachability.",
+    )
+    CONNECTIVITY_ASSUME_ONLINE: bool = Field(
+        False,
+        validation_alias=AliasChoices("CONNECTIVITY_ASSUME_ONLINE", "CAREPOINT_HMS_CONNECTIVITY_ASSUME_ONLINE"),
+        description="Ops/testing override: treat this instance as always online (skip probing).",
+    )
+
+    @property
+    def is_edge(self) -> bool:
+        """True when this instance is an on-site node that syncs to a cloud
+        (a CLOUD_BASE_URL is configured). The central cloud has none and is
+        always treated as online."""
+        return bool(self.CLOUD_BASE_URL and str(self.CLOUD_BASE_URL).strip())
 
     # =========================================================
     # FRONTEND / CLIENT SETTINGS
@@ -413,6 +508,32 @@ class Settings(BaseSettings):
     AWS_DEFAULT_REGION: Optional[str] = None
     AWS_S3_BUCKET_NAME: Optional[str] = None
     AWS_ENDPOINT_URL: Optional[str] = None  # Support for MinIO / Local S3 compatible storage
+
+    # ---- LOCAL OBJECT STORAGE (MinIO) : used when the hospital is OFFLINE ----
+    # Online uploads go to AWS S3 (above); offline uploads go to on-site MinIO
+    # and are reconciled up to S3 when connectivity returns. MinIO is
+    # S3-compatible and runs on the hospital LAN, so it needs no internet.
+    MINIO_ENDPOINT_URL: Optional[str] = Field(
+        None,
+        validation_alias=AliasChoices("MINIO_ENDPOINT_URL", "CAREPOINT_HMS_MINIO_ENDPOINT_URL"),
+        description="On-site MinIO S3 endpoint, e.g. http://localhost:9000. Empty disables the offline store.",
+    )
+    MINIO_ACCESS_KEY_ID: Optional[SecretStr] = Field(
+        None, validation_alias=AliasChoices("MINIO_ACCESS_KEY_ID", "CAREPOINT_HMS_MINIO_ACCESS_KEY_ID"),
+        description="MinIO access key for the on-site store.",
+    )
+    MINIO_SECRET_ACCESS_KEY: Optional[SecretStr] = Field(
+        None, validation_alias=AliasChoices("MINIO_SECRET_ACCESS_KEY", "CAREPOINT_HMS_MINIO_SECRET_ACCESS_KEY"),
+        description="MinIO secret key for the on-site store.",
+    )
+    MINIO_REGION: Optional[str] = Field(
+        "us-east-1", validation_alias=AliasChoices("MINIO_REGION", "CAREPOINT_HMS_MINIO_REGION"),
+        description="Region label for MinIO (any value; MinIO ignores it).",
+    )
+    MINIO_BUCKET_NAME: Optional[str] = Field(
+        None, validation_alias=AliasChoices("MINIO_BUCKET_NAME", "CAREPOINT_HMS_MINIO_BUCKET_NAME"),
+        description="Optional default/platform bucket on the MinIO store.",
+    )
     BACKUP_ALLOW_DOCKER: bool = False
     PG_DUMP_PATH: Optional[str] = None
 

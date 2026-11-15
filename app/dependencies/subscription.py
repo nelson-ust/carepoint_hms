@@ -4,6 +4,7 @@ from app.core.database import get_master_db
 from app.core.multitenancy import get_current_tenant_id
 from app.services.subscription_service import SubscriptionService
 from app.dependencies.auth import get_optional_token_payload
+from app.core.exceptions import LicenseError
 from typing import Annotated, Optional
 
 def get_subscription_service(db: Annotated[Session, Depends(get_master_db)]) -> SubscriptionService:
@@ -19,6 +20,21 @@ def require_plan_feature(feature_name: str):
         # Skip feature gate for synthetic/test tenants
         if not tenant_id:
             return
+
+        # Offline entitlement gate (edge installs): a lapsed or tampered signed
+        # lease blocks non-care features. Clinical/emergency features are never
+        # blocked. Fails open on any internal error so care is never broken.
+        try:
+            from app.core.config import settings as _settings
+            from app.core import tenant_mode
+            if tenant_mode.enforce_lease() and getattr(_settings, "LICENSE_OFFLINE_ENFORCED", True):
+                from app.services import entitlement_service
+                if entitlement_service.license_gate(feature_name) == "block":
+                    raise LicenseError()
+        except LicenseError:
+            raise
+        except Exception:
+            pass
             
         # Extract user_id from token payload if available
         user_id = payload.get("sub") if payload else None

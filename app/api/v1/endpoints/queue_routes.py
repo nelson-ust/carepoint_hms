@@ -35,6 +35,7 @@ from app.schemas.queue_schema import (
     QueueTicketTransferSchema,
     ServicePointWorklistResponseSchema,
 )
+from app.schemas.service_delivery_point_schemas import ServiceDeliveryPointLiteSchema
 from app.services.queue_service import QueueService
 from app.utils.pagination import paginate_response
 
@@ -69,6 +70,27 @@ def get_my_worklist(
     point.
     """
     return service.get_my_worklist(actor, sdp_id=service_delivery_point_id)
+
+
+@router.get(
+    "/my-service-points",
+    summary="Service delivery points the caller is assigned to work",
+)
+def get_my_service_points(
+    actor: AnyAuthenticatedUser,
+    service: Annotated[QueueService, Depends(get_queue_service)],
+):
+    """
+    The desks the signed-in provider staffs, for the Service Desk console's
+    landing + switcher. Empty when the principal has no assignment (e.g. an
+    admin), in which case the console offers every active service point.
+    """
+    points = service.get_my_service_points(actor)
+    return {
+        "success": True,
+        "items": [ServiceDeliveryPointLiteSchema.model_validate(p).model_dump() for p in points],
+        "count": len(points),
+    }
 
 
 @router.get(

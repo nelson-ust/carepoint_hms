@@ -51,6 +51,25 @@ def license_status(today: Optional[date] = None) -> dict:
     ``days_left`` is negative once past the licence date. When no licence
     date is configured the licence is treated as unenforced (never blocked).
     """
+    # An offline signed-lease licence takes precedence when installed.
+    try:
+        from app.services import entitlement_service
+        ent = entitlement_service.status()
+        if ent.get("source") == "lease":
+            return {
+                "mode": "dedicated" if settings.is_dedicated else ("edge" if getattr(settings, "is_edge", False) else "saas"),
+                "licensed_until": ent.get("licensed_until"),
+                "days_left": ent.get("days_left"),
+                "in_grace": bool(ent.get("in_grace")),
+                "blocked": bool(ent.get("blocked")),
+                "message": ent.get("message"),
+                "plan": ent.get("plan"),
+                "enabled_modules": ent.get("enabled_modules"),
+                "source": "lease",
+            }
+    except Exception:
+        pass
+
     today = today or date.today()
     expires = settings.LICENSE_EXPIRES_AT
     grace = max(0, int(settings.LICENSE_GRACE_DAYS or 0))

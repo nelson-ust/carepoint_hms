@@ -52,7 +52,14 @@ class InvoiceRepository:
     ) -> tuple[list[Invoice], int]:
         query = (
             self.db.query(Invoice)
-            .options(selectinload(Invoice.items))
+            .options(
+                selectinload(Invoice.items),
+                # Registry grids show the patient and visit alongside the money —
+                # eager-load so the read schema's display fields don't N+1.
+                selectinload(Invoice.patient),
+                selectinload(Invoice.visit),
+                selectinload(Invoice.payer),
+            )
             .filter(Invoice.is_deleted.is_(False))
         )
         if patient_id is not None:

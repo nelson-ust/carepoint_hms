@@ -375,6 +375,7 @@ class HmoPlanService:
 
     def list_enrollees(self, *, provider_id: Optional[int] = None,
                        plan_id: Optional[int] = None,
+                       patient_id: Optional[int] = None,
                        status: Optional[str] = None,
                        search: Optional[str] = None,
                        page: int = 1, page_size: int = 50) -> dict:
@@ -383,6 +384,9 @@ class HmoPlanService:
              .filter(PatientInsurance.is_deleted.is_(False)))
         if provider_id:
             q = q.filter(PatientInsurance.insurance_provider_id == provider_id)
+        if patient_id:
+            # Front-desk / HMO-desk eligibility confirmation works per patient.
+            q = q.filter(PatientInsurance.patient_id == patient_id)
         if plan_id:
             q = q.filter(PatientInsurance.hmo_plan_id == plan_id)
         if status:
@@ -399,19 +403,46 @@ class HmoPlanService:
         total = q.count()
         rows = (q.order_by(PatientInsurance.id.desc())
                 .offset((page - 1) * page_size).limit(page_size).all())
+        plan_ids = {pi.hmo_plan_id for pi in rows if pi.hmo_plan_id}
+        plans = ({p.id: p for p in self.db.query(HmoPlan).filter(HmoPlan.id.in_(plan_ids)).all()}
+                 if plan_ids else {})
+        provider_ids = {pi.insurance_provider_id for pi in rows if pi.insurance_provider_id}
+        providers = ({p.id: p for p in self.db.query(InsuranceProvider)
+                      .filter(InsuranceProvider.id.in_(provider_ids)).all()}
+                     if provider_ids else {})
+
+        def _num(v):
+            return float(v) if v is not None else None
+
         items = []
         for pi in rows:
-            plan = (self.db.query(HmoPlan).filter(HmoPlan.id == pi.hmo_plan_id).first()
-                    if pi.hmo_plan_id else None)
+            plan = plans.get(pi.hmo_plan_id) if pi.hmo_plan_id else None
+            provider = providers.get(pi.insurance_provider_id)
+            valid_from = pi.valid_from or pi.coverage_start_date
+            valid_to = pi.valid_to or pi.coverage_end_date
             items.append({
                 "id": pi.id, "patient_id": pi.patient_id,
                 "patient_name": f"{pi.patient.first_name} {pi.patient.last_name}" if pi.patient else None,
+                "hospital_number": getattr(pi.patient, "hospital_number", None) if pi.patient else None,
+                "insurance_provider_id": pi.insurance_provider_id,
+                "provider_name": provider.name if provider else None,
                 "policy_number": pi.policy_number, "member_id": pi.member_id,
                 "plan_id": pi.hmo_plan_id, "plan_name": plan.name if plan else pi.plan_name,
+                "plan_tier": plan.plan_tier if plan else None,
+                "coverage_type": (plan.coverage_type.value if hasattr(plan.coverage_type, "value")
+                                  else plan.coverage_type) if plan else None,
+                # Coverage terms the HMO desk reads back to the patient before clinical care.
+                "coverage_percent": _num(plan.default_coverage_percent) if plan else None,
+                "copay_percent": _num(plan.default_copay_percent) if plan else None,
+                "copay_flat": _num(plan.default_copay_flat) if plan else None,
+                "annual_limit": _num(plan.annual_limit) if plan else None,
+                "per_visit_limit": _num(plan.per_visit_limit) if plan else None,
+                "requires_referral": bool(plan.requires_referral) if plan else False,
                 "policy_status": pi.policy_status.value if hasattr(pi.policy_status, "value") else pi.policy_status,
                 "verification_status": pi.verification_status or "UNVERIFIED",
-                "valid_to": (pi.valid_to or pi.coverage_end_date).isoformat()
-                            if (pi.valid_to or pi.coverage_end_date) else None,
+                "last_verified_at": pi.last_verified_at.isoformat() if pi.last_verified_at else None,
+                "valid_from": valid_from.isoformat() if valid_from else None,
+                "valid_to": valid_to.isoformat() if valid_to else None,
                 "is_primary": pi.is_primary,
                 "principal_patient_insurance_id": pi.principal_patient_insurance_id,
                 "relationship_to_principal": pi.relationship_to_principal,

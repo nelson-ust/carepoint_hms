@@ -96,13 +96,18 @@ class PaymentService:
             if not billing or not billing.patient_insurance_id:
                 raise BadRequestError("This invoice is not linked to an insurance policy.")
 
+        metadata = dict(payload.transaction_metadata or {})
+        external_reference = (getattr(payload, "external_reference", None) or "").strip()
+        if external_reference:
+            metadata["external_reference"] = external_reference
+
         payment = self.repository.create(
             invoice_id=invoice.id,
             amount=amount,
             currency=payload.currency,
             payment_method=payload.payment_method,
             received_by_staff_id=payload.received_by_staff_id,
-            transaction_metadata=payload.transaction_metadata,
+            transaction_metadata=metadata or None,
             note=payload.note,
         )
 

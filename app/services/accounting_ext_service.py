@@ -395,6 +395,213 @@ class AccountingExtService:
                 "total": str(patient + max(hmo, Decimal('0')) + capitation)}
 
     # ------------------------------------------------------------------
+    # Finance command-center dashboard
+    # ------------------------------------------------------------------
+
+    def finance_dashboard(self, *, as_of: Optional[date] = None) -> dict:
+        """Consolidated finance overview: revenue & collections, AR/AP with
+        aging, cash & bank positions, operating surplus, a 6-month trend,
+        AR segmentation, the open period and actionable alerts. Read-only,
+        aggregates existing ledgers; no schema dependency."""
+        from calendar import monthrange
+        from datetime import timedelta
+        from app.core.enums import InvoiceStatus, PaymentStatus, VendorBillStatus
+        from app.models.all_models import Payment, VendorBill
+
+        today = as_of or date.today()
+        tomorrow = today + timedelta(days=1)
+        month_start = today.replace(day=1)
+        year_start = today.replace(month=1, day=1)
+
+        def _sum(q):
+            return _d(q.scalar() or 0)
+
+        live_inv = [InvoiceStatus.ISSUED, InvoiceStatus.PARTIALLY_PAID, InvoiceStatus.PAID]
+
+        def _billed(d0, d1_excl):
+            return _sum(self.db.query(func.coalesce(func.sum(Invoice.total_amount), 0))
+                .filter(Invoice.is_deleted.is_(False),
+                        Invoice.status.in_(live_inv),
+                        Invoice.invoice_date >= d0, Invoice.invoice_date < d1_excl))
+
+        def _collected(d0, d1_excl):
+            return _sum(self.db.query(func.coalesce(func.sum(Payment.amount), 0))
+                .filter(Payment.is_deleted.is_(False),
+                        Payment.payment_status == PaymentStatus.SUCCESSFUL,
+                        Payment.paid_at >= d0, Payment.paid_at < d1_excl))
+
+        def _expense(d0, d1):
+            return _sum(self.db.query(func.coalesce(
+                    func.sum(JournalEntryLine.debit - JournalEntryLine.credit), 0))
+                .join(JournalEntry, JournalEntry.id == JournalEntryLine.journal_entry_id)
+                .join(Account, Account.id == JournalEntryLine.account_id)
+                .filter(JournalEntry.status == JournalEntryStatus.POSTED,
+                        JournalEntry.is_deleted.is_(False),
+                        JournalEntry.entry_date >= d0, JournalEntry.entry_date <= d1,
+                        Account.account_type == AccountType.EXPENSE))
+
+        billed_mtd, billed_ytd = _billed(month_start, tomorrow), _billed(year_start, tomorrow)
+        collected_today = _collected(today, tomorrow)
+        collected_mtd = _collected(month_start, tomorrow)
+        collected_ytd = _collected(year_start, tomorrow)
+        expense_mtd, expense_ytd = _expense(month_start, today), _expense(year_start, today)
+
+        collection_rate = (collected_ytd / billed_ytd * 100) if billed_ytd > 0 else Decimal("0")
+        surplus_mtd = billed_mtd - expense_mtd
+        surplus_ytd = billed_ytd - expense_ytd
+
+        # ---- AR aging ----
+        inv_open = (self.db.query(Invoice)
+            .filter(Invoice.is_deleted.is_(False), Invoice.balance_due > 0,
+                    Invoice.status.in_([InvoiceStatus.ISSUED, InvoiceStatus.PARTIALLY_PAID])).all())
+        ar = {"current": Decimal("0"), "d1_30": Decimal("0"), "d31_60": Decimal("0"),
+              "d61_90": Decimal("0"), "d90_plus": Decimal("0")}
+        overdue_inv_amt = Decimal("0")
+        overdue_inv_count = 0
+        for inv in inv_open:
+            bal = _d(inv.balance_due)
+            due = inv.due_date or inv.invoice_date
+            if due is not None and hasattr(due, "date"):
+                due = due.date()
+            od = (today - due).days if due else 0
+            if od <= 0:
+                ar["current"] += bal
+            else:
+                overdue_inv_amt += bal
+                overdue_inv_count += 1
+                if od <= 30: ar["d1_30"] += bal
+                elif od <= 60: ar["d31_60"] += bal
+                elif od <= 90: ar["d61_90"] += bal
+                else: ar["d90_plus"] += bal
+        ar_total = sum(ar.values(), Decimal("0"))
+
+        # ---- AP outstanding + aging ----
+        ap_open = (self.db.query(VendorBill)
+            .filter(VendorBill.is_deleted.is_(False),
+                    VendorBill.status.in_([VendorBillStatus.OPEN,
+                                           VendorBillStatus.PARTIALLY_PAID])).all())
+        ap_total = Decimal("0")
+        ap_overdue = Decimal("0")
+        ap_overdue_count = 0
+        for b in ap_open:
+            bal = _d(b.total_amount) - _d(b.amount_paid)
+            if bal <= 0:
+                continue
+            ap_total += bal
+            bdue = b.due_date.date() if (b.due_date is not None and hasattr(b.due_date, "date")) else b.due_date
+            if bdue and bdue < today:
+                ap_overdue += bal
+                ap_overdue_count += 1
+
+        # ---- Cash & bank positions (GL balances) ----
+        def _acct_balance(account_id):
+            return _sum(self.db.query(func.coalesce(
+                    func.sum(JournalEntryLine.debit - JournalEntryLine.credit), 0))
+                .join(JournalEntry, JournalEntry.id == JournalEntryLine.journal_entry_id)
+                .filter(JournalEntry.status == JournalEntryStatus.POSTED,
+                        JournalEntry.is_deleted.is_(False),
+                        JournalEntryLine.account_id == account_id))
+
+        cash_lines = []
+        total_cash = Decimal("0")
+        for b in self.db.query(BankAccount).filter(BankAccount.is_deleted.is_(False)).all():
+            bal = _acct_balance(b.account_id)
+            total_cash += bal
+            cash_lines.append({"name": b.name, "subtitle": b.bank_name or "Bank account",
+                               "type": "BANK", "balance": str(bal)})
+        for f in self.db.query(PettyCashFloat).filter(PettyCashFloat.is_deleted.is_(False)).all():
+            bal = _acct_balance(f.account_id)
+            total_cash += bal
+            cash_lines.append({"name": f.name, "subtitle": "Petty cash float",
+                               "type": "PETTY_CASH", "balance": str(bal)})
+
+        # ---- 6-month trend ----
+        trend = []
+        for i in range(5, -1, -1):
+            mm, yy = today.month - i, today.year
+            while mm <= 0:
+                mm += 12; yy -= 1
+            d0 = date(yy, mm, 1)
+            d1 = min(date(yy, mm, monthrange(yy, mm)[1]), today)
+            d1x = min(date(yy, mm, monthrange(yy, mm)[1]) + timedelta(days=1), tomorrow)
+            trend.append({"month": d0.strftime("%b %y"),
+                          "billed": str(_billed(d0, d1x)),
+                          "collected": str(_collected(d0, d1x)),
+                          "expense": str(_expense(d0, d1))})
+
+        # ---- AR segments ----
+        segments = self.ar_segments()
+
+        # ---- Open period ----
+        period = (self.db.query(AccountingPeriod)
+            .filter(AccountingPeriod.is_deleted.is_(False),
+                    AccountingPeriod.start_date <= today,
+                    AccountingPeriod.end_date >= today).first())
+        period_info = ({"code": period.code, "name": period.name,
+                        "status": str(getattr(period.status, "value", period.status)),
+                        "end_date": period.end_date.isoformat()} if period else None)
+
+        # ---- Alerts ----
+        draft_je = (self.db.query(JournalEntry)
+            .filter(JournalEntry.is_deleted.is_(False),
+                    JournalEntry.status.in_([JournalEntryStatus.DRAFT,
+                                             JournalEntryStatus.PENDING_APPROVAL])).count())
+        unmatched_bank = (self.db.query(BankStatementLine)
+            .filter(BankStatementLine.is_deleted.is_(False),
+                    BankStatementLine.matched_journal_line_id.is_(None)).count())
+        alerts = []
+        if overdue_inv_count:
+            alerts.append({"severity": "warning",
+                           "title": f"{overdue_inv_count} overdue invoice(s)",
+                           "detail": f"NGN {overdue_inv_amt:,.2f} past due from patients / payers"})
+        if ap_overdue_count:
+            alerts.append({"severity": "danger",
+                           "title": f"{ap_overdue_count} overdue vendor bill(s)",
+                           "detail": f"NGN {ap_overdue:,.2f} payable past due date"})
+        if draft_je:
+            alerts.append({"severity": "info",
+                           "title": f"{draft_je} journal entr(ies) awaiting posting",
+                           "detail": "Draft or pending-approval entries not yet in the ledger"})
+        if unmatched_bank:
+            alerts.append({"severity": "info",
+                           "title": f"{unmatched_bank} unmatched bank line(s)",
+                           "detail": "Imported statement lines not reconciled to the ledger"})
+        if ar["d90_plus"] > 0:
+            alerts.append({"severity": "warning",
+                           "title": "Aged receivables over 90 days",
+                           "detail": f"NGN {ar['d90_plus']:,.2f} outstanding beyond 90 days"})
+
+        return {
+            "as_of": today.isoformat(),
+            "kpis": {
+                "revenue_billed_mtd": str(billed_mtd),
+                "revenue_billed_ytd": str(billed_ytd),
+                "collected_today": str(collected_today),
+                "collected_mtd": str(collected_mtd),
+                "collected_ytd": str(collected_ytd),
+                "expense_mtd": str(expense_mtd),
+                "expense_ytd": str(expense_ytd),
+                "surplus_mtd": str(surplus_mtd),
+                "surplus_ytd": str(surplus_ytd),
+                "collection_rate": str(collection_rate.quantize(Decimal("0.1"))),
+                "ar_outstanding": str(ar_total),
+                "ar_overdue": str(overdue_inv_amt),
+                "ap_outstanding": str(ap_total),
+                "ap_overdue": str(ap_overdue),
+                "cash_on_hand": str(total_cash),
+                "net_working_position": str(total_cash + ar_total - ap_total),
+            },
+            "ar_aging": {k: str(v) for k, v in ar.items()},
+            "ap": {"outstanding": str(ap_total), "overdue": str(ap_overdue),
+                   "overdue_count": ap_overdue_count, "open_bills": len(ap_open)},
+            "cash_accounts": cash_lines,
+            "trend": trend,
+            "ar_segments": segments,
+            "period": period_info,
+            "alerts": alerts,
+        }
+
+    # ------------------------------------------------------------------
     # Pre-close checklist + posting status
     # ------------------------------------------------------------------
 

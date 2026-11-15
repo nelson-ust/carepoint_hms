@@ -374,6 +374,44 @@ class ExternalServiceError(AppException):
         )
 
 
+class OfflineError(AppException):
+    """Raised when an operation requires internet/cloud connectivity that is
+    currently unavailable on this on-site deployment (HTTP 503)."""
+
+    def __init__(
+        self,
+        message: str = "This action needs an internet connection and the hospital is currently offline.",
+        *,
+        error_code: str = "OFFLINE",
+        detail: Optional[dict[str, Any]] = None,
+    ) -> None:
+        super().__init__(
+            message,
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            error_code=error_code,
+            detail=detail,
+        )
+
+
+class LicenseError(AppException):
+    """Raised when this hospital's subscription licence has lapsed past its
+    grace window (or been tampered with). Patient-care features are exempt."""
+
+    def __init__(
+        self,
+        message: str = "This hospital's subscription licence needs renewal. Reconnect to the internet or upload a new licence; patient care remains available.",
+        *,
+        error_code: str = "LICENSE_REQUIRED",
+        detail: Optional[dict[str, Any]] = None,
+    ) -> None:
+        super().__init__(
+            message,
+            status_code=status.HTTP_402_PAYMENT_REQUIRED,
+            error_code=error_code,
+            detail=detail,
+        )
+
+
 def build_error_response(exc: AppException) -> JSONResponse:
     """
     Build a JSONResponse from an AppException instance.

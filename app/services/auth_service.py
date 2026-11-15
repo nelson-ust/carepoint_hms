@@ -179,7 +179,25 @@ class AuthService:
         roles = self._extract_role_codes(user)
         primary_role = roles[0] if roles else None
 
-        if user.is_two_factor_enabled:
+        from app.services import connectivity_service
+        from app.core import tenant_mode
+        if (user.is_two_factor_enabled and tenant_mode.skip_2fa_when_offline()
+                and not connectivity_service.is_online()):
+            # Offline-first policy: with no internet, email/SMS one-time codes
+            # cannot be delivered, so 2FA is skipped and the password alone
+            # authenticates. Recorded for the audit trail. (Authenticator/TOTP
+            # users could still verify offline, but the configured policy here
+            # is to let them straight through when the hospital is offline.)
+            self._log_security_event_for_user(
+                user,
+                event_type="TWO_FACTOR_SKIPPED_OFFLINE",
+                severity="WARNING",
+                detail=f"2FA skipped for {user.username}: hospital is offline.",
+                ip_address=ip_address,
+                user_agent=user_agent,
+                metadata={"reason": "offline"},
+            )
+        elif user.is_two_factor_enabled:
             challenge = self._create_and_send_two_factor_challenge(user=user)
             self._log_security_event_for_user(
                 user,

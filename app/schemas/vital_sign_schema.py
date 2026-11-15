@@ -151,6 +151,9 @@ class VitalSignReadSchema(BaseModel):
     height_cm: Optional[Decimal] = None
     bmi: Optional[Decimal] = None
     pain_score: Optional[int] = None
+    mews_score: Optional[int] = Field(
+        None, description="Modified Early Warning Score, auto-computed when pulse, RR, systolic BP and temperature are all present."
+    )
     recorded_at: datetime
     created_at: Optional[datetime] = None
 

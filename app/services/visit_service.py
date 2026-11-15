@@ -509,6 +509,107 @@ class VisitService:
         }
 
     # ============================================================
+    # RETURN TO CONSULTATION (post-diagnostics review)
+    # ============================================================
+
+    def return_to_consultation(
+        self,
+        visit_id: int,
+        *,
+        routed_by_id: Optional[int] = None,
+        notes: Optional[str] = None,
+    ):
+        """
+        Route a patient back to the consulting room after diagnostics (lab /
+        radiology) so the doctor can review results and prescribe. A new
+        consultation ("review") flow step is appended at the consulting room the
+        patient already saw, and they are queued there. The remaining pathway
+        stops (Pharmacy, Billing) are picked up afterwards when the review
+        completes and the patient is advanced again.
+        """
+        from app.core.enums import ServicePointType
+        from app.models.all_models import ServiceDeliveryPoint
+        from app.utils.visit_routing import route_visit_to_next_sdp
+
+        visit = self.repository.get_detailed_visit_by_id(visit_id)
+        if not visit:
+            raise NotFoundError(message="Visit not found.", detail={"visit_id": visit_id})
+        if visit.status in {VisitStatus.COMPLETED, VisitStatus.CANCELLED}:
+            raise BadRequestError(
+                message="Completed or cancelled visits cannot be routed.",
+                detail={"visit_id": visit_id, "status": str(visit.status)},
+            )
+
+        consult_types = {
+            ServicePointType.CLINIC,
+            ServicePointType.EMERGENCY,
+            ServicePointType.PROCEDURE_ROOM,
+        }
+
+        # Prefer the consulting room this patient already saw (the ordering
+        # doctor's room), most recent first.
+        target_sdp_id = None
+        steps = sorted(
+            self.repository.list_visit_flow_steps(visit_id),
+            key=lambda s: s.step_order,
+            reverse=True,
+        )
+        for s in steps:
+            sdp = self.repository.get_service_delivery_point_by_id(s.service_delivery_point_id)
+            if sdp is not None and sdp.service_point_type in consult_types:
+                target_sdp_id = sdp.id
+                break
+
+        # Fallback: any consulting room in the facility.
+        if target_sdp_id is None:
+            sdp = (
+                self.db.query(ServiceDeliveryPoint)
+                .filter(
+                    ServiceDeliveryPoint.service_point_type == ServicePointType.CLINIC,
+                    ServiceDeliveryPoint.is_deleted.is_(False),
+                )
+                .first()
+            )
+            target_sdp_id = sdp.id if sdp else None
+
+        if target_sdp_id is None:
+            raise BadRequestError(
+                message="No consulting room is available to return the patient to.",
+                detail={"visit_id": visit_id},
+            )
+
+        previous_ticket = self.repository.get_latest_queue_ticket_for_visit(visit_id)
+        new_flow_step, new_queue_ticket = route_visit_to_next_sdp(
+            self.db,
+            visit_id=visit.id,
+            target_service_delivery_point_id=target_sdp_id,
+            routed_by_id=routed_by_id,
+            notes=notes or "Returned to consulting room for results review and prescription.",
+        )
+
+        now = datetime.now(timezone.utc)
+        if (
+            previous_ticket is not None
+            and previous_ticket.id != new_queue_ticket.id
+            and previous_ticket.status in {QueueStatus.WAITING, QueueStatus.CALLED, QueueStatus.SERVING}
+        ):
+            previous_ticket.status = QueueStatus.TRANSFERRED
+            previous_ticket.service_ended_at = now
+            self.repository.update_queue_ticket(previous_ticket)
+            new_queue_ticket.transferred_from_ticket_id = previous_ticket.id
+            self.repository.update_queue_ticket(new_queue_ticket)
+
+        self.db.commit()
+        detailed_visit = self.repository.get_detailed_visit_by_id(visit.id)
+        return {
+            "success": True,
+            "message": "Patient returned to the consulting room for review.",
+            "visit": detailed_visit,
+            "new_flow_step": new_flow_step,
+            "new_queue_ticket": new_queue_ticket,
+        }
+
+    # ============================================================
     # SEQUENTIAL ADVANCE
     # ============================================================
 

@@ -266,6 +266,12 @@ def ar_segments(actor: Reader, db: Db):
     return {"success": True, **AccountingExtService(db).ar_segments()}
 
 
+@router.get("/finance-dashboard", summary="Consolidated finance command-center overview")
+def finance_dashboard(actor: Reader, db: Db):
+    from app.services.accounting_ext_service import AccountingExtService
+    return {"success": True, "data": AccountingExtService(db).finance_dashboard()}
+
+
 @router.get("/periods/{period_id}/pre-close-checklist", summary="Ready-to-close check")
 def pre_close(period_id: int, actor: Reader, db: Db):
     from app.services.accounting_ext_service import AccountingExtService

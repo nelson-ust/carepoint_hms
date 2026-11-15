@@ -46,6 +46,11 @@ except Exception:  # pragma: no cover
     SubscriptionBillingService = None  # type: ignore[assignment]
 
 try:
+    from app.services.promo_plan_service import PromoPlanService
+except Exception:  # pragma: no cover
+    PromoPlanService = None  # type: ignore[assignment]
+
+try:
     from app.services.edge_sync_service import sweep_offline_nodes
 except Exception:  # pragma: no cover
     sweep_offline_nodes = None  # type: ignore[assignment]
@@ -348,6 +353,19 @@ def start_scheduler() -> None:
             coalesce=True,
         )
 
+    # Promotional plan-move campaigns — every hour, revert any campaign whose
+    # window has closed so members return to their original plan on time.
+    if PromoPlanService is not None:
+        _scheduler.add_job(
+            _safe_revert_due_promos,
+            trigger="interval",
+            hours=1,
+            id="promo_plan_auto_revert",
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+        )
+
     _scheduler.start()
 
 
@@ -414,6 +432,24 @@ def _safe_run_tenant_jobs() -> None:
             )
     except Exception as exc:
         logger.exception("Tenant job dispatcher tick raised: %s", exc)
+
+
+def _safe_revert_due_promos() -> None:
+    """Hourly tick — revert promotional plan campaigns whose window has closed."""
+    if PromoPlanService is None:
+        return
+    if not MASTER_DATABASE_URL:
+        return
+    master_engine = create_engine(MASTER_DATABASE_URL, future=True)
+    try:
+        with Session(master_engine) as master_db:
+            reverted = PromoPlanService(master_db).revert_due_campaigns()
+            if reverted:
+                logger.info("Promo campaigns auto-reverted: %s", reverted)
+    except Exception as exc:  # pragma: no cover
+        logger.exception("Promo auto-revert tick raised: %s", exc)
+    finally:
+        master_engine.dispose()
 
 
 def shutdown_scheduler() -> None:

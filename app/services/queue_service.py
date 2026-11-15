@@ -93,9 +93,12 @@ class QueueService:
         served_today = self.repository.count_today_by_status(service_delivery_point_id, QueueStatus.SERVED)
         cancelled_today = self.repository.count_today_by_status(service_delivery_point_id, QueueStatus.CANCELLED)
 
+        sp_type = getattr(sdp, "service_point_type", None)
         return {
             "service_delivery_point_id": sdp.id,
             "service_delivery_point_name": sdp.name,
+            "service_delivery_point_code": getattr(sdp, "code", None),
+            "service_point_type": getattr(sp_type, "value", sp_type),
             "waiting": waiting,
             "serving": serving,
             "served_today": served_today,
@@ -179,6 +182,26 @@ class QueueService:
         
         # Access the property I added to all_models
         return getattr(profile, "assigned_sdp_ids", [])
+
+    def get_my_service_points(self, user) -> list:
+        """
+        Resolve the caller's assigned service delivery points (active only),
+        so the Service Desk console can land the provider on their own desk
+        and offer a switcher when they cover more than one.
+
+        Returns an empty list for principals with no assignment (e.g. admins);
+        the console then lets them pick any active service point.
+        """
+        assigned_ids = self.resolve_user_sdp_ids(user)
+        if not assigned_ids:
+            return []
+        points = []
+        for sdp_id in assigned_ids:
+            sdp = self.repository.get_service_delivery_point(sdp_id)
+            if sdp is not None and getattr(sdp, "is_active", True) and not getattr(sdp, "is_deleted", False):
+                points.append(sdp)
+        points.sort(key=lambda s: (s.name or "").lower())
+        return points
 
     def get_my_worklist(self, user, sdp_id: Optional[int] = None) -> dict:
         """

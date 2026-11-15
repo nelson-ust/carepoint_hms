@@ -15,24 +15,36 @@ from app.core.logger import get_logger
 logger = get_logger(__name__)
 
 class S3Service:
-    def __init__(self):
-        self.s3_client = boto3.client(
-            "s3",
-            aws_access_key_id=settings.AWS_ACCESS_KEY_ID.get_secret_value() if settings.AWS_ACCESS_KEY_ID else None,
-            aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY.get_secret_value() if settings.AWS_SECRET_ACCESS_KEY else None,
-            region_name=settings.AWS_DEFAULT_REGION or "us-east-1",
-            endpoint_url=settings.AWS_ENDPOINT_URL,
-            # SigV4 is mandatory: botocore silently downgrades presigned URLs
-            # to legacy SigV2 otherwise, which newer buckets reject with
-            # "Please use AWS4-HMAC-SHA256" — images then never render.
-            config=Config(signature_version="s3v4"),
-        )
-        self.region = settings.AWS_DEFAULT_REGION or "us-east-1"
-        self.is_enabled = settings.S3_ENABLED
+    def __init__(self, backend: Optional[str] = None):
+        # Storage backend is deployment-driven: Cloud-Platform / Cloud-Dedicated
+        # use AWS S3, On-Premise uses MinIO. When no backend is given we fall
+        # back to the ambient (per-request) backend.
+        from app.utils.object_storage import active_backend
         #: Human-readable reason for the most recent failed operation.
         self.last_error: Optional[str] = None
         #: Cached deployment-scoped bucket-name suffix (see _account_suffix).
         self._account_suffix_cache: Optional[str] = None
+        self._configure_for_backend(backend or active_backend() or "s3")
+
+    @classmethod
+    def for_tenant(cls, tenant) -> "S3Service":
+        """Build a service bound to the storage backend implied by the tenant's
+        deployment model (Cloud -> AWS S3, On-Premise -> MinIO)."""
+        from app.core.tenant_mode import backend_for_tenant
+        return cls(backend=backend_for_tenant(tenant))
+
+    def _configure_for_backend(self, backend: str) -> None:
+        """(Re)point the client, region and enabled-flag at a storage backend."""
+        from app.utils.object_storage import make_client
+        self.backend = (backend or "s3").lower()
+        self.s3_client = make_client(self.backend)
+        self._account_suffix_cache = None
+        if self.backend == "minio":
+            self.region = settings.MINIO_REGION or "us-east-1"
+            self.is_enabled = bool(settings.MINIO_ENDPOINT_URL)
+        else:
+            self.region = settings.AWS_DEFAULT_REGION or "us-east-1"
+            self.is_enabled = settings.S3_ENABLED
 
     # S3 bucket names: 3-63 chars, lowercase letters/digits/hyphens, must
     # start and end alphanumeric. Reserve room for the "carepoint-hms-" prefix
@@ -56,6 +68,13 @@ class S3Service:
         of the access key id, then to a fixed token, if STS is unavailable.
         """
         if self._account_suffix_cache:
+            return self._account_suffix_cache
+        # MinIO is a single, dedicated deployment — no STS, no global-uniqueness
+        # concern. Seed the suffix from the MinIO key for a stable name.
+        if getattr(self, "backend", "s3") == "minio":
+            mk = settings.MINIO_ACCESS_KEY_ID
+            seed = (mk.get_secret_value() if mk else None) or "carepoint-hms-minio"
+            self._account_suffix_cache = hashlib.sha256(seed.encode()).hexdigest()[:8]
             return self._account_suffix_cache
         seed = None
         try:
@@ -203,6 +222,13 @@ class S3Service:
         """
         if tenant is None:
             return None
+        # Bind to the correct backend for THIS tenant (Cloud -> S3, On-Premise ->
+        # MinIO) — the service may have been built without tenant context.
+        try:
+            from app.core.tenant_mode import backend_for_tenant
+            self._configure_for_backend(backend_for_tenant(tenant))
+        except Exception:  # pragma: no cover - defensive
+            pass
         if tenant.aws_s3_bucket_name:
             return tenant.aws_s3_bucket_name
         if not self.is_enabled:

@@ -322,6 +322,17 @@ class LabResultService:
         if not patient_email:
             return  # nothing to send to
 
+        # Patient email + portal delivery are only offered when the hospital has
+        # opted into the cloud (or hybrid) deployment mode. An on-premise
+        # (offline) hospital has no outbound email or patient portal, so the
+        # released report is collected in person / downloaded by staff instead.
+        try:
+            from app.core import tenant_mode
+            if tenant_mode.current_mode() not in (tenant_mode.CLOUD, tenant_mode.HYBRID):
+                return
+        except Exception:
+            pass
+
         # Names of the tests whose results are now released on this order.
         released_tests: list[str] = []
         for it in (order.items or []):

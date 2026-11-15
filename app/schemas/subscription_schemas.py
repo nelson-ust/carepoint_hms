@@ -36,6 +36,13 @@ class SubscriptionPlanReadSchema(BaseModel):
     has_dietary: bool
     has_ambulance: bool
     has_compliance: bool
+    has_mortuary: bool = True
+    has_dental: bool = False
+    has_eye: bool = False
+    has_ortho: bool = False
+    has_dental: bool = False
+    has_eye: bool = False
+    has_ortho: bool = False
     
     is_active: bool
 
@@ -49,6 +56,10 @@ class TenantSubscriptionReadSchema(BaseModel):
     start_date: datetime
     end_date: Optional[datetime] = None
     trial_end_date: Optional[datetime] = None
+    current_period_start: Optional[datetime] = None
+    current_period_end: Optional[datetime] = None
+    billing_interval: Optional[str] = None
+    is_complimentary: bool = False
     auto_renew: bool
     
     plan: Optional[SubscriptionPlanReadSchema] = None
@@ -81,6 +92,7 @@ class SubscriptionPlanCreateSchema(BaseModel):
     has_dietary: bool = False
     has_ambulance: bool = False
     has_compliance: bool = False
+    has_mortuary: bool = True
     
     is_active: bool = True
 
@@ -108,6 +120,10 @@ class SubscriptionPlanUpdateSchema(BaseModel):
     has_dietary: Optional[bool] = None
     has_ambulance: Optional[bool] = None
     has_compliance: Optional[bool] = None
+    has_mortuary: Optional[bool] = None
+    has_dental: Optional[bool] = None
+    has_eye: Optional[bool] = None
+    has_ortho: Optional[bool] = None
     
     is_active: Optional[bool] = None
 

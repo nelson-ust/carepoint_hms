@@ -297,12 +297,13 @@ async def import_tariffs(plan_id: int, actor: Manager, db: Db,
 def list_enrollees(actor: Reader, db: Db,
                    provider_id: Optional[int] = Query(None),
                    plan_id: Optional[int] = Query(None),
+                   patient_id: Optional[int] = Query(None, description="Only this patient's enrollments (HMO-desk eligibility confirmation)."),
                    enrollee_status: Optional[str] = Query(None, alias="status"),
                    search: Optional[str] = Query(None),
                    page: int = Query(1, ge=1), page_size: int = Query(50, ge=1, le=200)):
     from app.services.hmo_plan_service import HmoPlanService
     return {"success": True, **HmoPlanService(db).list_enrollees(
-        provider_id=provider_id, plan_id=plan_id, status=enrollee_status,
+        provider_id=provider_id, plan_id=plan_id, patient_id=patient_id, status=enrollee_status,
         search=search, page=page, page_size=page_size)}
 
 

@@ -251,6 +251,13 @@ class SubscriptionInterval(StringEnum):
     YEARLY = "YEARLY"
 
 
+class PromoCampaignStatus(StringEnum):
+    """Lifecycle of a promotional plan-move campaign (DSTV-style open window)."""
+    ACTIVE = "ACTIVE"
+    REVERTED = "REVERTED"
+    CANCELLED = "CANCELLED"
+
+
 class TwoFactorPurpose(StringEnum):
     LOGIN = "LOGIN"
     PASSWORD_RESET = "PASSWORD_RESET"
@@ -455,6 +462,7 @@ class VisitStatus(StringEnum):
     COMPLETED = "COMPLETED"
     CANCELLED = "CANCELLED"
     ON_HOLD = "ON_HOLD"
+    DECEASED = "DECEASED"
 
 
 class VisitPriority(StringEnum):
@@ -682,6 +690,103 @@ class MaintenanceStatus(StringEnum):
     IN_PROGRESS = "IN_PROGRESS"
     COMPLETED = "COMPLETED"
     CANCELLED = "CANCELLED"
+
+
+class AmbulanceCrewRole(StringEnum):
+    DRIVER = "DRIVER"
+    PARAMEDIC = "PARAMEDIC"
+    EMT = "EMT"
+    NURSE = "NURSE"
+    DOCTOR = "DOCTOR"
+    OTHER = "OTHER"
+
+
+class AmbulanceChargeStatus(StringEnum):
+    PENDING = "PENDING"
+    PAID = "PAID"
+    WAIVED = "WAIVED"
+
+
+# ============================================================
+# MORTUARY / MORGUE MANAGEMENT
+# ============================================================
+
+
+class MortuaryUnitType(StringEnum):
+    """Kind of body-storage unit."""
+    COLD_CHAMBER = "COLD_CHAMBER"
+    FREEZER = "FREEZER"
+    SHELF = "SHELF"
+    OTHER = "OTHER"
+
+
+class MortuaryUnitStatus(StringEnum):
+    """Operational status of a storage unit."""
+    AVAILABLE = "AVAILABLE"
+    PARTIAL = "PARTIAL"
+    FULL = "FULL"
+    OUT_OF_SERVICE = "OUT_OF_SERVICE"
+
+
+class DeceasedSource(StringEnum):
+    """Where the deceased came from."""
+    IN_HOSPITAL = "IN_HOSPITAL"      # died while a patient of this hospital
+    BROUGHT_IN = "BROUGHT_IN"        # body brought from outside
+
+
+class DeceasedStatus(StringEnum):
+    """Lifecycle of a deceased record in the mortuary."""
+    REGISTERED = "REGISTERED"        # logged, not yet placed in storage
+    IN_STORAGE = "IN_STORAGE"        # occupying a storage unit
+    RELEASED = "RELEASED"            # released to next of kin / undertaker
+    TRANSFERRED = "TRANSFERRED"      # moved to another facility
+
+
+class AutopsyType(StringEnum):
+    CLINICAL = "CLINICAL"
+    MEDICO_LEGAL = "MEDICO_LEGAL"
+
+
+class AutopsyStatus(StringEnum):
+    REQUESTED = "REQUESTED"
+    SCHEDULED = "SCHEDULED"
+    COMPLETED = "COMPLETED"
+    CANCELLED = "CANCELLED"
+
+
+class EmbalmingStatus(StringEnum):
+    PENDING = "PENDING"
+    COMPLETED = "COMPLETED"
+
+
+class MortuaryEffectStatus(StringEnum):
+    HELD = "HELD"
+    RELEASED = "RELEASED"
+
+
+class MortuaryChargeType(StringEnum):
+    STORAGE = "STORAGE"
+    EMBALMING = "EMBALMING"
+    AUTOPSY = "AUTOPSY"
+    BODY_PREP = "BODY_PREP"
+    MORTUARY_FEE = "MORTUARY_FEE"
+    OTHER = "OTHER"
+
+
+class MortuaryChargeStatus(StringEnum):
+    PENDING = "PENDING"
+    PAID = "PAID"
+    WAIVED = "WAIVED"
+
+
+class MortuaryPaymentMethod(StringEnum):
+    CASH = "CASH"
+    POS = "POS"
+    TRANSFER = "TRANSFER"
+    CARD = "CARD"
+    HMO = "HMO"
+    WAIVER = "WAIVER"
+    OTHER = "OTHER"
 
 
 class InsurancePolicyStatus(StringEnum):
@@ -2447,3 +2552,155 @@ class TelemedicineSenderRole(StringEnum):
     CLINICIAN = "CLINICIAN"
     PATIENT = "PATIENT"
     SYSTEM = "SYSTEM"
+
+
+
+# ============================================================
+# DATA PROTECTION / NDPA (Nigeria Data Protection Act 2023)
+# ============================================================
+
+
+class LawfulBasis(StringEnum):
+    CONSENT = "CONSENT"
+    CONTRACT = "CONTRACT"
+    LEGAL_OBLIGATION = "LEGAL_OBLIGATION"
+    VITAL_INTEREST = "VITAL_INTEREST"
+    PUBLIC_INTEREST = "PUBLIC_INTEREST"
+    LEGITIMATE_INTEREST = "LEGITIMATE_INTEREST"
+
+
+class ConsentType(StringEnum):
+    DATA_PROCESSING = "DATA_PROCESSING"
+    DATA_SHARING = "DATA_SHARING"
+    MARKETING = "MARKETING"
+    RESEARCH = "RESEARCH"
+    CROSS_BORDER_TRANSFER = "CROSS_BORDER_TRANSFER"
+
+
+class ConsentStatus(StringEnum):
+    GRANTED = "GRANTED"
+    WITHDRAWN = "WITHDRAWN"
+
+
+class DataSubjectRequestType(StringEnum):
+    ACCESS = "ACCESS"
+    RECTIFICATION = "RECTIFICATION"
+    ERASURE = "ERASURE"
+    RESTRICTION = "RESTRICTION"
+    PORTABILITY = "PORTABILITY"
+    OBJECTION = "OBJECTION"
+
+
+class DataSubjectRequestStatus(StringEnum):
+    RECEIVED = "RECEIVED"
+    IN_PROGRESS = "IN_PROGRESS"
+    COMPLETED = "COMPLETED"
+    REJECTED = "REJECTED"
+
+
+class DataBreachSeverity(StringEnum):
+    LOW = "LOW"
+    MEDIUM = "MEDIUM"
+    HIGH = "HIGH"
+    CRITICAL = "CRITICAL"
+
+
+class DataBreachStatus(StringEnum):
+    OPEN = "OPEN"
+    CONTAINED = "CONTAINED"
+    RESOLVED = "RESOLVED"
+
+
+# ============================================================
+# DENTAL CLINIC
+# ============================================================
+
+
+class DentalToothCondition(StringEnum):
+    HEALTHY = "HEALTHY"
+    CARIES = "CARIES"
+    FILLED = "FILLED"
+    CROWN = "CROWN"
+    ROOT_CANAL = "ROOT_CANAL"
+    BRIDGE = "BRIDGE"
+    IMPLANT = "IMPLANT"
+    EXTRACTED = "EXTRACTED"
+    MISSING = "MISSING"
+    IMPACTED = "IMPACTED"
+    FRACTURED = "FRACTURED"
+    MOBILE = "MOBILE"
+    SEALANT = "SEALANT"
+    TO_EXTRACT = "TO_EXTRACT"
+    TO_FILL = "TO_FILL"
+
+
+class DentalProcedureStatus(StringEnum):
+    PLANNED = "PLANNED"
+    IN_PROGRESS = "IN_PROGRESS"
+    COMPLETED = "COMPLETED"
+    CANCELLED = "CANCELLED"
+
+
+# ============================================================
+# EYE / OPHTHALMOLOGY CLINIC
+# ============================================================
+
+
+class SpectacleLensType(StringEnum):
+    SINGLE_VISION = "SINGLE_VISION"
+    BIFOCAL = "BIFOCAL"
+    PROGRESSIVE = "PROGRESSIVE"
+    READING = "READING"
+    DISTANCE = "DISTANCE"
+    OTHER = "OTHER"
+
+
+# ============================================================
+# ORTHOPAEDICS CLINIC
+# ============================================================
+
+
+class OrthoLaterality(StringEnum):
+    LEFT = "LEFT"
+    RIGHT = "RIGHT"
+    BILATERAL = "BILATERAL"
+    CENTRAL = "CENTRAL"
+    NOT_APPLICABLE = "NOT_APPLICABLE"
+
+
+class OrthoProcedureStatus(StringEnum):
+    PLANNED = "PLANNED"
+    IN_PROGRESS = "IN_PROGRESS"
+    COMPLETED = "COMPLETED"
+    CANCELLED = "CANCELLED"
+
+
+# ============================================================
+# TENANT DEPLOYMENT TOPOLOGY
+# ============================================================
+
+
+class DeploymentModel(StringEnum):
+    """How a hospital's infrastructure is provisioned and hosted.
+
+    * ON_PREMISE      -- the hospital hosts the full stack on its own servers.
+    * CLOUD_DEDICATED -- a dedicated cloud stack (backend, database, frontend
+                         and storage) provisioned specifically for the
+                         hospital; behaves like on-premise for provisioning.
+    * CLOUD_PLATFORM  -- the hospital shares the platform's backend / frontend
+                         infrastructure; only its tenant database is
+                         provisioned and managed for it.
+    """
+
+    ON_PREMISE = "ON_PREMISE"
+    CLOUD_DEDICATED = "CLOUD_DEDICATED"
+    CLOUD_PLATFORM = "CLOUD_PLATFORM"
+
+
+class TenantIncentiveType(StringEnum):
+    """SaaS-admin granted incentives on a tenant's subscription."""
+
+    SUBSCRIPTION_EXTENSION = "SUBSCRIPTION_EXTENSION"
+    COMPLIMENTARY_SUBSCRIPTION = "COMPLIMENTARY_SUBSCRIPTION"
+    TRIAL_EXTENSION = "TRIAL_EXTENSION"
+

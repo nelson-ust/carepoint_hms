@@ -51,6 +51,7 @@ from app.api.v1.endpoints.two_factor_routes import router as two_factor_router
 from app.api.v1.endpoints.tenant_routes import router as tenant_router
 from app.api.v1.endpoints.tenant_settings_routes import router as tenant_settings_router
 from app.api.v1.endpoints.tenant_module_routes import router as tenant_module_router
+from app.api.v1.endpoints.promo_plan_routes import router as promo_plan_router
 from app.api.v1.endpoints.tenant_domain_routes import router as tenant_domain_router
 from app.api.v1.endpoints.tenant_job_routes import router as tenant_job_router
 from app.api.v1.endpoints.support_access_routes import router as support_access_router
@@ -165,6 +166,8 @@ from app.api.v1.endpoints.consultation_routes import router as consultation_rout
 from app.api.v1.endpoints.diagnosis_routes import router as diagnosis_router
 from app.api.v1.endpoints.referral_routes import router as referral_router
 from app.api.v1.endpoints.interoperability_routes import router as interoperability_router
+from app.api.v1.endpoints.license_routes import router as license_router
+from app.api.v1.endpoints.deployment_routes import router as deployment_router
 from app.api.v1.endpoints.meal_routes import router as meal_router
 
 # Laboratory
@@ -195,6 +198,12 @@ from app.api.v1.endpoints.ambulance_routes import (
     router as ambulance_router,
     dispatch_router as ambulance_dispatch_router,
 )
+from app.api.v1.endpoints.mortuary_routes import router as mortuary_router
+from app.api.v1.endpoints.dental_routes import router as dental_router
+from app.api.v1.endpoints.eye_routes import router as eye_router
+from app.api.v1.endpoints.ortho_routes import router as ortho_router
+from app.api.v1.endpoints.data_protection_routes import router as data_protection_router
+from app.api.v1.endpoints.ambulance_ext_routes import router as ambulance_ext_router
 from app.api.v1.endpoints.notification_routes import router as notification_router
 from app.api.v1.endpoints.staff_portal_message_routes import router as staff_portal_message_router
 from app.api.v1.endpoints.patient_broadcast_routes import router as patient_broadcast_router
@@ -259,6 +268,7 @@ api_router = APIRouter()
 # Authentication & RBAC
 api_router.include_router(tenant_router)
 api_router.include_router(tenant_module_router)
+api_router.include_router(promo_plan_router)
 api_router.include_router(tenant_domain_router)
 api_router.include_router(tenant_job_router)
 api_router.include_router(support_access_router)
@@ -361,6 +371,8 @@ api_router.include_router(consultation_router)
 api_router.include_router(diagnosis_router)
 api_router.include_router(referral_router)
 api_router.include_router(interoperability_router)
+api_router.include_router(license_router)
+api_router.include_router(deployment_router)
 api_router.include_router(meal_router)
 
 # Laboratory
@@ -391,6 +403,18 @@ api_router.include_router(appointment_router)
 # Ambulance / dispatch — Stage 15
 api_router.include_router(ambulance_router)
 api_router.include_router(ambulance_dispatch_router)
+
+# Mortuary / morgue management
+api_router.include_router(mortuary_router)
+api_router.include_router(dental_router)
+api_router.include_router(eye_router)
+api_router.include_router(ortho_router)
+
+# Data Protection / NDPA
+api_router.include_router(data_protection_router)
+
+# Ambulance — extended EMS processes
+api_router.include_router(ambulance_ext_router)
 # Notifications + direct messages — Stage 17
 api_router.include_router(notification_router)
 api_router.include_router(staff_portal_message_router)

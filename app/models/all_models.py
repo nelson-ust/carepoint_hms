@@ -77,6 +77,26 @@ from app.core.enums import (
     AdmissionStatus,
     AmbulanceDispatchStatus,
     AmbulanceStatus,
+    AmbulanceCrewRole,
+    AmbulanceChargeStatus,
+    MortuaryUnitType,
+    MortuaryUnitStatus,
+    DeceasedSource,
+    DeceasedStatus,
+    AutopsyType,
+    AutopsyStatus,
+    EmbalmingStatus,
+    MortuaryEffectStatus,
+    MortuaryChargeType,
+    MortuaryChargeStatus,
+    MortuaryPaymentMethod,
+    LawfulBasis,
+    ConsentType,
+    ConsentStatus,
+    DataSubjectRequestType,
+    DataSubjectRequestStatus,
+    DataBreachSeverity,
+    DataBreachStatus,
     AnaesthesiaType,
     AppointmentStatus,
     ApprovalApproverKind,
@@ -185,6 +205,7 @@ from app.core.enums import (
     WarehouseJobStatus,
     WarehouseRefreshStrategy,
     SubscriptionStatus,
+    PromoCampaignStatus,
     SubscriptionInterval,
     SubscriptionInvoiceStatus,
     SubscriptionPaymentStatus,
@@ -242,6 +263,11 @@ from app.core.enums import (
     TrainingStatus,
     OnboardingInvitationStatus,
     OnboardingDocumentType,
+    DentalToothCondition,
+    DentalProcedureStatus,
+    SpectacleLensType,
+    OrthoLaterality,
+    OrthoProcedureStatus,
 )
 
 
@@ -2598,6 +2624,29 @@ class Invoice(TenantTable):
     billing: Mapped[Optional["Billing"]] = relationship(back_populates="invoices")
     payer: Mapped[Optional["Payer"]] = relationship()
 
+    # --- Display helpers surfaced by InvoiceReadSchema (cashier registry) ---
+    @property
+    def patient_name(self) -> Optional[str]:
+        p = self.patient
+        if p is None:
+            return None
+        return " ".join(part for part in [p.first_name, p.last_name] if part) or None
+
+    @property
+    def hospital_number(self) -> Optional[str]:
+        p = self.patient
+        return getattr(p, "hospital_number", None) if p is not None else None
+
+    @property
+    def visit_code(self) -> Optional[str]:
+        v = self.visit
+        return getattr(v, "visit_code", None) if v is not None else None
+
+    @property
+    def payer_name(self) -> Optional[str]:
+        py = self.payer
+        return getattr(py, "name", None) if py is not None else None
+
     items: Mapped[list["InvoiceItem"]] = relationship(
         back_populates="invoice",
         cascade="all, delete-orphan",
@@ -4036,6 +4085,10 @@ class SubscriptionPlan(MasterTable):
     has_dietary: Mapped[bool] = mapped_column(Boolean, default=False)
     has_ambulance: Mapped[bool] = mapped_column(Boolean, default=False)
     has_compliance: Mapped[bool] = mapped_column(Boolean, default=False)
+    has_mortuary: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
+    has_dental: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    has_eye: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    has_ortho: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
 
 
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
@@ -4251,6 +4304,9 @@ class TenantSubscription(MasterTable):
     next_invoice_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
 
     auto_renew: Mapped[bool] = mapped_column(Boolean, default=True)
+    #: True when the current period was granted free by a SaaS admin
+    #: (complimentary / incentive). No invoice is issued while this holds.
+    is_complimentary: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false", nullable=False)
 
     # Deferred (downgrade) plan change. When a tenant downgrades, the new plan
     # does not take effect immediately: we record the target here and apply it
@@ -4452,6 +4508,19 @@ class Tenant(MasterTable):
 
     status: Mapped[UserStatus] = mapped_column(Enum(UserStatus), default=UserStatus.ACTIVE)
     is_provisioned: Mapped[bool] = mapped_column(Boolean, default=False)
+    #: Per-hospital deployment mode: "cloud" (online), "onprem" (offline) or
+    #: "hybrid". NULL -> fall back to the global DEFAULT_DEPLOYMENT_MODE.
+    deployment_mode: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    #: Commercial deployment topology chosen at registration:
+    #: "ON_PREMISE", "CLOUD_DEDICATED" or "CLOUD_PLATFORM" (see DeploymentModel).
+    #: Decides what infrastructure is provisioned: a dedicated full stack
+    #: (on-premise / cloud-dedicated) versus only a tenant database on the
+    #: shared platform (cloud-platform).
+    deployment_model: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)
+    #: When set and in the future, a SaaS admin has granted this tenant's admin
+    #: temporary "renewal login" — they may sign in and reach only the
+    #: billing/renewal paths despite an expired/inactive subscription.
+    renewal_access_until: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     # Last provisioning failure (cleared on success). Lets the SaaS console
     # surface WHY a tenant is stuck instead of leaving it in limbo.
     provisioning_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
@@ -9629,3 +9698,735 @@ class WhatsAppMessage(TenantTable):
 from app.models import finance_models  # noqa: E402,F401  (intentional tail import)
 from app.models import home_health_models  # noqa: E402,F401  (home-health tables)
 from app.models import telemedicine_models  # noqa: E402,F401  (telemedicine tables)
+
+
+# ============================================================
+# MORTUARY / MORGUE MANAGEMENT
+# ============================================================
+
+
+class MortuaryUnit(TenantTable):
+    """
+    A body-storage unit in the mortuary (a cold chamber, freezer or shelf).
+
+    ``capacity`` is the number of bodies the unit can hold; live occupancy is
+    derived from the count of non-released :class:`DeceasedRecord` rows pointing
+    at this unit. ``status`` is maintained by the service as bodies are
+    assigned and released.
+    """
+
+    code: Mapped[str] = mapped_column(String(50), unique=True, nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(150), nullable=False)
+    unit_type: Mapped[MortuaryUnitType] = mapped_column(
+        Enum(MortuaryUnitType),
+        default=MortuaryUnitType.COLD_CHAMBER,
+        nullable=False,
+        index=True,
+    )
+    capacity: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    status: Mapped[MortuaryUnitStatus] = mapped_column(
+        Enum(MortuaryUnitStatus),
+        default=MortuaryUnitStatus.AVAILABLE,
+        nullable=False,
+        index=True,
+    )
+    location: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    temperature_c: Mapped[Optional[Decimal]] = mapped_column(Numeric(6, 2), nullable=True)
+    notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    records: Mapped[list["DeceasedRecord"]] = relationship(back_populates="mortuary_unit")
+
+
+class DeceasedRecord(TenantTable):
+    """
+    A deceased person under the hospital's mortuary care.
+
+    Two sources are supported (``source``):
+
+    * ``IN_HOSPITAL`` — a patient who died in the hospital. ``patient_id`` /
+      ``visit_id`` link the record back to the clinical encounter and the
+      demographic fields are usually copied from the patient.
+    * ``BROUGHT_IN`` — a body brought from outside. There may be no patient
+      record, so the demographic and "brought-in" fields stand alone.
+    """
+
+    tag_number: Mapped[str] = mapped_column(String(50), unique=True, nullable=False, index=True)
+    source: Mapped[DeceasedSource] = mapped_column(
+        Enum(DeceasedSource),
+        default=DeceasedSource.IN_HOSPITAL,
+        nullable=False,
+        index=True,
+    )
+    status: Mapped[DeceasedStatus] = mapped_column(
+        Enum(DeceasedStatus),
+        default=DeceasedStatus.REGISTERED,
+        nullable=False,
+        index=True,
+    )
+
+    # Optional clinical linkage (populated for IN_HOSPITAL deaths).
+    patient_id: Mapped[Optional[int]] = mapped_column(ForeignKey("patient.id"), nullable=True, index=True)
+    visit_id: Mapped[Optional[int]] = mapped_column(ForeignKey("visit.id"), nullable=True, index=True)
+
+    # Deceased demographics (denormalised so BROUGHT_IN records are self-contained).
+    deceased_name: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    gender: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    age_years: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    date_of_death: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    cause_of_death: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    # Brought-in context.
+    brought_in_by: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    brought_in_contact: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    from_location: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+
+    # Next of kin.
+    next_of_kin_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    next_of_kin_phone: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    next_of_kin_relationship: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+
+    # Medico-legal.
+    is_police_case: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    police_reference: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+
+    # Storage.
+    mortuary_unit_id: Mapped[Optional[int]] = mapped_column(ForeignKey("mortuary_unit.id"), nullable=True, index=True)
+    received_by_staff_id: Mapped[Optional[int]] = mapped_column(ForeignKey("staff_profile.id"), nullable=True)
+    registered_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
+
+    # Release / discharge.
+    released_to_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    released_to_relationship: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    released_to_contact: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    release_authorized_by: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    released_by_staff_id: Mapped[Optional[int]] = mapped_column(ForeignKey("staff_profile.id"), nullable=True)
+    released_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    release_notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    patient: Mapped[Optional["Patient"]] = relationship()
+    visit: Mapped[Optional["Visit"]] = relationship()
+    mortuary_unit: Mapped[Optional["MortuaryUnit"]] = relationship(back_populates="records")
+    received_by_staff: Mapped[Optional["StaffProfile"]] = relationship(foreign_keys=[received_by_staff_id])
+    released_by_staff: Mapped[Optional["StaffProfile"]] = relationship(foreign_keys=[released_by_staff_id])
+
+
+class PatientDeathRecord(TenantTable):
+    """
+    Clinical record that a patient has died, captured against the visit in which
+    death was declared. This is the hand-off point to the mortuary: a death may
+    be recorded on its own and later deposited, or deposited immediately.
+
+    ``is_deposited`` / ``deceased_record_id`` track whether the body has been
+    taken into the mortuary (a :class:`DeceasedRecord` exists for it). The
+    "deceased patients not yet deposited" list the mortuary intake screen shows
+    is exactly the set of non-deleted rows with ``is_deposited`` false.
+    """
+
+    patient_id: Mapped[int] = mapped_column(ForeignKey("patient.id"), nullable=False, index=True)
+    visit_id: Mapped[int] = mapped_column(ForeignKey("visit.id"), nullable=False, index=True)
+    declared_by_staff_id: Mapped[Optional[int]] = mapped_column(ForeignKey("staff_profile.id"), nullable=True)
+
+    date_of_death: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    cause_of_death: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    place_of_death: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    is_deposited: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, index=True)
+    deceased_record_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("deceased_record.id"), nullable=True, index=True
+    )
+
+    patient: Mapped["Patient"] = relationship()
+    visit: Mapped["Visit"] = relationship()
+    declared_by_staff: Mapped[Optional["StaffProfile"]] = relationship(foreign_keys=[declared_by_staff_id])
+    deceased_record: Mapped[Optional["DeceasedRecord"]] = relationship(foreign_keys=[deceased_record_id])
+
+
+# ============================================================
+# MORTUARY — STANDARD OPERATIONS (sub-records of a deceased record)
+# ============================================================
+
+
+class MortuaryAutopsy(TenantTable):
+    """Post-mortem / autopsy for a deceased record."""
+
+    deceased_record_id: Mapped[int] = mapped_column(ForeignKey("deceased_record.id"), nullable=False, index=True)
+    autopsy_type: Mapped[AutopsyType] = mapped_column(Enum(AutopsyType), default=AutopsyType.CLINICAL, nullable=False)
+    status: Mapped[AutopsyStatus] = mapped_column(Enum(AutopsyStatus), default=AutopsyStatus.REQUESTED, nullable=False, index=True)
+    requested_by: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    pathologist: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    scheduled_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    performed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    findings: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    cause_of_death_confirmed: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    consent_by: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    deceased_record: Mapped["DeceasedRecord"] = relationship()
+
+
+class MortuaryEmbalming(TenantTable):
+    """Embalming / body-preparation record."""
+
+    deceased_record_id: Mapped[int] = mapped_column(ForeignKey("deceased_record.id"), nullable=False, index=True)
+    status: Mapped[EmbalmingStatus] = mapped_column(Enum(EmbalmingStatus), default=EmbalmingStatus.PENDING, nullable=False, index=True)
+    embalmer_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    method: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    chemicals_used: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    embalmed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    deceased_record: Mapped["DeceasedRecord"] = relationship()
+
+
+class MortuaryEffect(TenantTable):
+    """Personal belongings / effects of the deceased, held and later released."""
+
+    deceased_record_id: Mapped[int] = mapped_column(ForeignKey("deceased_record.id"), nullable=False, index=True)
+    status: Mapped[MortuaryEffectStatus] = mapped_column(Enum(MortuaryEffectStatus), default=MortuaryEffectStatus.HELD, nullable=False, index=True)
+    item: Mapped[str] = mapped_column(String(255), nullable=False)
+    quantity: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    received_from: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
+    released_to: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    released_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    deceased_record: Mapped["DeceasedRecord"] = relationship()
+
+
+class MortuaryViewing(TenantTable):
+    """Family / visitor viewing log for a body."""
+
+    deceased_record_id: Mapped[int] = mapped_column(ForeignKey("deceased_record.id"), nullable=False, index=True)
+    visitor_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    relationship_to_deceased: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    contact: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    viewed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
+    authorized_by: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    deceased_record: Mapped["DeceasedRecord"] = relationship()
+
+
+class MortuaryCharge(TenantTable):
+    """A billable mortuary charge (daily storage, embalming, autopsy, etc.)."""
+
+    deceased_record_id: Mapped[int] = mapped_column(ForeignKey("deceased_record.id"), nullable=False, index=True)
+    charge_type: Mapped[MortuaryChargeType] = mapped_column(Enum(MortuaryChargeType), default=MortuaryChargeType.OTHER, nullable=False, index=True)
+    status: Mapped[MortuaryChargeStatus] = mapped_column(Enum(MortuaryChargeStatus), default=MortuaryChargeStatus.PENDING, nullable=False, index=True)
+    description: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    quantity: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=1, nullable=False)
+    unit_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), default=0, nullable=False)
+    amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), default=0, nullable=False)
+    charged_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
+    notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    deceased_record: Mapped["DeceasedRecord"] = relationship()
+
+
+class MortuaryDeathCertificate(TenantTable):
+    """Death certificate issued for a deceased record."""
+
+    deceased_record_id: Mapped[int] = mapped_column(ForeignKey("deceased_record.id"), nullable=False, unique=True, index=True)
+    certificate_number: Mapped[str] = mapped_column(String(100), unique=True, nullable=False, index=True)
+    issued_by: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    issued_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
+    cause_of_death: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    manner_of_death: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    place_of_death: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    certifying_doctor: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    deceased_record: Mapped["DeceasedRecord"] = relationship()
+
+
+class MortuaryPayment(TenantTable):
+    """A payment received against a deceased record's mortuary bill."""
+
+    deceased_record_id: Mapped[int] = mapped_column(ForeignKey("deceased_record.id"), nullable=False, index=True)
+    amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    method: Mapped[MortuaryPaymentMethod] = mapped_column(Enum(MortuaryPaymentMethod), default=MortuaryPaymentMethod.CASH, nullable=False, index=True)
+    reference: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    payer_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    received_by_staff_id: Mapped[Optional[int]] = mapped_column(ForeignKey("staff_profile.id"), nullable=True)
+    paid_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
+    notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    deceased_record: Mapped["DeceasedRecord"] = relationship()
+
+
+# ============================================================
+# DATA PROTECTION / NDPA
+# ============================================================
+
+
+class ConsentRecord(TenantTable):
+    """A data-subject's consent for a specific processing purpose (NDPA)."""
+
+    patient_id: Mapped[Optional[int]] = mapped_column(ForeignKey("patient.id"), nullable=True, index=True)
+    subject_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    consent_type: Mapped[ConsentType] = mapped_column(Enum(ConsentType), nullable=False, index=True)
+    status: Mapped[ConsentStatus] = mapped_column(Enum(ConsentStatus), default=ConsentStatus.GRANTED, nullable=False, index=True)
+    lawful_basis: Mapped[LawfulBasis] = mapped_column(Enum(LawfulBasis), default=LawfulBasis.CONSENT, nullable=False)
+    purpose: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    policy_version: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    method: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)  # PORTAL / PAPER / VERBAL / STAFF
+    granted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
+    withdrawn_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    captured_by_staff_id: Mapped[Optional[int]] = mapped_column(ForeignKey("staff_profile.id"), nullable=True)
+    notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    patient: Mapped[Optional["Patient"]] = relationship()
+
+
+class DataSubjectRequest(TenantTable):
+    """An NDPA data-subject rights request (access, erasure, portability, …)."""
+
+    patient_id: Mapped[Optional[int]] = mapped_column(ForeignKey("patient.id"), nullable=True, index=True)
+    subject_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    subject_contact: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    request_type: Mapped[DataSubjectRequestType] = mapped_column(Enum(DataSubjectRequestType), nullable=False, index=True)
+    status: Mapped[DataSubjectRequestStatus] = mapped_column(Enum(DataSubjectRequestStatus), default=DataSubjectRequestStatus.RECEIVED, nullable=False, index=True)
+    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
+    due_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    handler_staff_id: Mapped[Optional[int]] = mapped_column(ForeignKey("staff_profile.id"), nullable=True)
+    details: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    resolution_notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    patient: Mapped[Optional["Patient"]] = relationship()
+
+
+class DataBreach(TenantTable):
+    """A personal-data breach register entry with NDPC 72-hour tracking."""
+
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    severity: Mapped[DataBreachSeverity] = mapped_column(Enum(DataBreachSeverity), default=DataBreachSeverity.MEDIUM, nullable=False, index=True)
+    status: Mapped[DataBreachStatus] = mapped_column(Enum(DataBreachStatus), default=DataBreachStatus.OPEN, nullable=False, index=True)
+    discovered_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
+    notify_due_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    data_categories: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    subjects_affected: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    ndpc_notified: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    ndpc_notified_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    subjects_notified: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    remediation: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    reported_by_staff_id: Mapped[Optional[int]] = mapped_column(ForeignKey("staff_profile.id"), nullable=True)
+
+
+class ProcessingActivity(TenantTable):
+    """Record of Processing Activity (RoPA) under the NDPA."""
+
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    purpose: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    lawful_basis: Mapped[LawfulBasis] = mapped_column(Enum(LawfulBasis), default=LawfulBasis.CONSENT, nullable=False)
+    data_categories: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    data_subjects: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    recipients: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    retention_period: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    cross_border: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    cross_border_detail: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    owner: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    is_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+
+
+class DataProtectionSetting(TenantTable):
+    """Tenant-level data-protection configuration (DPO, policy, retention)."""
+
+    dpo_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    dpo_email: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    dpo_phone: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    privacy_policy_version: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    privacy_policy_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    privacy_policy_text: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    retention_months: Mapped[Optional[int]] = mapped_column(Integer, default=84, nullable=True)
+    breach_notify_hours: Mapped[int] = mapped_column(Integer, default=72, nullable=False)
+    dsr_response_days: Mapped[int] = mapped_column(Integer, default=30, nullable=False)
+    ndpc_registered: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    updated_by_staff_id: Mapped[Optional[int]] = mapped_column(ForeignKey("staff_profile.id"), nullable=True)
+
+
+# ============================================================
+# AMBULANCE — EXTENDED EMS PROCESSES
+# ============================================================
+
+
+class AmbulanceCrew(TenantTable):
+    """A crew member assigned to an ambulance dispatch (driver, paramedic, EMT…)."""
+
+    dispatch_id: Mapped[int] = mapped_column(ForeignKey("ambulance_dispatch.id"), nullable=False, index=True)
+    role: Mapped[AmbulanceCrewRole] = mapped_column(Enum(AmbulanceCrewRole), default=AmbulanceCrewRole.PARAMEDIC, nullable=False)
+    staff_profile_id: Mapped[Optional[int]] = mapped_column(ForeignKey("staff_profile.id"), nullable=True)
+    member_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    dispatch: Mapped["AmbulanceDispatch"] = relationship()
+    staff_profile: Mapped[Optional["StaffProfile"]] = relationship()
+
+
+class AmbulancePatientCareReport(TenantTable):
+    """Patient care report (PCR) — the clinical record of a dispatch/transport."""
+
+    dispatch_id: Mapped[int] = mapped_column(ForeignKey("ambulance_dispatch.id"), nullable=False, unique=True, index=True)
+    chief_complaint: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    blood_pressure: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    pulse_rate: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    temperature_celsius: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2), nullable=True)
+    oxygen_saturation: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    respiratory_rate: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    interventions: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    medications_given: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    condition_on_handover: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    receiving_facility: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    receiving_staff: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    narrative: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    recorded_by_staff_id: Mapped[Optional[int]] = mapped_column(ForeignKey("staff_profile.id"), nullable=True)
+
+    dispatch: Mapped["AmbulanceDispatch"] = relationship()
+
+
+class AmbulanceFuelLog(TenantTable):
+    """Fuel / consumption log for an ambulance."""
+
+    ambulance_id: Mapped[int] = mapped_column(ForeignKey("ambulance.id"), nullable=False, index=True)
+    logged_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
+    litres: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False)
+    cost: Mapped[Optional[Decimal]] = mapped_column(Numeric(14, 2), nullable=True)
+    odometer: Mapped[Optional[Decimal]] = mapped_column(Numeric(14, 2), nullable=True)
+    station: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    filled_by: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    ambulance: Mapped["Ambulance"] = relationship()
+
+
+class AmbulanceTripCharge(TenantTable):
+    """A billable charge for an ambulance dispatch/transport."""
+
+    dispatch_id: Mapped[int] = mapped_column(ForeignKey("ambulance_dispatch.id"), nullable=False, index=True)
+    description: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), default=0, nullable=False)
+    status: Mapped[AmbulanceChargeStatus] = mapped_column(Enum(AmbulanceChargeStatus), default=AmbulanceChargeStatus.PENDING, nullable=False, index=True)
+    payer_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    charged_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
+    notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    dispatch: Mapped["AmbulanceDispatch"] = relationship()
+
+
+# ============================================================
+# DENTAL CLINIC — odontogram, examination & procedures
+# ============================================================
+
+
+class DentalChart(TenantTable):
+    """Dental examination / odontogram for a patient encounter."""
+
+    patient_id: Mapped[int] = mapped_column(ForeignKey("patient.id"), nullable=False, index=True)
+    visit_id: Mapped[Optional[int]] = mapped_column(ForeignKey("visit.id"), nullable=True, index=True)
+    consultation_id: Mapped[Optional[int]] = mapped_column(ForeignKey("consultation.id"), nullable=True, index=True)
+    clinician_staff_id: Mapped[Optional[int]] = mapped_column(ForeignKey("staff_profile.id"), nullable=True, index=True)
+
+    status: Mapped[EncounterStatus] = mapped_column(Enum(EncounterStatus), default=EncounterStatus.OPEN, nullable=False)
+    numbering_system: Mapped[str] = mapped_column(String(20), default="FDI", nullable=False)
+    dentition: Mapped[str] = mapped_column(String(20), default="PERMANENT", nullable=False)
+
+    chief_complaint: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    oral_hygiene: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    occlusion_note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    soft_tissue_note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    periodontal_summary: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    xray_findings: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    examined_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    patient: Mapped["Patient"] = relationship()
+    teeth: Mapped[list["DentalToothRecord"]] = relationship(
+        back_populates="chart", cascade="all, delete-orphan")
+    procedures: Mapped[list["DentalProcedure"]] = relationship(back_populates="chart")
+
+
+class DentalToothRecord(TenantTable):
+    """A single tooth's charted condition within a dental chart."""
+
+    chart_id: Mapped[int] = mapped_column(ForeignKey("dental_chart.id"), nullable=False, index=True)
+    patient_id: Mapped[int] = mapped_column(ForeignKey("patient.id"), nullable=False, index=True)
+    tooth_number: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    condition: Mapped[DentalToothCondition] = mapped_column(
+        Enum(DentalToothCondition), default=DentalToothCondition.HEALTHY, nullable=False)
+    surfaces: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    mobility: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    chart: Mapped["DentalChart"] = relationship(back_populates="teeth")
+
+
+class DentalProcedure(TenantTable):
+    """A planned or completed dental treatment (optionally tooth-specific)."""
+
+    patient_id: Mapped[int] = mapped_column(ForeignKey("patient.id"), nullable=False, index=True)
+    visit_id: Mapped[Optional[int]] = mapped_column(ForeignKey("visit.id"), nullable=True, index=True)
+    chart_id: Mapped[Optional[int]] = mapped_column(ForeignKey("dental_chart.id"), nullable=True, index=True)
+    tooth_number: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
+    surfaces: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+
+    procedure_code: Mapped[Optional[str]] = mapped_column(String(50), nullable=True, index=True)
+    procedure_name: Mapped[str] = mapped_column(String(200), nullable=False)
+    status: Mapped[DentalProcedureStatus] = mapped_column(
+        Enum(DentalProcedureStatus), default=DentalProcedureStatus.PLANNED, nullable=False, index=True)
+    cost: Mapped[Optional[Decimal]] = mapped_column(Numeric(14, 2), nullable=True)
+    planned_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+    performed_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+    performed_by_staff_id: Mapped[Optional[int]] = mapped_column(ForeignKey("staff_profile.id"), nullable=True, index=True)
+    note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    chart: Mapped[Optional["DentalChart"]] = relationship(back_populates="procedures")
+
+
+# ============================================================
+# EYE / OPHTHALMOLOGY CLINIC — exam & spectacle prescriptions
+# ============================================================
+
+
+class EyeExam(TenantTable):
+    """Ophthalmic / optometric examination for a patient encounter."""
+
+    patient_id: Mapped[int] = mapped_column(ForeignKey("patient.id"), nullable=False, index=True)
+    visit_id: Mapped[Optional[int]] = mapped_column(ForeignKey("visit.id"), nullable=True, index=True)
+    consultation_id: Mapped[Optional[int]] = mapped_column(ForeignKey("consultation.id"), nullable=True, index=True)
+    clinician_staff_id: Mapped[Optional[int]] = mapped_column(ForeignKey("staff_profile.id"), nullable=True, index=True)
+
+    status: Mapped[EncounterStatus] = mapped_column(Enum(EncounterStatus), default=EncounterStatus.OPEN, nullable=False)
+    chief_complaint: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    history_note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    external_note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    # Visual acuity (free-form, e.g. "6/6", "20/20", "CF", "HM")
+    va_dist_unaided_od: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    va_dist_unaided_os: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    va_dist_aided_od: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    va_dist_aided_os: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    va_near_od: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    va_near_os: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    pinhole_od: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    pinhole_os: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+
+    # Objective refraction
+    ref_sphere_od: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2), nullable=True)
+    ref_sphere_os: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2), nullable=True)
+    ref_cyl_od: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2), nullable=True)
+    ref_cyl_os: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2), nullable=True)
+    ref_axis_od: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    ref_axis_os: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    ref_add_od: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2), nullable=True)
+    ref_add_os: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2), nullable=True)
+
+    # Intraocular pressure
+    iop_od: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 1), nullable=True)
+    iop_os: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 1), nullable=True)
+    iop_method: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+
+    # Segment findings
+    anterior_od: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    anterior_os: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    posterior_od: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    posterior_os: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    impression: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    plan_note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    examined_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    patient: Mapped["Patient"] = relationship()
+    prescriptions: Mapped[list["SpectaclePrescription"]] = relationship(back_populates="exam")
+
+
+class SpectaclePrescription(TenantTable):
+    """A dispensed spectacle (glasses) prescription."""
+
+    patient_id: Mapped[int] = mapped_column(ForeignKey("patient.id"), nullable=False, index=True)
+    exam_id: Mapped[Optional[int]] = mapped_column(ForeignKey("eye_exam.id"), nullable=True, index=True)
+    prescriber_staff_id: Mapped[Optional[int]] = mapped_column(ForeignKey("staff_profile.id"), nullable=True, index=True)
+    prescribed_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+
+    od_sphere: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2), nullable=True)
+    od_cyl: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2), nullable=True)
+    od_axis: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    od_add: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2), nullable=True)
+    os_sphere: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2), nullable=True)
+    os_cyl: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2), nullable=True)
+    os_axis: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    os_add: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2), nullable=True)
+
+    pd: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    lens_type: Mapped[SpectacleLensType] = mapped_column(
+        Enum(SpectacleLensType), default=SpectacleLensType.SINGLE_VISION, nullable=False)
+    usage: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    exam: Mapped[Optional["EyeExam"]] = relationship(back_populates="prescriptions")
+
+
+# ============================================================
+# ORTHOPAEDICS CLINIC — assessment, fractures, immobilisation, procedures
+# ============================================================
+
+
+class OrthoAssessment(TenantTable):
+    """Musculoskeletal / orthopaedic assessment for a patient encounter."""
+
+    patient_id: Mapped[int] = mapped_column(ForeignKey("patient.id"), nullable=False, index=True)
+    visit_id: Mapped[Optional[int]] = mapped_column(ForeignKey("visit.id"), nullable=True, index=True)
+    consultation_id: Mapped[Optional[int]] = mapped_column(ForeignKey("consultation.id"), nullable=True, index=True)
+    clinician_staff_id: Mapped[Optional[int]] = mapped_column(ForeignKey("staff_profile.id"), nullable=True, index=True)
+
+    status: Mapped[EncounterStatus] = mapped_column(Enum(EncounterStatus), default=EncounterStatus.OPEN, nullable=False)
+    region: Mapped[Optional[str]] = mapped_column(String(150), nullable=True)
+    laterality: Mapped[OrthoLaterality] = mapped_column(
+        Enum(OrthoLaterality), default=OrthoLaterality.NOT_APPLICABLE, nullable=False)
+
+    chief_complaint: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    mechanism_of_injury: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    injury_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+    pain_score: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+
+    rom_note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    neurovascular_note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    special_tests: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    provisional_diagnosis: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    imaging_modality: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    imaging_findings: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    plan_note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    examined_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    patient: Mapped["Patient"] = relationship()
+    fractures: Mapped[list["OrthoFracture"]] = relationship(
+        back_populates="assessment", cascade="all, delete-orphan")
+    immobilisations: Mapped[list["OrthoImmobilisation"]] = relationship(
+        back_populates="assessment", cascade="all, delete-orphan")
+    procedures: Mapped[list["OrthoProcedure"]] = relationship(back_populates="assessment")
+
+
+class OrthoFracture(TenantTable):
+    """A fracture recorded under an orthopaedic assessment."""
+
+    assessment_id: Mapped[int] = mapped_column(ForeignKey("ortho_assessment.id"), nullable=False, index=True)
+    patient_id: Mapped[int] = mapped_column(ForeignKey("patient.id"), nullable=False, index=True)
+    bone: Mapped[str] = mapped_column(String(120), nullable=False)
+    side: Mapped[OrthoLaterality] = mapped_column(
+        Enum(OrthoLaterality), default=OrthoLaterality.NOT_APPLICABLE, nullable=False)
+    pattern: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    classification: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
+    is_open: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    is_displaced: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    management: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    assessment: Mapped["OrthoAssessment"] = relationship(back_populates="fractures")
+
+
+class OrthoImmobilisation(TenantTable):
+    """A cast / splint / brace / traction episode."""
+
+    assessment_id: Mapped[int] = mapped_column(ForeignKey("ortho_assessment.id"), nullable=False, index=True)
+    patient_id: Mapped[int] = mapped_column(ForeignKey("patient.id"), nullable=False, index=True)
+    device_type: Mapped[str] = mapped_column(String(60), nullable=False)
+    body_part: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
+    side: Mapped[OrthoLaterality] = mapped_column(
+        Enum(OrthoLaterality), default=OrthoLaterality.NOT_APPLICABLE, nullable=False)
+    applied_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+    expected_removal_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+    removed_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+    note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    assessment: Mapped["OrthoAssessment"] = relationship(back_populates="immobilisations")
+
+
+class OrthoProcedure(TenantTable):
+    """A planned or completed orthopaedic procedure (reduction, fixation, injection...)."""
+
+    patient_id: Mapped[int] = mapped_column(ForeignKey("patient.id"), nullable=False, index=True)
+    visit_id: Mapped[Optional[int]] = mapped_column(ForeignKey("visit.id"), nullable=True, index=True)
+    assessment_id: Mapped[Optional[int]] = mapped_column(ForeignKey("ortho_assessment.id"), nullable=True, index=True)
+
+    procedure_code: Mapped[Optional[str]] = mapped_column(String(50), nullable=True, index=True)
+    procedure_name: Mapped[str] = mapped_column(String(200), nullable=False)
+    laterality: Mapped[OrthoLaterality] = mapped_column(
+        Enum(OrthoLaterality), default=OrthoLaterality.NOT_APPLICABLE, nullable=False)
+    status: Mapped[OrthoProcedureStatus] = mapped_column(
+        Enum(OrthoProcedureStatus), default=OrthoProcedureStatus.PLANNED, nullable=False, index=True)
+    cost: Mapped[Optional[Decimal]] = mapped_column(Numeric(14, 2), nullable=True)
+    planned_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+    performed_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+    performed_by_staff_id: Mapped[Optional[int]] = mapped_column(ForeignKey("staff_profile.id"), nullable=True, index=True)
+    note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    assessment: Mapped[Optional["OrthoAssessment"]] = relationship(back_populates="procedures")
+
+
+class TenantIncentive(MasterTable):
+    """An incentive a SaaS admin granted a tenant: a subscription extension,
+    a complimentary (free) subscription window or a trial extension. Append-only
+    audit of goodwill / commercial concessions for the SaaS console."""
+
+    tenant_id: Mapped[int] = mapped_column(ForeignKey("tenant.id"), nullable=False, index=True)
+    subscription_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("tenant_subscription.id"), nullable=True, index=True)
+    incentive_type: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
+    days: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    months: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    plan_code: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    granted_by_user_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    granted_by_name: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    effective_from: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    effective_until: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    tenant: Mapped["Tenant"] = relationship()
+
+
+class PromoPlanCampaign(MasterTable):
+    """A promotional plan-move campaign (DSTV "open window" strategy).
+
+    A SaaS admin temporarily moves a set of tenants onto a higher plan, free of
+    charge, for a fixed window. When ``ends_at`` passes the campaign is reverted
+    automatically (scheduler) and every member tenant returns to its original
+    plan. An announcement email is sent to each member tenant on launch."""
+
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    target_plan_id: Mapped[int] = mapped_column(
+        ForeignKey("subscription_plan.id"), nullable=False, index=True)
+    status: Mapped[PromoCampaignStatus] = mapped_column(
+        Enum(PromoCampaignStatus), default=PromoCampaignStatus.ACTIVE, index=True)
+    starts_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    ends_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    reverted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    tenant_count: Mapped[int] = mapped_column(Integer, default=0)
+    created_by_user_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    created_by_name: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+
+    target_plan: Mapped["SubscriptionPlan"] = relationship()
+
+
+class PromoPlanMember(MasterTable):
+    """One tenant's enrolment in a :class:`PromoPlanCampaign`. Stores the plan to
+    restore on revert so the move is fully reversible."""
+
+    campaign_id: Mapped[int] = mapped_column(
+        ForeignKey("promo_plan_campaign.id"), nullable=False, index=True)
+    tenant_id: Mapped[int] = mapped_column(ForeignKey("tenant.id"), nullable=False, index=True)
+    subscription_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("tenant_subscription.id"), nullable=True, index=True)
+    original_plan_id: Mapped[int] = mapped_column(
+        ForeignKey("subscription_plan.id"), nullable=False)
+    original_is_complimentary: Mapped[bool] = mapped_column(Boolean, default=False)
+    is_reverted: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    reverted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    tenant: Mapped["Tenant"] = relationship()
+

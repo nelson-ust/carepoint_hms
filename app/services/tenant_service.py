@@ -41,6 +41,10 @@ from app.models.all_models import (
     TenantSubscription,
     User,
 )
+from app.schemas.tenant_schemas import (
+    normalize_deployment_model,
+    deployment_mode_for_model,
+)
 from app.schemas.tenant_schemas import TenantRegistrationSchema
 from app.services.aws_s3_service import S3Service
 
@@ -177,6 +181,9 @@ class TenantService:
             (payload.billing_email or payload.admin_email).strip().lower()
         )
 
+        # Normalise the chosen deployment topology (defaults to shared platform).
+        _dm = normalize_deployment_model(getattr(payload, "deployment_model", None))
+
         tenant = Tenant(
             name=payload.tenant_name,
             code=payload.tenant_code.lower(),
@@ -191,6 +198,8 @@ class TenantService:
             billing_contact_name=payload.billing_contact_name,
             billing_address=payload.billing_address,
             tax_id=payload.tax_id,
+            deployment_model=_dm,
+            deployment_mode=deployment_mode_for_model(_dm),
         )
         self.db.add(tenant)
         try:
@@ -219,21 +228,19 @@ class TenantService:
         # 5. Create Subscription. If the plan offers a trial, start in TRIALING
         # state so the tenant can use the platform during the trial window.
         now = datetime.now(timezone.utc)
-        trial_days = int(getattr(plan, "trial_days", 0) or 0)
-        if trial_days > 0:
-            sub_status = SubscriptionStatus.TRIALING
-            trial_end = now + timedelta(days=trial_days)
-            period_start = now
-            period_end = trial_end
-            next_invoice = trial_end
-        else:
-            sub_status = SubscriptionStatus.PENDING
-            trial_end = None
-            # Establish the first billing window from the plan interval so
-            # the billing service knows when to issue the first invoice.
-            period_start = now
-            period_end = _period_end_for_plan(plan, period_start)
-            next_invoice = now  # invoice immediately for paid plans on activation
+        # Every new tenant gets a full-feature free trial (platform default,
+        # 30 days). During the trial they have access to EVERY module
+        # regardless of the plan selected; the selected plan only governs what
+        # they pay for once the trial ends. A plan may lengthen the trial via
+        # ``trial_days`` but never shorten the platform minimum.
+        from app.core.config import settings as _settings
+        trial_days = max(int(getattr(_settings, "TRIAL_PERIOD_DAYS", 30) or 30),
+                         int(getattr(plan, "trial_days", 0) or 0))
+        sub_status = SubscriptionStatus.TRIALING
+        trial_end = now + timedelta(days=trial_days)
+        period_start = now
+        period_end = trial_end
+        next_invoice = trial_end  # first invoice is issued when the trial ends
 
         subscription = TenantSubscription(
             tenant_id=tenant.id,
@@ -769,6 +776,14 @@ class TenantService:
 
         self._record_step(tenant, "Provisioning Started",
                           f"Approval accepted for {tenant.name}", reset=True)
+        _model = (tenant.deployment_model or "CLOUD_PLATFORM").upper()
+        _is_platform = _model == "CLOUD_PLATFORM"
+        _topo_label = {
+            "ON_PREMISE": "On-premise (dedicated full stack)",
+            "CLOUD_DEDICATED": "Cloud - dedicated (isolated backend, DB, frontend & storage)",
+            "CLOUD_PLATFORM": "Cloud - platform (shared infrastructure, dedicated tenant database only)",
+        }.get(_model, _model)
+        self._record_step(tenant, "Deployment Topology", _topo_label)
         self._record_step(tenant, "Create Database",
                           f"Creating {tenant.db_name}", "IN_PROGRESS")
 
@@ -859,19 +874,29 @@ class TenantService:
         if subscription and subscription.status == SubscriptionStatus.PENDING:
             subscription.status = SubscriptionStatus.ACTIVE
 
-        # 7. Provision AWS S3 Bucket (best-effort).
-        try:
-            s3_service = S3Service()
-            bucket_name = s3_service.create_tenant_bucket(tenant.code)
-            if bucket_name:
-                tenant.aws_s3_bucket_name = bucket_name
-                self._record_step(tenant, "Provision S3 Bucket", f"Bucket {bucket_name} ready")
-            else:
-                self._record_step(tenant, "Provision S3 Bucket",
-                                  s3_service.last_error or "S3 disabled in this environment", "SKIPPED")
-        except Exception as exc:
-            logger.warning(f"S3 bucket provisioning skipped for {tenant.code}: {exc}")
-            self._record_step(tenant, "Provision S3 Bucket", str(exc)[:300], "SKIPPED")
+        # 7. Provision storage. A dedicated deployment (on-premise or
+        # cloud-dedicated) gets its own isolated bucket; a platform-shared
+        # tenant uses the platform's shared storage (prefixed by tenant code),
+        # so no dedicated bucket is created.
+        if _is_platform:
+            self._record_step(
+                tenant, "Provision Storage",
+                "Shared platform storage (no dedicated bucket) - objects namespaced by tenant code",
+                "SKIPPED")
+        else:
+            try:
+                s3_service = S3Service.for_tenant(tenant)
+                bucket_name = s3_service.create_tenant_bucket(tenant.code)
+                if bucket_name:
+                    tenant.aws_s3_bucket_name = bucket_name
+                    self._record_step(tenant, "Provision Storage",
+                                      f"Dedicated bucket {bucket_name} ready")
+                else:
+                    self._record_step(tenant, "Provision Storage",
+                                      s3_service.last_error or "Storage disabled in this environment", "SKIPPED")
+            except Exception as exc:
+                logger.warning(f"Storage provisioning skipped for {tenant.code}: {exc}")
+                self._record_step(tenant, "Provision Storage", str(exc)[:300], "SKIPPED")
 
         # 8. Notify the applicant. We do this BEFORE clearing
         # ``onboarding_data`` because the approval email re-uses the
@@ -912,10 +937,13 @@ class TenantService:
                 "message": f"S3 bucket '{tenant.aws_s3_bucket_name}' is already provisioned for {tenant.name}.",
             }
 
-        s3_service = S3Service()
+        s3_service = S3Service.for_tenant(tenant)
         if not s3_service.is_enabled:
+            backend = "MinIO" if getattr(s3_service, "backend", "s3") == "minio" else "AWS S3"
+            hint = ("Set MINIO_ENDPOINT_URL / MINIO_ACCESS_KEY_ID / MINIO_SECRET_ACCESS_KEY"
+                    if backend == "MinIO" else "Set S3_ENABLED=true and the AWS credentials")
             raise BadRequestError(
-                message="S3 storage is disabled on the platform (S3_ENABLED=false). Enable it before provisioning buckets."
+                message=f"{backend} storage is not configured for this deployment. {hint} before provisioning buckets."
             )
         bucket_name = s3_service.ensure_tenant_bucket(self.db, tenant)
         if not bucket_name:
@@ -1372,6 +1400,211 @@ class TenantService:
         logger.info(f"Tenant {tenant.code} changed plan to {plan_code}")
 
         return new_sub
+
+    # ------------------------------------------------------------------
+    # SaaS-admin incentives: extend a subscription / grant free time
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _add_months(base: datetime, months: int) -> datetime:
+        if not months:
+            return base
+        month_index = base.month - 1 + months
+        year = base.year + month_index // 12
+        month = month_index % 12 + 1
+        import calendar
+        day = min(base.day, calendar.monthrange(year, month)[1])
+        return base.replace(year=year, month=month, day=day)
+
+    def _current_subscription(self, tenant_id: int) -> Optional[TenantSubscription]:
+        return (
+            self.db.query(TenantSubscription)
+            .filter(
+                TenantSubscription.tenant_id == tenant_id,
+                TenantSubscription.status.in_([
+                    SubscriptionStatus.ACTIVE, SubscriptionStatus.TRIALING,
+                    SubscriptionStatus.PENDING, SubscriptionStatus.PAST_DUE,
+                    SubscriptionStatus.EXPIRED, SubscriptionStatus.SUSPENDED,
+                ]),
+            )
+            .order_by(TenantSubscription.id.desc())
+            .first()
+        )
+
+    def _record_incentive(self, *, tenant_id, subscription_id, incentive_type,
+                          days, months, reason, actor, effective_from,
+                          effective_until, plan_code=None):
+        from app.models.all_models import TenantIncentive
+        name = None
+        if actor is not None:
+            fn = getattr(actor, "first_name", None)
+            ln = getattr(actor, "last_name", None)
+            name = (f"{fn} {ln}".strip() if (fn or ln) else getattr(actor, "username", None))
+        inc = TenantIncentive(
+            tenant_id=tenant_id, subscription_id=subscription_id,
+            incentive_type=incentive_type, days=days or None, months=months or None,
+            plan_code=plan_code, reason=reason,
+            granted_by_user_id=getattr(actor, "id", None), granted_by_name=name,
+            effective_from=effective_from, effective_until=effective_until,
+        )
+        self.db.add(inc)
+        return inc
+
+    def extend_subscription(self, tenant_id: int, *, days: int = 0, months: int = 0,
+                            reason: Optional[str] = None, actor=None) -> TenantSubscription:
+        """Push a tenant's current subscription (or trial) further into the
+        future by ``days`` and/or ``months`` without charging them."""
+        days = max(0, int(days or 0))
+        months = max(0, int(months or 0))
+        if days == 0 and months == 0:
+            raise BadRequestError(message="Specify a number of days and/or months to extend.")
+        sub = self._current_subscription(tenant_id)
+        if not sub:
+            raise NotFoundError(message="No subscription found for this tenant.")
+
+        now = datetime.now(timezone.utc)
+        is_trial = sub.status == SubscriptionStatus.TRIALING
+
+        def _norm(dt):
+            if dt is None:
+                return None
+            return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+        if is_trial:
+            base = _norm(sub.trial_end_date) or _norm(sub.current_period_end) or now
+        else:
+            base = _norm(sub.current_period_end) or _norm(sub.end_date) or now
+        if base < now:
+            base = now
+        new_end = self._add_months(base, months) + timedelta(days=days)
+
+        if is_trial:
+            sub.trial_end_date = new_end
+            itype = "TRIAL_EXTENSION"
+        else:
+            itype = "SUBSCRIPTION_EXTENSION"
+            # A lapsed subscription being extended becomes usable again.
+            if sub.status in (SubscriptionStatus.EXPIRED, SubscriptionStatus.PAST_DUE,
+                              SubscriptionStatus.SUSPENDED):
+                sub.status = SubscriptionStatus.ACTIVE
+            if sub.end_date is not None:
+                sub.end_date = new_end
+        sub.current_period_end = new_end
+        sub.next_invoice_at = new_end
+
+        self._record_incentive(
+            tenant_id=tenant_id, subscription_id=sub.id, incentive_type=itype,
+            days=days, months=months, reason=reason, actor=actor,
+            effective_from=now, effective_until=new_end,
+        )
+        self.db.commit()
+        self.db.refresh(sub)
+        try:
+            from app.core import tenant_cache
+            tenant_cache.invalidate(self.get_tenant(tenant_id))
+        except Exception:
+            pass
+        logger.info("Extended subscription for tenant %s by %sd/%sm -> %s",
+                    tenant_id, days, months, new_end)
+        return sub
+
+    def grant_complimentary_subscription(self, tenant_id: int, *, days: int = 0,
+                                         months: int = 0, reason: Optional[str] = None,
+                                         plan_code: Optional[str] = None,
+                                         actor=None) -> TenantSubscription:
+        """Give a tenant a free (complimentary) subscription window. The tenant
+        gets active, unbilled access for the period; the first invoice is
+        deferred until the free window ends."""
+        days = max(0, int(days or 0))
+        months = max(0, int(months or 0))
+        if days == 0 and months == 0:
+            raise BadRequestError(message="Specify a number of days and/or months of free access.")
+
+        now = datetime.now(timezone.utc)
+        comp_end = self._add_months(now, months) + timedelta(days=days)
+
+        # Resolve the target plan from an explicit plan_code first.
+        plan = None
+        if plan_code:
+            plan = self.db.query(SubscriptionPlan).filter(
+                SubscriptionPlan.code == plan_code.upper().strip(),
+                SubscriptionPlan.is_active == True,  # noqa: E712
+            ).first()
+            if not plan:
+                raise NotFoundError(message=f"Active subscription plan '{plan_code}' not found.")
+
+        sub = self._current_subscription(tenant_id)
+        if not sub:
+            # ANY tenant can be granted a complimentary window — if they have no
+            # live subscription (e.g. a lapsed/terminated one, or none at all),
+            # create one so the goodwill grant always works. Pick the plan from
+            # plan_code, else the tenant's most recent subscription plan, else
+            # the cheapest active plan on the platform.
+            if plan is None:
+                latest = (self.db.query(TenantSubscription)
+                          .filter(TenantSubscription.tenant_id == tenant_id)
+                          .order_by(TenantSubscription.id.desc()).first())
+                if latest is not None:
+                    plan = self.db.query(SubscriptionPlan).filter(
+                        SubscriptionPlan.id == latest.plan_id).first()
+                if plan is None:
+                    plan = (self.db.query(SubscriptionPlan)
+                            .filter(SubscriptionPlan.is_active == True)  # noqa: E712
+                            .order_by(SubscriptionPlan.price.asc()).first())
+                if plan is None:
+                    raise NotFoundError(
+                        message="No active subscription plan is available to grant.")
+            sub = TenantSubscription(
+                tenant_id=tenant_id, plan_id=plan.id,
+                status=SubscriptionStatus.ACTIVE, start_date=now,
+                current_period_start=now, auto_renew=True,
+            )
+            self.db.add(sub)
+            self.db.flush()  # assign sub.id for the incentive FK
+        elif plan is not None:
+            sub.plan_id = plan.id
+
+        sub.status = SubscriptionStatus.ACTIVE
+        sub.is_complimentary = True
+        sub.trial_end_date = None
+        sub.current_period_start = now
+        sub.current_period_end = comp_end
+        sub.next_invoice_at = comp_end  # bill only after the free window
+        sub.auto_renew = True
+
+        self._record_incentive(
+            tenant_id=tenant_id, subscription_id=sub.id,
+            incentive_type="COMPLIMENTARY_SUBSCRIPTION", days=days, months=months,
+            reason=reason, actor=actor, effective_from=now, effective_until=comp_end,
+            plan_code=plan_code,
+        )
+        self.db.commit()
+        self.db.refresh(sub)
+        try:
+            from app.core import tenant_cache
+            tenant_cache.invalidate(self.get_tenant(tenant_id))
+        except Exception:
+            pass
+        logger.info("Granted complimentary subscription to tenant %s until %s",
+                    tenant_id, comp_end)
+        return sub
+
+    def list_incentives(self, tenant_id: int) -> list:
+        from app.models.all_models import TenantIncentive
+        rows = (self.db.query(TenantIncentive)
+                .filter(TenantIncentive.tenant_id == tenant_id,
+                        TenantIncentive.is_deleted.is_(False))
+                .order_by(TenantIncentive.id.desc()).all())
+        out = []
+        for r in rows:
+            out.append({
+                "id": r.id, "incentive_type": r.incentive_type,
+                "days": r.days, "months": r.months, "plan_code": r.plan_code,
+                "reason": r.reason, "granted_by": r.granted_by_name,
+                "effective_from": r.effective_from.isoformat() if r.effective_from else None,
+                "effective_until": r.effective_until.isoformat() if r.effective_until else None,
+                "created_at": r.date_created.isoformat() if getattr(r, "date_created", None) else None,
+            })
+        return out
 
     def run_migrations_all_tenants(self) -> dict:
         """

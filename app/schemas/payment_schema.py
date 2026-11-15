@@ -5,7 +5,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.core.enums import PaymentMethod
 
@@ -18,6 +18,11 @@ class PaymentReceiveSchema(BaseModel):
     membership_card_id: Optional[int] = None
     received_by_staff_id: Optional[int] = None
     transaction_metadata: Optional[dict[str, Any]] = None
+    external_reference: Optional[str] = Field(
+        None, max_length=100,
+        description="Cashier-entered reference for the tender (POS slip no., transfer reference, cheque no.). "
+                    "Stored in transaction_metadata.external_reference.",
+    )
     note: Optional[str] = Field(None, max_length=2000)
 
     @field_validator("payment_method")
@@ -58,8 +63,17 @@ class PaymentReadSchema(BaseModel):
     currency: str
     paid_at: Optional[datetime] = None
     transaction_metadata: Optional[dict[str, Any]] = None
+    external_reference: Optional[str] = None
     note: Optional[str] = None
     created_at: Optional[datetime] = None
+
+    @model_validator(mode="after")
+    def _lift_external_reference(self):
+        if self.external_reference is None and isinstance(self.transaction_metadata, dict):
+            ref = self.transaction_metadata.get("external_reference")
+            if ref:
+                self.external_reference = str(ref)
+        return self
 
 
 class PaymentListResponseSchema(BaseModel):
