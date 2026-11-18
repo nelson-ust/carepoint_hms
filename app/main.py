@@ -618,25 +618,8 @@ if APP_ENV.lower() not in {"production", "staging"}:
         APP_ENV,
     )
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=ALLOW_ORIGINS,
-    allow_origin_regex=ALLOW_ORIGIN_REGEX,
-    allow_credentials=_CORS_ALLOW_CREDENTIALS,
-    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allow_headers=[
-        "Authorization",
-        "Content-Type",
-        "X-Tenant",
-        "X-Tenant-Code",
-        "X-Tenant-Domain",
-        "X-Request-ID",
-        "Accept",
-        "Origin",
-    ],
-    expose_headers=["X-Request-ID", "X-RateLimit-Remaining", "X-RateLimit-Reset", "Content-Disposition", "X-Backup-Filename"],
-    max_age=600,
-)
+# NOTE: CORSMiddleware is registered LAST (below) so it is the OUTERMOST
+# middleware — see the comment next to TenantMiddleware.
 
 # HTTPS enforcement + security headers. CSP is Swagger-UI-friendly by
 # default, and the docs paths (/docs, /redoc, /openapi.json) are CSP-exempt
@@ -684,8 +667,34 @@ if ENABLE_AUTH_MIDDLEWARE:
         ignore_invalid_token=True,
     )
 
-# Tenant resolution middleware must be added last so it is the first to run on request
+# Tenant resolution middleware runs before auth/routes (inner to CORS).
 app.add_middleware(TenantMiddleware)
+
+# CORS MUST be the OUTERMOST middleware (added last). Only then do responses
+# produced *inside* the stack — including TenantMiddleware's own
+# tenant-resolution error responses (404/403/503) and CORS preflight — carry
+# Access-Control-Allow-Origin headers. Otherwise the browser blocks those
+# responses and the SPA reports a misleading "cannot reach the API server"
+# network error (e.g. when switching from a SaaS login to a tenant login).
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=ALLOW_ORIGINS,
+    allow_origin_regex=ALLOW_ORIGIN_REGEX,
+    allow_credentials=_CORS_ALLOW_CREDENTIALS,
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=[
+        "Authorization",
+        "Content-Type",
+        "X-Tenant",
+        "X-Tenant-Code",
+        "X-Tenant-Domain",
+        "X-Request-ID",
+        "Accept",
+        "Origin",
+    ],
+    expose_headers=["X-Request-ID", "X-RateLimit-Remaining", "X-RateLimit-Reset", "Content-Disposition", "X-Backup-Filename"],
+    max_age=600,
+)
 
 
 # =============================================================================

@@ -432,4 +432,22 @@ class TenantMiddleware(BaseHTTPMiddleware):
                 },
             )
 
+        except Exception as exc:  # pragma: no cover - never let resolution crash the request
+            # Any other failure while resolving the tenant (cache, decode, etc.)
+            # is returned as a clean JSON response. Because CORS is the outermost
+            # middleware this response still carries CORS headers, so the SPA
+            # shows a real message instead of a "cannot reach the server" error.
+            logger.exception("Unexpected error during tenant resolution: %s", exc)
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "success": False,
+                    "message": "The service is temporarily unavailable. Please try again shortly.",
+                    "error_code": "TENANT_RESOLUTION_ERROR",
+                    "detail": {
+                        "action": "If this persists, contact your system administrator.",
+                    },
+                },
+            )
+
         return await call_next(request)
