@@ -276,6 +276,7 @@ PERMISSION_SEEDS: list[dict[str, Any]] = [
     # Backup & SaaS Admin
     {"code": "BACKUP_READ", "name": "Read backups", "module": "BACKUP"},
     {"code": "BACKUP_CREATE", "name": "Create backups", "module": "BACKUP"},
+    {"code": "BACKUP_RESTORE", "name": "Restore database from a backup", "module": "BACKUP"},
     {"code": "SETTING_UPDATE", "name": "Update system settings", "module": "SETTING"},
     {"code": "SaaS_ADMIN", "name": "SaaS Administrative Access", "module": "SaaS"},
 
@@ -333,7 +334,7 @@ ROLE_PERMISSION_MAP: dict[str, list[str]] = {
         "USER_READ", "USER_CREATE", "USER_UPDATE", "USER_MANAGE_STATUS", "USER_MANAGE_ROLES",
         "ROLE_READ", "ROLE_CREATE", "ROLE_UPDATE", "ROLE_ASSIGN_PERMISSIONS",
         "PERMISSION_READ", "FACILITY_READ", "FACILITY_CREATE", "FACILITY_UPDATE",
-        "BACKUP_READ", "BACKUP_CREATE", "SETTING_UPDATE", "REPORT_READ", "REPORT_GENERATE",
+        "BACKUP_READ", "BACKUP_CREATE", "BACKUP_RESTORE", "SETTING_UPDATE", "REPORT_READ", "REPORT_GENERATE",
         "TEMPLATE_READ", "TEMPLATE_CREATE", "INTEGRATION_READ", "INTEGRATION_UPDATE",
         "PORTAL_MESSAGE_READ", "NOTIFICATION_READ", "NOTIFICATION_MANAGE",
         "MESSAGE_SEND", "NOTIFICATION_DISPATCH",
@@ -1259,6 +1260,24 @@ def seed_all(db: Session, *, create_default_admin: bool = True) -> None:
     seed_departments(db)
     seed_service_delivery_points(db)
     seed_request_types(db)
+    # Seed the default care pathways so every provisioned tenant ships with a
+    # ready-to-use visit flow: the Standard Outpatient Pathway and the
+    # dedicated Eye Clinic Pathway, both built from the tenant's seeded
+    # service delivery points. Idempotent and best-effort — a failure here must
+    # never abort provisioning.
+    try:
+        # reconcile (not just seed) so re-provisioned tenants whose standard
+        # pathway is still the pristine default are upgraded to the current
+        # canonical sequence; customized templates are left untouched.
+        from app.seeds.clinical_flow_seed import reconcile_standard_visit_flow
+        reconcile_standard_visit_flow(db)
+    except Exception:
+        logger.warning("Standard visit flow seed/reconcile skipped.", exc_info=True)
+    try:
+        from app.seeds.eye_flow_seed import seed_eye_visit_flow
+        seed_eye_visit_flow(db)
+    except Exception:
+        logger.warning("Eye Clinic visit flow seed skipped.", exc_info=True)
     try:
         from app.seeds.payroll_seed import seed_payroll_lookups
         seed_payroll_lookups(db)
@@ -1914,7 +1933,7 @@ if __name__ == "__main__":
                                 conn_str = decrypt_string(tenant.db_connection_string)
                                 # Target database name
                                 target_db_name = make_url(conn_str).database
-                                target_identifier = f'"{target_db_name}"'
+                                target_identifier = _quote_identifier(target_db_name)
                                 
                                 # Connect to admin/postgres db
                                 admin_url = make_url(MASTER_DATABASE_URL).set(database="postgres")
@@ -1922,11 +1941,14 @@ if __name__ == "__main__":
                                 
                                 logger.info(f"Dropping tenant database: {target_db_name}")
                                 with admin_engine.connect() as conn:
-                                    conn.execute(text(f"""
-                                        SELECT pg_terminate_backend(pid) 
-                                        FROM pg_stat_activity 
-                                        WHERE datname = '{target_db_name}' AND pid <> pg_backend_pid()
-                                    """))
+                                    conn.execute(
+                                        text(
+                                            "SELECT pg_terminate_backend(pid) "
+                                            "FROM pg_stat_activity "
+                                            "WHERE datname = :dbname AND pid <> pg_backend_pid()"
+                                        ),
+                                        {"dbname": target_db_name},
+                                    )
                                     conn.execute(text(f"DROP DATABASE IF EXISTS {target_identifier}"))
                                 admin_engine.dispose()
                             except Exception as e:

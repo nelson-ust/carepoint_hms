@@ -28,7 +28,7 @@ from app.repositories.prescription_repository import PrescriptionRepository
 from app.repositories.stock_movement_repository import StockMovementRepository
 from app.schemas.dispense_schema import DispenseCreateSchema
 from app.utils.charge_capture import has_outstanding_charges
-from app.utils.payment_policy import requires_pre_payment
+from app.utils.payment_policy import visit_requires_pre_payment
 from app.utils.security_event_util import record_security_event
 from app.utils.visit_routing import validate_visit_sdp_activity
 
@@ -88,7 +88,7 @@ class DispenseService:
 
         # Pre-paid policy guard: if pharmacy is pre-paid and the prescription
         # has unsettled pharmacy charges, refuse.
-        if requires_pre_payment(source="PHARMACY"):
+        if visit_requires_pre_payment(self.db, visit_id=prescription.visit_id, source="PHARMACY"):
             if has_outstanding_charges(self.db, visit_id=prescription.visit_id, source_prefix="PRESCRIPTION_ITEM"):
                 raise BadRequestError(
                     message="Outstanding pharmacy charges must be settled before dispensing.",

@@ -111,6 +111,27 @@ def make_client(backend: Optional[str] = None):
     return boto3.client("s3", config=_FAST_FAIL, **_client_kwargs(backend))
 
 
+def make_transfer_client(backend: Optional[str] = None):
+    """Build a boto3 S3 client tuned for large object transfers (backups).
+
+    Unlike :data:`_FAST_FAIL`, this uses a generous read timeout and more
+    retries so a multi-megabyte upload is not aborted by the 10s fast-fail
+    window (the cause of "Connection was closed before we received a valid
+    response"). AWS uses virtual-hosted addressing (``bucket.s3.region...``),
+    which is the recommended, redirect-free path; MinIO keeps path-style.
+    """
+    backend = backend or active_backend()
+    style = "path" if backend == "minio" else "virtual"
+    cfg = Config(
+        signature_version="s3v4",
+        connect_timeout=10,
+        read_timeout=int(getattr(settings, "BACKUP_UPLOAD_READ_TIMEOUT", 300)),
+        retries={"max_attempts": int(getattr(settings, "BACKUP_UPLOAD_MAX_ATTEMPTS", 5)), "mode": "adaptive"},
+        s3={"addressing_style": style},
+    )
+    return boto3.client("s3", config=cfg, **_client_kwargs(backend))
+
+
 def object_base_url(bucket: str, object_name: str, backend: Optional[str] = None) -> str:
     """Canonical (non-presigned) URL for an object on the active backend."""
     backend = backend or active_backend()

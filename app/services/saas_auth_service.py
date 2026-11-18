@@ -100,6 +100,22 @@ class SaaSAuthService:
         self.db.add(session)
         self.db.commit()
 
+        try:
+            from app.services import audit_service
+
+            audit_service.write_saas_audit(
+                self.db,
+                action="LOGIN",
+                entity_name="SAAS_AUTH",
+                actor_admin_id=admin.id,
+                actor_label=getattr(admin, "email", None) or getattr(admin, "username", None),
+                ip_address=ip_address,
+                user_agent=user_agent,
+                extra_metadata={"two_factor": False},
+            )
+        except Exception:
+            pass
+
         return {
             "success": True,
             "message": "SaaS Admin login successful.",

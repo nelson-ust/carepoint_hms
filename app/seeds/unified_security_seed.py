@@ -98,6 +98,7 @@ ALL_PERMISSIONS: list[dict] = [
     {"code": "PRESCRIPTION_WRITE", "name": "Write prescriptions", "module": "PHARMACY"},
     {"code": "PRESCRIPTION_DISPENSE", "name": "Dispense prescriptions", "module": "PHARMACY"},
     {"code": "PHARMACY_STOCK_MANAGE", "name": "Manage pharmacy stock", "module": "PHARMACY"},
+    {"code": "PHARMACY_SELL", "name": "Record retail / OTC pharmacy sales", "module": "PHARMACY"},
 
     # Billing / Finance
     {"code": "BILLING_READ", "name": "Read billing", "module": "BILLING"},
@@ -231,6 +232,7 @@ ALL_PERMISSIONS: list[dict] = [
     # Backup & SaaS Admin
     {"code": "BACKUP_READ", "name": "Read backups", "module": "BACKUP"},
     {"code": "BACKUP_CREATE", "name": "Create backups", "module": "BACKUP"},
+    {"code": "BACKUP_RESTORE", "name": "Restore database from a backup", "module": "BACKUP"},
     {"code": "SETTING_UPDATE", "name": "Update system settings", "module": "SETTING"},
     {"code": "SaaS_ADMIN", "name": "SaaS Administrative Access", "module": "SaaS"},
 ]
@@ -265,7 +267,7 @@ ROLE_PERMISSIONS: dict[str, list[str]] = {
         "USER_READ", "USER_CREATE", "USER_UPDATE", "USER_MANAGE_STATUS", "USER_MANAGE_ROLES",
         "ROLE_READ", "ROLE_CREATE", "ROLE_UPDATE", "ROLE_ASSIGN_PERMISSIONS",
         "PERMISSION_READ", "FACILITY_READ", "FACILITY_CREATE", "FACILITY_UPDATE",
-        "BACKUP_READ", "BACKUP_CREATE", "SETTING_UPDATE", "REPORT_READ", "REPORT_GENERATE",
+        "BACKUP_READ", "BACKUP_CREATE", "BACKUP_RESTORE", "SETTING_UPDATE", "REPORT_READ", "REPORT_GENERATE",
         "TEMPLATE_READ", "TEMPLATE_CREATE", "INTEGRATION_READ", "INTEGRATION_UPDATE",
         "PATIENT_READ", "PATIENT_CREATE", "PATIENT_UPDATE", "APPOINTMENT_READ",
         "VISIT_READ", "BILLING_READ", "AUDIT_READ", "SECURITY_EVENT_READ",
@@ -292,7 +294,7 @@ ROLE_PERMISSIONS: dict[str, list[str]] = {
         "PATIENT_READ", "VISIT_READ", "LAB_RESULT_ENTER",
     ],
     "PHARMACIST": [
-        "PATIENT_READ", "VISIT_READ", "PRESCRIPTION_DISPENSE", "PHARMACY_STOCK_MANAGE", "INVENTORY_READ",
+        "PATIENT_READ", "VISIT_READ", "PRESCRIPTION_DISPENSE", "PHARMACY_STOCK_MANAGE", "PHARMACY_SELL", "INVENTORY_READ",
     ],
     "BILLING_OFFICER": [
         "PATIENT_READ", "BILLING_READ", "BILLING_CREATE", "INVOICE_ISSUE", "INVOICE_VOID", "PAYMENT_RECEIVE", "PAYMENT_REFUND",

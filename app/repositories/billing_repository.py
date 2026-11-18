@@ -211,13 +211,23 @@ class BillingRepository:
             )
             if match is not None:
                 billable_service_id = match.id
-        if (account_code is None or account_name is None) and billable_service_id is not None:
-            svc = (
-                self.db.query(BillableService)
-                .filter(BillableService.id == billable_service_id)
-                .first()
-            )
+        if account_code is None or account_name is None:
+            svc = None
+            if billable_service_id is not None:
+                svc = (
+                    self.db.query(BillableService)
+                    .filter(BillableService.id == billable_service_id)
+                    .first()
+                )
             acct = getattr(svc, "account", None) if svc is not None else None
+            if acct is None:
+                # No explicit catalog account — resolve a revenue account by
+                # category so the line is never left "unaccounted" (mirrors
+                # charge_capture.add_charge so manual/cashier, dispensing,
+                # invoice and home-order charges all post to finance).
+                from app.utils.charge_capture import resolve_revenue_account
+                category = getattr(svc, "category", None) if svc is not None else None
+                acct = resolve_revenue_account(self.db, category=category)
             if acct is not None:
                 account_code = account_code or acct.code
                 account_name = account_name or acct.name

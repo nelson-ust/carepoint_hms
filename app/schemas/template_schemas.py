@@ -1,5 +1,6 @@
+import json
 from datetime import datetime
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, computed_field, field_validator
 
@@ -90,13 +91,28 @@ class ClinicalTemplateUpdate(BaseModel):
         return v
 
 
+class ClinicalTemplateSectionRead(BaseModel):
+    """
+    Lenient section shape for READ responses.
+
+    Unlike :class:`ClinicalTemplateSection` (used for create/update input,
+    which requires a non-empty title), this tolerates legacy or bulk-seeded
+    rows whose sections may have blank/missing titles or an unexpected shape.
+    Read endpoints must never 500 because historical data doesn't satisfy
+    the write-time rules.
+    """
+
+    title: str = "Untitled section"
+    content: str = ""
+
+
 class ClinicalTemplateRead(BaseModel):
     id: int
     name: str
     description: Optional[str] = None
     specialty: Optional[str] = None
     template_type: str = "SOAP"
-    sections: List[ClinicalTemplateSection] = Field(default_factory=list)
+    sections: List[ClinicalTemplateSectionRead] = Field(default_factory=list)
     usage_count: int = 0
     is_favorite: bool = False
     date_created: Optional[datetime] = None
@@ -109,8 +125,35 @@ class ClinicalTemplateRead(BaseModel):
 
     @field_validator("sections", mode="before")
     @classmethod
-    def _none_sections(cls, v):
-        return v or []
+    def _coerce_sections(cls, v: Any):
+        """Normalize any stored ``sections`` value into a clean list.
+
+        Handles ``None``, a JSON-encoded string (double-encoded columns),
+        non-list values, and individual entries that are plain strings or
+        dicts with missing/blank keys — so one malformed row can never break
+        the whole list response.
+        """
+        if v is None:
+            return []
+        if isinstance(v, str):
+            try:
+                v = json.loads(v)
+            except (ValueError, TypeError):
+                return []
+        if not isinstance(v, (list, tuple)):
+            return []
+        cleaned = []
+        for item in v:
+            if isinstance(item, dict):
+                title = str(item.get("title") or "").strip() or "Untitled section"
+                content = item.get("content")
+                content = "" if content is None else str(content)
+            elif isinstance(item, str):
+                title, content = "Untitled section", item
+            else:
+                continue
+            cleaned.append({"title": title, "content": content})
+        return cleaned
 
     @computed_field  # serialized so the UI can show "N sections" cheaply
     @property

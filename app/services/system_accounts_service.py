@@ -40,10 +40,12 @@ DEFAULT_SYSTEM_ACCOUNTS: dict[str, tuple[str, str, AccountType, str]] = {
     "STAFF_ADV":     ("1450", "Staff Salary Advances", AccountType.ASSET, "OPERATING"),
     # ---- receivables ----
     "PATIENT_AR":    ("1200", "Accounts Receivable — Patients", AccountType.ASSET, "OPERATING"),
+    "CUSTOMER_AR":   ("1230", "Accounts Receivable — Pharmacy Customers", AccountType.ASSET, "OPERATING"),
     "HMO_AR":        ("1210", "Accounts Receivable — HMO / Insurance", AccountType.ASSET, "OPERATING"),
     "CAPITATION_AR": ("1220", "Accounts Receivable — Capitation", AccountType.ASSET, "OPERATING"),
     # ---- revenue ----
     "PATIENT_REVENUE":   ("4000", "Patient Services Revenue", AccountType.REVENUE, "OPERATING"),
+    "PHARMACY_SALES_REVENUE": ("4050", "Pharmacy Sales Revenue", AccountType.REVENUE, "OPERATING"),
     "INSURANCE_REVENUE": ("4100", "Insurance (Fee-for-Service) Revenue", AccountType.REVENUE, "OPERATING"),
     "CAPITATION_INCOME": ("4110", "Capitation Income", AccountType.REVENUE, "OPERATING"),
     # ---- insurance costs ----

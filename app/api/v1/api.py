@@ -108,6 +108,7 @@ from app.api.v1.endpoints.saas_subscription_plan_routes import router as saas_su
 from app.api.v1.endpoints.saas_subscription_status_routes import router as saas_subscription_status_router
 from app.api.v1.endpoints.saas_usage_routes import router as saas_usage_router
 from app.api.v1.endpoints.saas_admin_routes import router as saas_admin_router
+from app.api.v1.endpoints.audit_routes import router as audit_router, saas_router as saas_audit_router
 from app.api.v1.endpoints.integration_routes import router as integration_router
 from app.api.v1.endpoints.integration_public_routes import router as integration_public_router
 from app.api.v1.endpoints.developer_public_routes import router as developer_public_router
@@ -271,6 +272,8 @@ api_router.include_router(tenant_module_router)
 api_router.include_router(promo_plan_router)
 api_router.include_router(tenant_domain_router)
 api_router.include_router(tenant_job_router)
+api_router.include_router(audit_router)
+api_router.include_router(saas_audit_router)
 api_router.include_router(support_access_router)
 api_router.include_router(invitation_router)
 api_router.include_router(subscription_billing_router)

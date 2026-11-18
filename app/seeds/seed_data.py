@@ -201,6 +201,53 @@ DEMO_SERVICE_DELIVERY_POINTS: list[dict[str, Any]] = [
         "department_code": "INPATIENT",
         "queue_prefix": "WRD",
     },
+    # --- Eye Clinic service delivery points (eye-care pathway) ---
+    {
+        "name": "Eye Clinic Reception",
+        "code": "SDP-EYE-REG",
+        "service_point_type": ServicePointType.REGISTRATION.value,
+        "department_code": "OPD",
+        "queue_prefix": "EYE",
+        "supports_appointments": True,
+        "supports_walk_in": True,
+    },
+    {
+        "name": "Vision Screening & Pre-Test",
+        "code": "SDP-EYE-SCREEN",
+        "service_point_type": ServicePointType.TRIAGE.value,
+        "department_code": "OPD",
+        "queue_prefix": "VST",
+    },
+    {
+        "name": "Optometry / Refraction Room",
+        "code": "SDP-EYE-REFRACT",
+        "service_point_type": ServicePointType.CLINIC.value,
+        "department_code": "OPD",
+        "queue_prefix": "REF",
+        "supports_appointments": True,
+    },
+    {
+        "name": "Ophthalmology Consultation",
+        "code": "SDP-EYE-CONSULT",
+        "service_point_type": ServicePointType.CLINIC.value,
+        "department_code": "OPD",
+        "queue_prefix": "OPH",
+        "supports_appointments": True,
+    },
+    {
+        "name": "Ophthalmic Imaging & Diagnostics",
+        "code": "SDP-EYE-DX",
+        "service_point_type": ServicePointType.RADIOLOGY.value,
+        "department_code": "RADIOLOGY",
+        "queue_prefix": "OCT",
+    },
+    {
+        "name": "Optical Dispensing",
+        "code": "SDP-EYE-OPTICAL",
+        "service_point_type": ServicePointType.OTHER.value,
+        "department_code": "PHARMACY",
+        "queue_prefix": "OPT",
+    },
 ]
 
 # Wards (with bed-day pricing) and the beds inside them.

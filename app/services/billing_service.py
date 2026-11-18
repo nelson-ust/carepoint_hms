@@ -60,9 +60,24 @@ class BillableServiceService:
 
     def create(self, payload: BillableServiceCreateSchema) -> BillableService:
         self._validate_account(payload.account_id)
-        s = self.repository.create(**payload.model_dump(exclude_unset=True))
+        data = payload.model_dump(exclude_unset=True)
+        # Every service must carry a revenue account so its charges post to the
+        # GL. When none is chosen, default one by category (REV-* / REV-GEN).
+        if not data.get("account_id"):
+            from app.utils.charge_capture import resolve_revenue_account
+
+            acct = resolve_revenue_account(self.db, category=data.get("category"))
+            if acct is not None:
+                data["account_id"] = acct.id
+        s = self.repository.create(**data)
         self.db.commit()
         return self.repository.get_required_by_id(s.id)
+
+    def backfill_accounts(self) -> dict:
+        """Assign a revenue account (by category) to every service missing one."""
+        from app.utils.charge_capture import backfill_service_accounts
+
+        return {"success": True, **backfill_service_accounts(self.db)}
 
     def update(self, sid: int, payload: BillableServiceUpdateSchema) -> BillableService:
         if payload.account_id is not None:

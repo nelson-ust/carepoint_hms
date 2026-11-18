@@ -717,6 +717,7 @@ class MembershipCardService:
             processed_by_id=processed_by_id,
             transaction_date=datetime.utcnow(),
             narration=payload.narration or "Debit for services",
+            purpose=purpose or payload.narration,
             invoice_id=payload.invoice_id,
             visit_id=payload.visit_id,
             payment_id=payment_id,
@@ -873,6 +874,97 @@ class MembershipCardService:
     def get_card_transactions(self, card_id: int) -> List[MembershipCardTransaction]:
         self.get_card(card_id) # Ensure exists
         return self.repository.get_transactions_by_card_id(card_id)
+
+    def generate_statement_pdf(
+        self,
+        card_id: int,
+        *,
+        date_from=None,
+        date_to=None,
+    ) -> tuple[bytes, str]:
+        """
+        Render a patient card usage statement (credits & debits, each debit
+        stating the service it paid for) to PDF, optionally restricted to a
+        [date_from, date_to] window. Returns ``(pdf_bytes, filename)``.
+        """
+        from app.utils.card_statement_pdf import build_card_statement_pdf
+        from app.core.multitenancy import get_current_tenant
+
+        card = self.get_card(card_id)
+        patient = getattr(card, "patient", None) or (
+            self.db.query(Patient).filter(Patient.id == card.patient_id).first()
+        )
+
+        hospital_name = "Hospital"
+        try:
+            tenant = get_current_tenant()
+            if tenant and getattr(tenant, "name", None):
+                hospital_name = tenant.name
+        except Exception:
+            pass
+        if hospital_name == "Hospital":
+            facility = getattr(card, "issuing_facility", None)
+            if facility and getattr(facility, "name", None):
+                hospital_name = facility.name
+
+        patient_name = "-"
+        patient_mrn = None
+        if patient is not None:
+            parts = [
+                getattr(patient, "first_name", "") or "",
+                getattr(patient, "middle_name", "") or "",
+                getattr(patient, "last_name", "") or "",
+            ]
+            patient_name = " ".join(p for p in parts if p).strip() or "-"
+            patient_mrn = getattr(patient, "hospital_number", None)
+
+        txns = self.repository.get_transactions_by_card_id(card_id)
+
+        def _in_range(t) -> bool:
+            d = getattr(t, "transaction_date", None)
+            if d is None:
+                return True
+            day = d.date() if hasattr(d, "date") else d
+            if date_from and day < date_from:
+                return False
+            if date_to and day > date_to:
+                return False
+            return True
+
+        filtered = [t for t in txns if _in_range(t)]
+        filtered.sort(key=lambda t: (getattr(t, "transaction_date", None) or datetime.min))
+
+        rows = []
+        for t in filtered:
+            ttype = str(getattr(t.transaction_type, "value", t.transaction_type)).upper()
+            credit = ttype in ("CREDIT", "REFUND")
+            if credit:
+                purpose = t.narration or t.payment_source or "Wallet funding"
+            else:
+                purpose = t.purpose or t.narration or "Service payment"
+            rows.append(
+                {
+                    "date": t.transaction_date,
+                    "is_credit": credit,
+                    "amount": t.amount,
+                    "purpose": purpose,
+                    "balance_after": t.balance_after,
+                }
+            )
+
+        pdf_bytes = build_card_statement_pdf(
+            hospital_name=hospital_name,
+            patient_name=patient_name,
+            patient_mrn=patient_mrn,
+            card_number=card.card_number,
+            card_status=str(getattr(card.status, "value", card.status) or ""),
+            balance=card.balance,
+            transactions=rows,
+            period_from=date_from,
+            period_to=date_to,
+        )
+        safe_number = "".join(ch for ch in (card.card_number or "card") if ch.isalnum() or ch in "-_")
+        return pdf_bytes, f"card-statement-{safe_number}.pdf"
 
     # ------------------------------------------------------------------
     # Manual card-funding requests (patient-submitted, staff-approved)

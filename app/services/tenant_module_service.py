@@ -70,6 +70,74 @@ def _normalize(module_code: str) -> str:
     return code
 
 
+# ---------------------------------------------------------------------------
+# Facility profiles (verticals). A profile is a one-click preset that narrows a
+# tenant to the modules its vertical needs. Integrated hospitals use the full
+# "HOSPITAL" profile (no forced gating — every module follows the plan).
+#
+# ``modules`` lists the SUPPORTED_MODULE_CODES that a vertical keeps ON. When a
+# profile is applied, in-profile modules have any override cleared (so they
+# follow the subscription plan) and every other module is force-disabled via a
+# TenantModuleAccess override. Core pages that carry no module code (patient
+# registration, visits, queues, settings, roles…) are always available.
+# ---------------------------------------------------------------------------
+FACILITY_PROFILES: dict[str, dict] = {
+    "HOSPITAL": {
+        "label": "Integrated Hospital",
+        "workspace_name": "Hospital Workspace",
+        "home": "dashboard",
+        "description": "Full multi-department hospital — every subscribed module is available.",
+        # Sentinel: the full set follows the subscription plan (no forced gating).
+        "modules": None,
+    },
+    "DENTAL": {
+        "label": "Dental Clinic",
+        "workspace_name": "Dental Clinic",
+        "home": "dental",
+        "description": "Standalone dental practice: odontogram charting, treatment plans, billing and stock.",
+        "modules": {
+            "dental", "appointments", "billing", "insurance",
+            "inventory", "pharmacy", "reporting", "hr", "compliance", "patient_portal",
+        },
+    },
+    "EYE": {
+        "label": "Eye Clinic",
+        "workspace_name": "Eye Clinic",
+        "home": "eye",
+        "description": "Standalone optometry / ophthalmology clinic: refraction, prescriptions, billing and stock.",
+        "modules": {
+            "eye", "appointments", "billing", "insurance",
+            "inventory", "pharmacy", "reporting", "hr", "compliance", "patient_portal",
+        },
+    },
+    "PHARMACY": {
+        "label": "Pharmaceutical Store",
+        "workspace_name": "Pharmacy",
+        "home": "pharmacy",
+        "description": "Standalone retail / community pharmacy: dispensing, stock control, billing and claims.",
+        "modules": {
+            "pharmacy", "inventory", "billing", "insurance", "reporting", "hr", "compliance",
+        },
+    },
+}
+
+DEFAULT_FACILITY_PROFILE = "HOSPITAL"
+FACILITY_PROFILE_CODES: set[str] = set(FACILITY_PROFILES.keys())
+
+
+def normalize_profile(profile: Optional[str]) -> str:
+    """Normalise to a known profile code; NULL/blank -> HOSPITAL."""
+    code = (profile or "").strip().upper()
+    if not code:
+        return DEFAULT_FACILITY_PROFILE
+    if code not in FACILITY_PROFILE_CODES:
+        raise BadRequestError(
+            message=f"Unknown facility profile '{profile}'.",
+            detail={"supported_profiles": sorted(FACILITY_PROFILE_CODES)},
+        )
+    return code
+
+
 class TenantModuleService:
     """
     Service for managing per-tenant module access.
@@ -315,3 +383,95 @@ class TenantModuleService:
         # Soft-delete via the BaseTable pattern.
         record.soft_delete()
         self.db.commit()
+
+    # ------------------------------------------------------------------
+    # Facility profiles (verticals)
+    # ------------------------------------------------------------------
+    @staticmethod
+    def list_profiles() -> list[dict]:
+        """Catalog of selectable facility profiles for the UI."""
+        out: list[dict] = []
+        for code, spec in FACILITY_PROFILES.items():
+            modules = spec.get("modules")
+            out.append(
+                {
+                    "code": code,
+                    "label": spec["label"],
+                    "workspace_name": spec["workspace_name"],
+                    "home": spec["home"],
+                    "description": spec["description"],
+                    # None (HOSPITAL) -> every supported module; else the vertical set.
+                    "modules": sorted(SUPPORTED_MODULE_CODES) if modules is None else sorted(modules),
+                    "is_default": code == DEFAULT_FACILITY_PROFILE,
+                }
+            )
+        return out
+
+    def get_profile_for_tenant(self, tenant_id: int) -> dict:
+        """Return the tenant's current facility profile (defaulting to HOSPITAL)."""
+        tenant = self.db.query(Tenant).filter(Tenant.id == tenant_id).first()
+        if not tenant:
+            raise NotFoundError(message="Tenant not found.")
+        code = normalize_profile(getattr(tenant, "facility_profile", None))
+        spec = FACILITY_PROFILES[code]
+        return {
+            "code": code,
+            "label": spec["label"],
+            "workspace_name": spec["workspace_name"],
+            "home": spec["home"],
+            "description": spec["description"],
+        }
+
+    def apply_profile(self, tenant_id: int, profile: str) -> dict:
+        """
+        Apply a facility profile to a tenant in one transaction.
+
+        * Stores ``tenant.facility_profile``.
+        * For every supported module: in-profile modules have their override
+          cleared (they follow the subscription plan); out-of-profile modules
+          are force-disabled. HOSPITAL clears all overrides (no forced gating).
+
+        Idempotent: re-applying the same profile converges to the same state.
+        """
+        code = normalize_profile(profile)
+        tenant = self.db.query(Tenant).filter(Tenant.id == tenant_id).first()
+        if not tenant:
+            raise NotFoundError(message="Tenant not found.")
+
+        allowed = FACILITY_PROFILES[code]["modules"]  # None for HOSPITAL
+        existing = {
+            o.module_code: o
+            for o in self.db.query(TenantModuleAccess)
+            .filter(
+                TenantModuleAccess.tenant_id == tenant_id,
+                TenantModuleAccess.is_deleted.is_(False),
+            )
+            .all()
+        }
+
+        disabled: list[str] = []
+        for mcode, _label in SUPPORTED_MODULES:
+            in_profile = allowed is None or mcode in allowed
+            override = existing.get(mcode)
+            if in_profile:
+                # Follow the plan: drop any profile-driven disable override.
+                if override is not None and not override.is_enabled:
+                    override.soft_delete()
+            else:
+                # Force the module off for this vertical.
+                self._apply_module(
+                    tenant_id,
+                    mcode,
+                    is_enabled=False,
+                    notes=f"Disabled by '{code}' facility profile.",
+                )
+                disabled.append(mcode)
+
+        tenant.facility_profile = code
+        self._commit("Could not apply the facility profile.")
+        self.db.refresh(tenant)
+        return {
+            "code": code,
+            "label": FACILITY_PROFILES[code]["label"],
+            "disabled_modules": disabled,
+        }

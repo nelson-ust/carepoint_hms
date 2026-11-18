@@ -77,6 +77,7 @@ class MembershipCardTransactionRead(MembershipCardTransactionBase):
     facility_id: int
     processed_by_id: int
     transaction_date: datetime
+    purpose: Optional[str] = None
     invoice_id: Optional[int] = None
     visit_id: Optional[int] = None
     payment_id: Optional[int] = None

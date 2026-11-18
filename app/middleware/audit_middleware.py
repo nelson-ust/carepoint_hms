@@ -37,7 +37,7 @@ from sqlalchemy.orm import Session
 from app.core.database import SessionLocal
 from app.core.logger import get_logger
 from fastapi.responses import Response
-from app.models.all_models import AuditLog
+from app.models.all_models import AuditLog, SaaSAdmin
 from app.core.multitenancy import get_current_tenant, get_current_tenant_id
 from app.services.tenant_usage_service import TenantUsageService
 from app.utils.helpers import generate_uuid_str
@@ -62,6 +62,18 @@ class AuditMiddleware(BaseHTTPMiddleware):
         self.audit_mutating_methods_only = audit_mutating_methods_only
         self.persist_audit_log = persist_audit_log
         self.mutating_methods = {"POST", "PUT", "PATCH", "DELETE"}
+        self.method_action = {"POST": "CREATE", "PUT": "UPDATE", "PATCH": "UPDATE", "DELETE": "DELETE"}
+        # Login/logout/refresh are logged explicitly by the auth services with
+        # the resolved actor, so the middleware skips them to avoid duplicates.
+        self.excluded_prefixes = (
+            "/api/v1/auth/login",
+            "/api/v1/auth/logout",
+            "/api/v1/auth/refresh",
+            "/api/v1/saas/auth/login",
+            "/api/v1/saas/auth/logout",
+            "/api/v1/health",
+            "/api/v1/ready",
+        )
 
     async def dispatch(self, request: Request, call_next) -> Response:
         """
@@ -128,11 +140,16 @@ class AuditMiddleware(BaseHTTPMiddleware):
     def _should_audit(self, request: Request) -> bool:
         """
         Decide whether the request should produce an audit record.
+
+        Mutating requests are audited for BOTH tenant and SaaS/master
+        operations. Tenant context is no longer required — when absent the
+        entry is written to the master SaaSAuditLog instead.
         """
         if not self.persist_audit_log:
             return False
 
-        if get_current_tenant() is None:
+        path = request.url.path
+        if any(path.startswith(p) for p in self.excluded_prefixes):
             return False
 
         if self.audit_mutating_methods_only:
@@ -158,22 +175,39 @@ class AuditMiddleware(BaseHTTPMiddleware):
 
         return "unknown"
 
-    def _extract_actor_user_id(self, request: Request) -> Optional[int]:
+    def _actor_context(self, request: Request) -> dict:
         """
-        Best-effort extraction of authenticated user ID from request.state.
+        Resolve the acting principal from request.state (set by AuthMiddleware).
 
-        This relies on route/dependency code placing the current user on
-        `request.state.current_user` when available.
+        Returns a dict with: id, label, type, is_saas, tenant_id, tenant_code.
         """
         current_user = getattr(request.state, "current_user", None)
-        if current_user is None:
-            return None
+        payload = getattr(request.state, "token_payload", None) or {}
 
-        user_id = getattr(current_user, "id", None)
-        try:
-            return int(user_id) if user_id is not None else None
-        except (TypeError, ValueError):
-            return None
+        actor_id: Optional[int] = None
+        label: Optional[str] = None
+        is_saas = bool(payload.get("is_saas_admin")) or isinstance(current_user, SaaSAdmin)
+
+        if current_user is not None:
+            raw_id = getattr(current_user, "id", None)
+            try:
+                actor_id = int(raw_id) if raw_id is not None else None
+            except (TypeError, ValueError):
+                actor_id = None
+            label = (
+                getattr(current_user, "email", None)
+                or getattr(current_user, "username", None)
+                or (f"#{actor_id}" if actor_id else None)
+            )
+
+        return {
+            "id": actor_id,
+            "label": label,
+            "type": "SAAS_ADMIN" if is_saas else "USER",
+            "is_saas": is_saas,
+            "tenant_id": payload.get("tenant_id"),
+            "tenant_code": payload.get("tenant_code"),
+        }
 
     def _persist_audit_log(
         self,
@@ -197,32 +231,51 @@ class AuditMiddleware(BaseHTTPMiddleware):
         - user_agent
         - before_data / after_data / extra_metadata
         """
-        from app.core.database import get_session
-        db: Session = get_session()
-        try:
-            action = request.method.upper()
-            entity_name = self._derive_entity_name(request.url.path)
+        from app.services import audit_service
 
-            audit_log = AuditLog(
-                actor_user_id=self._extract_actor_user_id(request),
+        actor = self._actor_context(request)
+        action = self.method_action.get(request.method.upper(), request.method.upper())
+        entity_name = self._derive_entity_name(request.url.path)
+        extra = {"query_params": dict(request.query_params)}
+
+        # SaaS / master operation (no tenant bound) → master SaaSAuditLog.
+        if get_current_tenant() is None or actor.get("is_saas"):
+            audit_service.write_saas_audit_autocommit(
                 action=action,
                 entity_name=entity_name,
-                entity_id=None,
+                actor_admin_id=actor["id"] if actor.get("is_saas") else None,
+                actor_label=actor["label"],
+                actor_type=actor["type"],
                 request_id=request_id,
                 ip_address=client_ip,
                 user_agent=user_agent,
-                before_data=None,
-                after_data=None,
-                extra_metadata={
-                    "path": request.url.path,
-                    "method": request.method,
-                    "status_code": response.status_code,
-                    "query_params": dict(request.query_params),
-                },
+                http_method=request.method.upper(),
+                path=request.url.path,
+                status_code=response.status_code,
+                extra_metadata=extra,
             )
+            return
 
-            db.add(audit_log)
-            db.commit()
+        # Tenant operation → tenant AuditLog (its own short session).
+        from app.core.database import get_session
+
+        db: Session = get_session()
+        try:
+            audit_service.write_tenant_audit(
+                db,
+                action=action,
+                entity_name=entity_name,
+                actor_user_id=actor["id"],
+                actor_label=actor["label"],
+                actor_type=actor["type"],
+                request_id=request_id,
+                ip_address=client_ip,
+                user_agent=user_agent,
+                http_method=request.method.upper(),
+                path=request.url.path,
+                status_code=response.status_code,
+                extra_metadata=extra,
+            )
         finally:
             db.close()
 

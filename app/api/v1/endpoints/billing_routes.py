@@ -118,6 +118,17 @@ def download_service_template(
     )
 
 
+@router.post(
+    "/services/backfill-accounts",
+    summary="Assign a revenue account to every service missing one",
+)
+def backfill_service_accounts(
+    _: Annotated[User, Depends(require_permission("BILLING_CREATE"))],
+    service: Annotated[BillableServiceService, Depends(get_billable_service_service)],
+):
+    return service.backfill_accounts()
+
+
 @router.get(
     "/services/mapping-health",
     response_model=BillingMappingHealthSchema,

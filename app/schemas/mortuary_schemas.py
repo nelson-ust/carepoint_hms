@@ -32,6 +32,10 @@ class MortuaryUnitCreateSchema(BaseModel):
     capacity: int = Field(1, ge=1, le=1000)
     location: Optional[str] = Field(None, max_length=255)
     temperature_c: Optional[Decimal] = None
+    rate: Decimal = Decimal("0")
+    rate_period: str = "DAILY"
+    account_code: Optional[str] = None
+    account_id: Optional[int] = None
     notes: Optional[str] = None
 
     @field_validator("code")
@@ -55,6 +59,10 @@ class MortuaryUnitUpdateSchema(BaseModel):
     status: Optional[str] = None
     location: Optional[str] = Field(None, max_length=255)
     temperature_c: Optional[Decimal] = None
+    rate: Optional[Decimal] = None
+    rate_period: Optional[str] = None
+    account_code: Optional[str] = None
+    account_id: Optional[int] = None
     notes: Optional[str] = None
 
     @field_validator("unit_type")
@@ -89,6 +97,10 @@ class MortuaryUnitReadSchema(BaseModel):
     status: str
     location: Optional[str] = None
     temperature_c: Optional[Decimal] = None
+    rate: Decimal = Decimal("0")
+    rate_period: str = "DAILY"
+    account_code: Optional[str] = None
+    account_id: Optional[int] = None
     notes: Optional[str] = None
     occupied: int = 0
     available_slots: int = 0
@@ -459,8 +471,36 @@ class ChargeCreateSchema(BaseModel):
     charge_type: str = "OTHER"
     description: Optional[str] = Field(None, max_length=255)
     quantity: Decimal = Decimal("1")
-    unit_amount: Decimal = Decimal("0")
+    unit_amount: Optional[Decimal] = None  # falls back to the fee item's price
+    fee_schedule_id: Optional[int] = None
+    account_code: Optional[str] = None
+    account_id: Optional[int] = None
     notes: Optional[str] = None
+
+
+class MortuaryFeeCreateSchema(BaseModel):
+    code: str = Field(..., max_length=50)
+    name: str = Field(..., max_length=200)
+    charge_type: str = "OTHER"
+    unit_price: Decimal = Decimal("0")
+    billing_cadence: str = "ONE_OFF"  # ONE_OFF | DAILY | MONTHLY
+    is_daily: bool = False
+    account_code: Optional[str] = None
+    account_id: Optional[int] = None
+    is_active: bool = True
+    description: Optional[str] = None
+
+
+class MortuaryFeeUpdateSchema(BaseModel):
+    name: Optional[str] = Field(None, max_length=200)
+    charge_type: Optional[str] = None
+    unit_price: Optional[Decimal] = None
+    billing_cadence: Optional[str] = None
+    is_daily: Optional[bool] = None
+    account_code: Optional[str] = None
+    account_id: Optional[int] = None
+    is_active: Optional[bool] = None
+    description: Optional[str] = None
 
 
 class ChargeStatusSchema(BaseModel):

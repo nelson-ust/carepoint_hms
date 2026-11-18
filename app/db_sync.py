@@ -1062,4 +1062,8 @@ def _tenant_enum_extensions() -> dict[str, list[str]]:
             "BANK", "PETTY_CASH", "CASHIER", "CREDIT_NOTE", "REFUND",
             "WRITE_OFF",
         ],
+        # Mortuary gained Nigerian service charge types.
+        "mortuarychargetype": [
+            "DRESSING", "PRESERVATION", "COFFIN", "HEARSE", "PENALTY", "DOCUMENTATION",
+        ],
     }

@@ -8,7 +8,8 @@ API endpoints for Hospital Tenant backups.
 """
 
 from typing import Annotated, Optional
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, Query, Response, status
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
@@ -74,12 +75,83 @@ def sweep_backups(
 
 @router.get(
     "/{backup_id}/download",
-    summary="Get a presigned download link for a backup artifact",
+    summary="Download a decrypted, restorable backup artifact",
 )
 def download_backup(
     backup_id: int,
     _: Annotated[bool, Depends(require_permission("BACKUP_READ"))],
     service: Annotated[TenantBackupService, Depends(get_tenant_backup_service)],
 ):
-    """Return a short-lived S3 download URL for a completed recovery point."""
-    return service.get_download_link(backup_id)
+    """
+    Stream a completed recovery point back to the operator, decrypted and
+    ready to restore with ``pg_restore``. Backups are encrypted at rest, so
+    the app decrypts the artifact server-side and returns the plaintext
+    custom-format dump under its real ``.dump`` filename.
+    """
+    artifact = service.get_backup_artifact(backup_id)
+    filename = artifact["filename"]
+    return Response(
+        content=artifact["content"],
+        media_type=artifact["media_type"],
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "X-Backup-Filename": filename,
+        },
+    )
+
+
+@router.delete(
+    "/{backup_id}",
+    summary="Delete a recovery point",
+)
+def delete_backup(
+    backup_id: int,
+    _: Annotated[bool, Depends(require_permission("BACKUP_CREATE"))],
+    service: Annotated[TenantBackupService, Depends(get_tenant_backup_service)],
+):
+    """Remove a recovery point from the registry (and its stored artifact).
+
+    Use this to clear failed or interrupted backups. Completed points can be
+    removed too; the underlying object is best-effort deleted from storage.
+    """
+    return service.delete_backup(backup_id)
+
+
+class RestoreRequestSchema(BaseModel):
+    """Payload for a destructive database restore."""
+    confirm_tenant_code: str = Field(
+        ...,
+        description="The operator must re-type the hospital's workspace code to confirm.",
+    )
+    safety_backup: bool = Field(
+        True,
+        description="Take a fresh pre-restore snapshot before overwriting (recommended).",
+    )
+    drop_existing: bool = Field(
+        True,
+        description="Drop existing objects before restoring (clean restore).",
+    )
+
+
+@router.post(
+    "/{backup_id}/restore",
+    summary="Restore the hospital database from a backup",
+)
+def restore_backup(
+    backup_id: int,
+    payload: RestoreRequestSchema,
+    _: Annotated[bool, Depends(require_permission("BACKUP_RESTORE"))],
+    service: Annotated[TenantBackupService, Depends(get_tenant_backup_service)],
+):
+    """
+    Restore the hospital's database from a completed recovery point. This
+    OVERWRITES live data, so it requires the BACKUP_RESTORE permission and a
+    typed confirmation of the workspace code, and by default takes a
+    pre-restore safety snapshot first.
+    """
+    return service.restore_backup(
+        backup_id,
+        confirm_tenant_code=payload.confirm_tenant_code,
+        safety_backup=payload.safety_backup,
+        drop_existing=payload.drop_existing,
+    )

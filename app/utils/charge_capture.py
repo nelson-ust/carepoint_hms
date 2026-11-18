@@ -39,6 +39,51 @@ def _generate_billing_no() -> str:
     return f"BILL-{datetime.now(timezone.utc).strftime('%Y%m%d')}-{generate_uuid_str()[:8].upper()}"
 
 
+# Service-category -> revenue account code. Keeps every billable service mapped
+# to the correct ledger even when no explicit account was chosen on the
+# catalog entry. Mirrors seed_data.CATEGORY_ACCOUNT_MAP (kept local so this
+# hot path does not import the seed module).
+CATEGORY_ACCOUNT_MAP: dict[str, str] = {
+    "CONSULTATION": "REV-CONS",
+    "LABORATORY": "REV-LAB",
+    "LAB": "REV-LAB",
+    "RADIOLOGY": "REV-RAD",
+    "PHARMACY": "REV-PHARM",
+    "DRUG": "REV-PHARM",
+    "PROCEDURE": "REV-PROC",
+    "SURGERY": "REV-PROC",
+    "INPATIENT": "REV-BED",
+    "BED": "REV-BED",
+}
+DEFAULT_REVENUE_CODE = "REV-GEN"
+
+
+def resolve_revenue_account(db: Session, *, category: Optional[str] = None) -> Optional[Account]:
+    """
+    Resolve a revenue ``Account`` for a charge by service category.
+
+    Order: category map (REV-CONS/REV-LAB/...) → REV-GEN → the system
+    ``PATIENT_REVENUE`` account (auto-created). Guarantees a charge can always
+    be stamped with a postable account code, so nothing falls through to
+    "unaccounted".
+    """
+    code = CATEGORY_ACCOUNT_MAP.get((category or "").strip().upper(), DEFAULT_REVENUE_CODE)
+    for candidate in (code, DEFAULT_REVENUE_CODE):
+        acct = (
+            db.query(Account)
+            .filter(Account.code == candidate, Account.is_deleted.is_(False))
+            .first()
+        )
+        if acct is not None:
+            return acct
+    try:
+        from app.services.system_accounts_service import resolve_system_account
+
+        return resolve_system_account(db, "PATIENT_REVENUE")
+    except Exception:
+        return None
+
+
 def get_or_create_open_billing(
     db: Session,
     *,
@@ -147,18 +192,24 @@ def add_charge(
         line_total = Decimal("0")
 
     # Stamp the ledger account so the captured charge is postable to finance.
+    # Every charge MUST carry an account code — when the catalog entry has no
+    # explicit account we resolve one by category so nothing is "unaccounted".
     account_code = None
     account_name = None
+    svc = None
     if billable_service_id is not None:
         svc = (
             db.query(BillableService)
             .filter(BillableService.id == billable_service_id)
             .first()
         )
-        acct = getattr(svc, "account", None) if svc is not None else None
-        if acct is not None:
-            account_code = acct.code
-            account_name = acct.name
+    acct = getattr(svc, "account", None) if svc is not None else None
+    if acct is None:
+        category = getattr(svc, "category", None) if svc is not None else None
+        acct = resolve_revenue_account(db, category=category)
+    if acct is not None:
+        account_code = acct.code
+        account_name = acct.name
 
     item = BillingItem(
         billing_id=billing.id,
@@ -739,3 +790,27 @@ def capture_bed_day_charges_for_admission(
         "through_date": through_date,
         "unit_price": unit_price,
     }
+
+
+def backfill_service_accounts(db: Session) -> dict:
+    """
+    Assign a revenue account to every BillableService that lacks one, by
+    category. Idempotent — only fills gaps. Returns a summary.
+    """
+    updated = 0
+    scanned = 0
+    services = (
+        db.query(BillableService)
+        .filter(BillableService.is_deleted.is_(False), BillableService.account_id.is_(None))
+        .all()
+    )
+    for svc in services:
+        scanned += 1
+        acct = resolve_revenue_account(db, category=svc.category)
+        if acct is not None:
+            svc.account_id = acct.id
+            db.add(svc)
+            updated += 1
+    if updated:
+        db.commit()
+    return {"scanned": scanned, "mapped": updated}

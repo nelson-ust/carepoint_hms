@@ -52,7 +52,12 @@ def build_audit_payload(obj: Any, exclude: Optional[set] = None) -> dict:
     if not obj:
         return {}
     
-    exclude = exclude or {"password_hash", "created_at", "updated_at", "tenant_id", "is_deleted"}
+    exclude = exclude or {
+        "password_hash", "password", "hashed_password", "secret", "token",
+        "access_token", "refresh_token", "api_key", "otp", "code_hash",
+        "setup_secret", "provisioning_uri", "db_connection_string",
+        "created_at", "updated_at", "tenant_id", "is_deleted",
+    }
     
     payload = {}
     for column in obj.__table__.columns:

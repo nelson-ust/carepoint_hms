@@ -206,6 +206,8 @@ from app.core.enums import (
     WarehouseRefreshStrategy,
     SubscriptionStatus,
     PromoCampaignStatus,
+    MortuaryRatePeriod,
+    MortuaryBillingCadence,
     SubscriptionInterval,
     SubscriptionInvoiceStatus,
     SubscriptionPaymentStatus,
@@ -2872,6 +2874,10 @@ class MembershipCardTransaction(TenantTable):
     processed_by_id: Mapped[int] = mapped_column(ForeignKey("user.id"), nullable=False, index=True)
     transaction_date: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=datetime.utcnow, index=True)
     narration: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # For DEBIT rows: the human-readable service(s) the money paid for
+    # (e.g. "Consultation, Laboratory tests"), so the card usage log can state
+    # the purpose of every debit. Nullable — added via db_sync for existing DBs.
+    purpose: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
     
     invoice_id: Mapped[Optional[int]] = mapped_column(ForeignKey("invoice.id"), nullable=True, index=True)
     visit_id: Mapped[Optional[int]] = mapped_column(ForeignKey("visit.id"), nullable=True, index=True)
@@ -3824,6 +3830,23 @@ class TenantScheduledJob(TenantTable):
     last_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     last_duration_ms: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     run_count: Mapped[int] = mapped_column(Integer, default=0)
+    # --- Scheduling / concurrency metadata ---------------------------------
+    # IANA timezone name (e.g. "Africa/Lagos") used to interpret cron
+    # expressions. NULL means the schedule is evaluated in UTC (legacy
+    # behaviour). Added as a nullable column so db_sync can ALTER it in.
+    timezone: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    # Count of consecutive failed runs; reset to 0 on the next success.
+    consecutive_failures: Mapped[Optional[int]] = mapped_column(
+        Integer, default=0, server_default="0", nullable=True
+    )
+    # When set and consecutive_failures reaches it, the dispatcher pauses
+    # the job (is_enabled -> False) so a broken handler stops spamming.
+    max_failures: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    # Set to now() while a run is in flight (claim lease); cleared when the
+    # run finishes. Lets operators spot stuck/RUNNING jobs.
+    locked_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
 
 class PushDeviceToken(TenantTable):
@@ -3872,7 +3895,53 @@ class AuditLog(TenantTable):
     after_data: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     extra_metadata: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
 
+    # Denormalised display/filter fields (nullable so db_sync can ALTER them in).
+    actor_label: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    actor_type: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    http_method: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)
+    path: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    status_code: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+
     actor_user: Mapped[Optional["User"]] = relationship()
+
+
+class SaaSAuditLog(MasterTable):
+    """
+    Platform-level audit trail for SaaS / master-database operations.
+
+    Captures every mutating SaaS-admin action (and their login/logout) against
+    the master database, analogous to the tenant-scoped :class:`AuditLog`. Lives
+    in the master DB because SaaS operations have no tenant context.
+    """
+
+    __tablename__ = "saas_audit_log"
+
+    actor_admin_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("saas_admin.id"), nullable=True, index=True
+    )
+    actor_label: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    actor_type: Mapped[Optional[str]] = mapped_column(String(40), nullable=True, default="SAAS_ADMIN")
+
+    action: Mapped[str] = mapped_column(String(150), nullable=False, index=True)
+    entity_name: Mapped[str] = mapped_column(String(150), nullable=False, index=True)
+    entity_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
+
+    # The tenant a SaaS action targeted (e.g. provisioning / suspending), if any.
+    target_tenant_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
+    target_tenant_code: Mapped[Optional[str]] = mapped_column(String(100), nullable=True, index=True)
+
+    request_id: Mapped[Optional[str]] = mapped_column(String(100), nullable=True, index=True)
+    ip_address: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    user_agent: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    http_method: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)
+    path: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    status_code: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+
+    before_data: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    after_data: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    extra_metadata: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+
+    actor_admin: Mapped[Optional["SaaSAdmin"]] = relationship()
 
 
 # ============================================================
@@ -4517,6 +4586,12 @@ class Tenant(MasterTable):
     #: (on-premise / cloud-dedicated) versus only a tenant database on the
     #: shared platform (cloud-platform).
     deployment_model: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)
+    #: Facility profile / vertical the tenant operates as: "HOSPITAL" (default,
+    #: full integrated arrangement), "DENTAL", "EYE" or "PHARMACY". Drives a
+    #: one-click module preset (see app.services.tenant_module_service) plus
+    #: light UX adaptation on the frontend (workspace naming + default landing).
+    #: NULL -> treated as "HOSPITAL", so existing tenants are unchanged.
+    facility_profile: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
     #: When set and in the future, a SaaS admin has granted this tenant's admin
     #: temporary "renewal login" — they may sign in and reach only the
     #: billing/renewal paths despite an expired/inactive subscription.
@@ -9732,9 +9807,16 @@ class MortuaryUnit(TenantTable):
     )
     location: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     temperature_c: Mapped[Optional[Decimal]] = mapped_column(Numeric(6, 2), nullable=True)
+    # Storage cost: a body occupying this unit accrues ``rate`` per ``rate_period``.
+    rate: Mapped[Decimal] = mapped_column(Numeric(14, 2), default=0, nullable=False)
+    rate_period: Mapped[MortuaryRatePeriod] = mapped_column(
+        Enum(MortuaryRatePeriod), default=MortuaryRatePeriod.DAILY, nullable=False)
+    account_id: Mapped[Optional[int]] = mapped_column(ForeignKey("account.id"), nullable=True, index=True)
+    account_code: Mapped[Optional[str]] = mapped_column(String(50), nullable=True, index=True)
     notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     records: Mapped[list["DeceasedRecord"]] = relationship(back_populates="mortuary_unit")
+    account: Mapped[Optional["Account"]] = relationship()
 
 
 class DeceasedRecord(TenantTable):
@@ -9793,6 +9875,12 @@ class DeceasedRecord(TenantTable):
     mortuary_unit_id: Mapped[Optional[int]] = mapped_column(ForeignKey("mortuary_unit.id"), nullable=True, index=True)
     received_by_staff_id: Mapped[Optional[int]] = mapped_column(ForeignKey("staff_profile.id"), nullable=True)
     registered_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
+    # Storage rate SNAPSHOT captured at assignment so a later unit-rate change
+    # never re-prices this body's charges (historical integrity).
+    storage_rate: Mapped[Optional[Decimal]] = mapped_column(Numeric(14, 2), nullable=True)
+    storage_rate_period: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    storage_account_id: Mapped[Optional[int]] = mapped_column(ForeignKey("account.id"), nullable=True)
+    storage_account_code: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
 
     # Release / discharge.
     released_to_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
@@ -9921,10 +10009,59 @@ class MortuaryCharge(TenantTable):
     quantity: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=1, nullable=False)
     unit_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), default=0, nullable=False)
     amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), default=0, nullable=False)
+    # Every costing points at a chart-of-accounts code so captured revenue posts
+    # to the correct ledger (account_code denormalised for display/reporting).
+    account_id: Mapped[Optional[int]] = mapped_column(ForeignKey("account.id"), nullable=True, index=True)
+    account_code: Mapped[Optional[str]] = mapped_column(String(50), nullable=True, index=True)
+    fee_schedule_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("mortuary_fee_schedule.id"), nullable=True, index=True)
+    billing_cadence: Mapped[MortuaryBillingCadence] = mapped_column(
+        Enum(MortuaryBillingCadence), default=MortuaryBillingCadence.ONE_OFF, nullable=False)
     charged_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
     notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     deceased_record: Mapped["DeceasedRecord"] = relationship()
+    account: Mapped[Optional["Account"]] = relationship()
+
+
+class MortuaryFeeSchedule(TenantTable):
+    """The mortuary price list. Each billable mortuary service has a default
+    unit price and a chart-of-accounts code, so every charge raised from it is
+    posted to the right ledger. ``is_daily`` marks per-day services (storage)."""
+
+    __tablename__ = "mortuary_fee_schedule"
+
+    code: Mapped[str] = mapped_column(String(50), unique=True, nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    charge_type: Mapped[MortuaryChargeType] = mapped_column(
+        Enum(MortuaryChargeType), default=MortuaryChargeType.OTHER, nullable=False, index=True)
+    unit_price: Mapped[Decimal] = mapped_column(Numeric(14, 2), default=0, nullable=False)
+    is_daily: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    billing_cadence: Mapped[MortuaryBillingCadence] = mapped_column(
+        Enum(MortuaryBillingCadence), default=MortuaryBillingCadence.ONE_OFF, nullable=False, index=True)
+    account_id: Mapped[Optional[int]] = mapped_column(ForeignKey("account.id"), nullable=True, index=True)
+    account_code: Mapped[Optional[str]] = mapped_column(String(50), nullable=True, index=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, index=True)
+    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    account: Mapped[Optional["Account"]] = relationship()
+
+
+class MortuaryUnitRateHistory(TenantTable):
+    """Append-only audit of a storage unit's rate changes. Existing bodies keep
+    the rate snapshotted on their record at assignment; this trail records what
+    the unit's published rate was over time so historical charges can be
+    reconciled against it."""
+
+    __tablename__ = "mortuary_unit_rate_history"
+
+    mortuary_unit_id: Mapped[int] = mapped_column(ForeignKey("mortuary_unit.id"), nullable=False, index=True)
+    rate: Mapped[Decimal] = mapped_column(Numeric(14, 2), default=0, nullable=False)
+    rate_period: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    account_code: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    changed_by: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    effective_from: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
 
 
 class MortuaryDeathCertificate(TenantTable):
@@ -10184,7 +10321,63 @@ class DentalProcedure(TenantTable):
     performed_by_staff_id: Mapped[Optional[int]] = mapped_column(ForeignKey("staff_profile.id"), nullable=True, index=True)
     note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
+    # Soft reference to the price-list entry this procedure was created from
+    # (plain Integer — no hard FK — to keep the per-tenant column-add cheap).
+    catalog_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
+    # Stamped once the procedure has been pushed onto a billing charge sheet,
+    # so it is never billed twice.
+    billed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
     chart: Mapped[Optional["DentalChart"]] = relationship(back_populates="procedures")
+
+
+class DentalProcedureCatalog(TenantTable):
+    """Price-list entry for a dental procedure (the clinic's service menu).
+
+    A standalone dental clinic maintains its own catalogue of procedures with a
+    default price; charting a procedure can copy name / code / cost from here,
+    and an optional link to a shared ``BillableService`` lets charges post to the
+    correct ledger account when billed.
+    """
+
+    __tablename__ = "dental_procedure_catalog"
+
+    code: Mapped[Optional[str]] = mapped_column(String(50), nullable=True, index=True)
+    name: Mapped[str] = mapped_column(String(200), nullable=False, index=True)
+    category: Mapped[Optional[str]] = mapped_column(String(100), nullable=True, index=True)
+    default_cost: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)
+    tooth_specific: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    # Optional link to the shared billing service catalogue (ledger mapping).
+    billable_service_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("billable_service.id"), nullable=True, index=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, index=True)
+    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    billable_service: Mapped[Optional["BillableService"]] = relationship()
+
+
+class DentalRecall(TenantTable):
+    """A scheduled dental recall / review reminder for a patient.
+
+    Recalls drive the clinic's preventive-care loop: after an encounter the
+    clinician sets the next review (e.g. 6-month check-up or scaling), and the
+    recall worklist surfaces everything coming due.
+    """
+
+    __tablename__ = "dental_recall"
+
+    patient_id: Mapped[int] = mapped_column(ForeignKey("patient.id"), nullable=False, index=True)
+    chart_id: Mapped[Optional[int]] = mapped_column(ForeignKey("dental_chart.id"), nullable=True, index=True)
+    recall_type: Mapped[Optional[str]] = mapped_column(String(50), nullable=True, index=True)
+    due_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    interval_months: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    # DUE | SCHEDULED | COMPLETED | CANCELLED
+    status: Mapped[str] = mapped_column(String(20), default="DUE", nullable=False, index=True)
+    note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_by_staff_id: Mapped[Optional[int]] = mapped_column(ForeignKey("staff_profile.id"), nullable=True)
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    patient: Mapped["Patient"] = relationship()
 
 
 # ============================================================
@@ -10268,6 +10461,147 @@ class SpectaclePrescription(TenantTable):
     notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     exam: Mapped[Optional["EyeExam"]] = relationship(back_populates="prescriptions")
+
+
+class ContactLensPrescription(TenantTable):
+    """A contact-lens prescription (distinct from a spectacle Rx).
+
+    Carries the parameters a contact lens needs that glasses do not — base
+    curve, diameter, brand and wear modality — per eye.
+    """
+
+    __tablename__ = "contact_lens_prescription"
+
+    patient_id: Mapped[int] = mapped_column(ForeignKey("patient.id"), nullable=False, index=True)
+    exam_id: Mapped[Optional[int]] = mapped_column(ForeignKey("eye_exam.id"), nullable=True, index=True)
+    prescriber_staff_id: Mapped[Optional[int]] = mapped_column(ForeignKey("staff_profile.id"), nullable=True, index=True)
+    prescribed_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+
+    # DAILY | BIWEEKLY | MONTHLY | QUARTERLY | ANNUAL | RGP | OTHER
+    modality: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)
+
+    od_sphere: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2), nullable=True)
+    od_cyl: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2), nullable=True)
+    od_axis: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    od_add: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2), nullable=True)
+    od_base_curve: Mapped[Optional[Decimal]] = mapped_column(Numeric(4, 2), nullable=True)
+    od_diameter: Mapped[Optional[Decimal]] = mapped_column(Numeric(4, 2), nullable=True)
+    od_brand: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
+
+    os_sphere: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2), nullable=True)
+    os_cyl: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2), nullable=True)
+    os_axis: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    os_add: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2), nullable=True)
+    os_base_curve: Mapped[Optional[Decimal]] = mapped_column(Numeric(4, 2), nullable=True)
+    os_diameter: Mapped[Optional[Decimal]] = mapped_column(Numeric(4, 2), nullable=True)
+    os_brand: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
+
+    notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    exam: Mapped[Optional["EyeExam"]] = relationship()
+
+
+class OpticalOrder(TenantTable):
+    """An optical dispensing order (frames + lenses + extras) for a patient.
+
+    Items may link to inventory stock (frames/lenses held in a store); marking
+    the order COLLECTED decrements that stock. The order total can be pushed to
+    the patient's visit charge sheet via the shared billing engine.
+    """
+
+    __tablename__ = "optical_order"
+
+    order_no: Mapped[str] = mapped_column(String(40), unique=True, nullable=False, index=True)
+    patient_id: Mapped[int] = mapped_column(ForeignKey("patient.id"), nullable=False, index=True)
+    exam_id: Mapped[Optional[int]] = mapped_column(ForeignKey("eye_exam.id"), nullable=True, index=True)
+    spectacle_prescription_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("spectacle_prescription.id"), nullable=True, index=True)
+    visit_id: Mapped[Optional[int]] = mapped_column(ForeignKey("visit.id"), nullable=True, index=True)
+    dispensed_by_staff_id: Mapped[Optional[int]] = mapped_column(ForeignKey("staff_profile.id"), nullable=True, index=True)
+
+    # PENDING | ORDERED | READY | COLLECTED | CANCELLED
+    status: Mapped[str] = mapped_column(String(20), default="PENDING", nullable=False, index=True)
+
+    subtotal: Mapped[Decimal] = mapped_column(Numeric(14, 2), default=0, nullable=False)
+    discount_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), default=0, nullable=False)
+    total_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), default=0, nullable=False)
+
+    note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    ordered_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    ready_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    collected_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Stamped once the order's linked stock has been decremented (collect), so
+    # it is never decremented twice.
+    stock_committed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    billed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    patient: Mapped["Patient"] = relationship()
+    items: Mapped[list["OpticalOrderItem"]] = relationship(
+        back_populates="order", cascade="all, delete-orphan")
+
+
+class OpticalOrderItem(TenantTable):
+    """A line on an :class:`OpticalOrder` (a frame, lens, coating or service)."""
+
+    __tablename__ = "optical_order_item"
+
+    order_id: Mapped[int] = mapped_column(ForeignKey("optical_order.id"), nullable=False, index=True)
+    # FRAME | LENS | COATING | SERVICE | OTHER
+    item_type: Mapped[str] = mapped_column(String(20), default="OTHER", nullable=False)
+    # Soft links (plain Integer, no hard FK — cheap per-tenant column add):
+    # the clinic's optical inventory and/or the shared hospital inventory.
+    optical_product_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
+    stock_item_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
+    item_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    quantity: Mapped[Decimal] = mapped_column(Numeric(14, 2), default=1, nullable=False)
+    unit_price: Mapped[Decimal] = mapped_column(Numeric(14, 2), default=0, nullable=False)
+    line_total: Mapped[Decimal] = mapped_column(Numeric(14, 2), default=0, nullable=False)
+
+    order: Mapped["OpticalOrder"] = relationship(back_populates="items")
+
+
+class OpticalProduct(TenantTable):
+    """An optical inventory item — a frame, lens, contact lens, solution or
+    accessory the eye clinic holds in stock and dispenses via optical orders.
+
+    A standalone eye clinic manages its own optical stock here; dispensing an
+    order decrements ``quantity_on_hand``.
+    """
+
+    __tablename__ = "optical_product"
+
+    # FRAME | LENS | CONTACT_LENS | SOLUTION | ACCESSORY | OTHER
+    category: Mapped[str] = mapped_column(String(30), default="FRAME", nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(200), nullable=False, index=True)
+    brand: Mapped[Optional[str]] = mapped_column(String(120), nullable=True, index=True)
+    sku: Mapped[Optional[str]] = mapped_column(String(100), nullable=True, index=True)
+    # Free-form spec, e.g. "Full-rim · 52-18 · acetate" or "1.56 index · AR coating".
+    spec: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    unit_cost: Mapped[Optional[Decimal]] = mapped_column(Numeric(14, 2), nullable=True)
+    sell_price: Mapped[Decimal] = mapped_column(Numeric(14, 2), default=0, nullable=False)
+    quantity_on_hand: Mapped[Decimal] = mapped_column(Numeric(14, 2), default=0, nullable=False)
+    reorder_level: Mapped[Optional[Decimal]] = mapped_column(Numeric(14, 2), nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, index=True)
+    note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+
+class EyeRecall(TenantTable):
+    """A scheduled eye-clinic recall / review reminder for a patient."""
+
+    __tablename__ = "eye_recall"
+
+    patient_id: Mapped[int] = mapped_column(ForeignKey("patient.id"), nullable=False, index=True)
+    exam_id: Mapped[Optional[int]] = mapped_column(ForeignKey("eye_exam.id"), nullable=True, index=True)
+    recall_type: Mapped[Optional[str]] = mapped_column(String(50), nullable=True, index=True)
+    due_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    interval_months: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    # DUE | SCHEDULED | COMPLETED | CANCELLED
+    status: Mapped[str] = mapped_column(String(20), default="DUE", nullable=False, index=True)
+    note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_by_staff_id: Mapped[Optional[int]] = mapped_column(ForeignKey("staff_profile.id"), nullable=True)
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    patient: Mapped["Patient"] = relationship()
 
 
 # ============================================================
@@ -10429,4 +10763,69 @@ class PromoPlanMember(MasterTable):
     reverted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
     tenant: Mapped["Tenant"] = relationship()
+
+
+# ===========================================================================
+# Pharmacy retail point-of-sale (standalone pharmaceutical store)
+# ---------------------------------------------------------------------------
+# A walk-in / OTC sale that moves stock OUT of a store without a prescription
+# or a visit. Each completed sale decrements InventoryStockItem.quantity_on_hand
+# and writes a StockMovement (DISPENSE) audit row per line. Voiding a sale puts
+# the stock back (RETURN_IN) and flips the status.
+# ===========================================================================
+class PharmacySale(TenantTable):
+    """A retail / OTC pharmacy sale (point-of-sale transaction)."""
+
+    __tablename__ = "pharmacy_sale"
+
+    sale_no: Mapped[str] = mapped_column(String(40), unique=True, nullable=False, index=True)
+    store_id: Mapped[int] = mapped_column(ForeignKey("inventory_store.id"), nullable=False, index=True)
+    # Optional link to a registered patient; retail walk-ins just carry a name.
+    patient_id: Mapped[Optional[int]] = mapped_column(ForeignKey("patient.id"), nullable=True, index=True)
+    customer_name: Mapped[Optional[str]] = mapped_column(String(150), nullable=True)
+    customer_phone: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)
+    sold_by_staff_id: Mapped[Optional[int]] = mapped_column(ForeignKey("staff_profile.id"), nullable=True, index=True)
+
+    # "COMPLETED" | "VOIDED"
+    status: Mapped[str] = mapped_column(String(20), default="COMPLETED", nullable=False, index=True)
+
+    subtotal: Mapped[Decimal] = mapped_column(Numeric(14, 2), default=0, nullable=False)
+    discount_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), default=0, nullable=False)
+    tax_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), default=0, nullable=False)
+    total_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), default=0, nullable=False)
+    amount_paid: Mapped[Decimal] = mapped_column(Numeric(14, 2), default=0, nullable=False)
+    change_due: Mapped[Decimal] = mapped_column(Numeric(14, 2), default=0, nullable=False)
+    # Stores a PaymentMethod value (CASH / CARD / POS / BANK_TRANSFER / ...).
+    payment_method: Mapped[str] = mapped_column(String(20), default="CASH", nullable=False)
+
+    note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    sold_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    voided_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    void_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    items: Mapped[list["PharmacySaleItem"]] = relationship(
+        back_populates="sale", cascade="all, delete-orphan"
+    )
+    store: Mapped["InventoryStore"] = relationship()
+    patient: Mapped[Optional["Patient"]] = relationship()
+
+
+class PharmacySaleItem(TenantTable):
+    """A single line on a :class:`PharmacySale`."""
+
+    __tablename__ = "pharmacy_sale_item"
+
+    sale_id: Mapped[int] = mapped_column(ForeignKey("pharmacy_sale.id"), nullable=False, index=True)
+    stock_item_id: Mapped[int] = mapped_column(ForeignKey("inventory_stock_item.id"), nullable=False, index=True)
+    # Snapshot of the name at sale time (the stock item may be renamed later).
+    item_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    quantity: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    unit_price: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    line_total: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    # Unit cost snapshot at sale time, used to post Cost of Goods Sold to the
+    # ledger (nullable so db_sync can ALTER it into existing tables).
+    unit_cost: Mapped[Optional[Decimal]] = mapped_column(Numeric(14, 2), nullable=True)
+
+    sale: Mapped["PharmacySale"] = relationship(back_populates="items")
+    stock_item: Mapped["InventoryStockItem"] = relationship()
 

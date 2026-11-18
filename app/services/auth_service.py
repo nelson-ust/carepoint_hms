@@ -170,6 +170,14 @@ class AuthService:
                 user_agent=user_agent,
                 now=now,
             )
+            self._audit_auth(
+                "LOGIN_FAILED",
+                user_id=user.id,
+                actor_label=getattr(user, "username", None) or getattr(user, "email", None),
+                ip_address=ip_address,
+                user_agent=user_agent,
+                metadata={"reason": "invalid_password"},
+            )
             self.db.commit()
             raise UnauthorizedError(message="Invalid credentials.")
 
@@ -247,6 +255,14 @@ class AuthService:
                 # Log but don't fail login
                 print(f"Failed to increment login usage for tenant {tenant_id}: {exc}")
 
+        self._audit_auth(
+            "LOGIN",
+            user_id=user.id,
+            actor_label=getattr(user, "username", None) or getattr(user, "email", None),
+            ip_address=ip_address,
+            user_agent=user_agent,
+            metadata={"two_factor": False},
+        )
         self.db.commit()
 
         return {
@@ -336,6 +352,7 @@ class AuthService:
                 current_user_id,
                 when=datetime.now(timezone.utc),
             )
+            self._audit_auth("LOGOUT", user_id=current_user_id, metadata={"all_sessions": True})
             self.db.commit()
             return {"success": True, "message": "Logout successful for all active sessions."}
 
@@ -359,6 +376,8 @@ class AuthService:
                     self.repository.revoke_session(session, when=datetime.now(timezone.utc))
                     revoked_any = True
 
+        if revoked_any:
+            self._audit_auth("LOGOUT", user_id=current_user_id, metadata={"all_sessions": False})
         self.db.commit()
         return {
             "success": True,
@@ -1463,6 +1482,35 @@ class AuthService:
             return False
 
         return True
+
+    def _audit_auth(
+        self,
+        action: str,
+        *,
+        user_id=None,
+        actor_label=None,
+        ip_address=None,
+        user_agent=None,
+        metadata=None,
+    ) -> None:
+        """Best-effort auth audit entry (LOGIN / LOGIN_FAILED / LOGOUT)."""
+        try:
+            from app.services import audit_service
+
+            audit_service.write_tenant_audit(
+                self.db,
+                action=action,
+                entity_name="AUTH",
+                actor_user_id=user_id,
+                actor_label=actor_label,
+                actor_type="USER",
+                ip_address=ip_address,
+                user_agent=user_agent,
+                extra_metadata=metadata,
+                commit=False,
+            )
+        except Exception:
+            pass
 
     def _handle_failed_login(
         self,

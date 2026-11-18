@@ -1,7 +1,16 @@
 import base64
 import hashlib
-from cryptography.fernet import Fernet
+import logging
+from cryptography.fernet import Fernet, InvalidToken
 from app.core.config import settings
+
+logger = logging.getLogger(__name__)
+
+# Fernet tokens are URL-safe base64 and always begin with this version byte
+# (0x80) once base64-encoded, i.e. the literal prefix "gAAAAA". We use it to
+# tell a genuine ciphertext (which must decrypt or error) apart from legacy
+# plaintext that predates encryption (which we still tolerate).
+_FERNET_PREFIX = "gAAAAA"
 
 def _get_fernet() -> Fernet:
     """
@@ -26,18 +35,36 @@ def encrypt_string(plain_text: str) -> str:
 
 def decrypt_string(cipher_text: str) -> str:
     """
-    Decrypt a base64 encoded cipher text and return the plain text.
+    Decrypt a Fernet-encrypted string and return the plain text.
+
+    Fail-closed for genuine ciphertext: if a value *looks* like a Fernet token
+    (``gAAAAA`` prefix) but cannot be decrypted, that means the key is wrong,
+    rotated, or the data is corrupt — we raise instead of silently returning
+    the still-encrypted blob as if it were plaintext (the previous behaviour,
+    which could hand a garbage "DB URL" to callers and mask key/tamper issues).
+
+    Legacy plaintext that predates encryption (no Fernet prefix) is tolerated
+    and returned unchanged, so this does not break rows written before
+    encryption was introduced.
     """
     if not cipher_text:
         return cipher_text
 
+    looks_encrypted = cipher_text.startswith(_FERNET_PREFIX)
     try:
         fernet = _get_fernet()
         decrypted = fernet.decrypt(cipher_text.encode())
         return decrypted.decode()
-    except Exception:
-        # If decryption fails (e.g. if it was already plain text or key changed),
-        # return as is or handle accordingly. For safety in transition, return as is.
+    except (InvalidToken, ValueError) as exc:
+        if looks_encrypted:
+            # Genuine ciphertext we could not decrypt — do NOT fall back to the
+            # ciphertext. Surface it so the caller fails loudly.
+            logger.error(
+                "decrypt_string: failed to decrypt a Fernet token (wrong/rotated "
+                "DATABASE_ENCRYPTION_KEY or corrupt data)."
+            )
+            raise
+        # Not an encrypted value — legacy plaintext; return unchanged.
         return cipher_text
 
 

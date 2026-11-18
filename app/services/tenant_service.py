@@ -200,6 +200,7 @@ class TenantService:
             tax_id=payload.tax_id,
             deployment_model=_dm,
             deployment_mode=deployment_mode_for_model(_dm),
+            facility_profile=(getattr(payload, "facility_profile", None) or "HOSPITAL"),
         )
         self.db.add(tenant)
         try:
@@ -914,6 +915,20 @@ class TenantService:
 
         # Clear onboarding data only after the email is dispatched.
         tenant.onboarding_data = None
+
+        # Gate modules to the facility type chosen at registration (master-DB
+        # TenantModuleAccess), so a standalone Dental/Eye/Pharmacy tenant only
+        # sees its vertical. Only a SaaS admin can change this afterwards.
+        try:
+            from app.services.tenant_module_service import TenantModuleService
+            _fp = getattr(tenant, "facility_profile", None) or "HOSPITAL"
+            _res = TenantModuleService(self.db).apply_profile(tenant.id, _fp)
+            self._record_step(
+                tenant, "Apply Facility Profile",
+                f"{_res.get('label', _fp)} - {len(_res.get('disabled_modules', []))} module(s) gated off")
+        except Exception as exc:
+            logger.warning("Facility profile gating skipped for %s: %s", tenant.code, exc)
+            self._record_step(tenant, "Apply Facility Profile", str(exc)[:300], "SKIPPED")
 
         self.db.commit()
         return tenant

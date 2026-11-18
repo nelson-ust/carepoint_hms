@@ -139,6 +139,44 @@ class TenantRegistrationSchema(BaseModel):
     def _norm_deployment_model(cls, v):
         return normalize_deployment_model(v)
 
+    # Facility type chosen at registration. Gates which modules the tenant
+    # receives once provisioned; only a SaaS admin can change it afterwards.
+    facility_profile: Optional[str] = "HOSPITAL"
+
+    @field_validator("facility_profile")
+    @classmethod
+    def _norm_facility_profile(cls, v):
+        code = (v or "HOSPITAL").strip().upper()
+        if code not in {"HOSPITAL", "DENTAL", "EYE", "PHARMACY"}:
+            raise ValueError(f"Unknown facility type '{v}'.")
+        return code
+
+    @field_validator("tenant_code")
+    @classmethod
+    def _validate_tenant_code(cls, v):
+        """
+        Strict slug validation. ``tenant_code`` is used to build the tenant
+        database name, SQL identifiers, and subdomain routing, so it must be a
+        safe, predictable slug — never free text. This closes the identifier
+        injection / malformed-identifier vector at the provisioning boundary.
+        """
+        import re
+
+        code = (v or "").strip().lower()
+        if not re.fullmatch(r"[a-z][a-z0-9_]{1,38}", code):
+            raise ValueError(
+                "tenant_code must be 2-39 characters, start with a letter, and "
+                "contain only lowercase letters, digits and underscores."
+            )
+        reserved = {
+            "www", "api", "app", "admin", "saas", "carepointhms",
+            "carepoint_hms", "localhost", "postgres", "public", "master",
+            "template0", "template1",
+        }
+        if code in reserved:
+            raise ValueError(f"tenant_code '{code}' is reserved and cannot be used.")
+        return code
+
     # Subscription Plan
     plan_code: str
 

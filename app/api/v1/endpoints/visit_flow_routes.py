@@ -44,7 +44,10 @@ from app.schemas.visit_flow_schemas import (
     VisitFlowTemplateUpdateSchema,
     VisitFlowTemplateUpdateSchema,
 )
-from app.seeds.clinical_flow_seed import seed_standard_visit_flow
+from app.seeds.clinical_flow_seed import (
+    reconcile_standard_visit_flow,
+    seed_standard_visit_flow,
+)
 from app.services.visit_flow_service import VisitFlowService
 from app.utils.pagination import paginate_response
 
@@ -65,13 +68,42 @@ def seed_standard_pathway(
     db: Annotated[Session, Depends(get_db)],
 ):
     """
-    Create the default sequential outpatient pathway template for this tenant
-    (Registration → Triage → Consultation → Laboratory → Radiology → Pharmacy →
-    Billing), mapped to the tenant's configured service delivery points.
+    Create the default outpatient pathway template for this tenant
+    (Registration → HMO desk → Payment → Triage → Consultation → Laboratory
+    → Radiology → Pharmacy → Checkout), mapped to the tenant's service points.
 
     Idempotent — if the standard template already exists it is returned as-is.
+    To upgrade an existing tenant's template to this sequence, use
+    POST /visit-flows/reconcile-standard instead.
     """
     return seed_standard_visit_flow(db)
+
+
+@router.post(
+    "/reconcile-standard",
+    status_code=status.HTTP_200_OK,
+    summary="Re-align an existing tenant's standard outpatient pathway",
+)
+def reconcile_standard_pathway(
+    _: AdminUser,
+    db: Annotated[Session, Depends(get_db)],
+    force: bool = Query(
+        False,
+        description=(
+            "Overwrite the standard template even when it has been customized. "
+            "By default a customized template is left untouched."
+        ),
+    ),
+):
+    """
+    Bring this tenant's Standard Outpatient Pathway into line with the current
+    canonical sequence (Registration → HMO desk → Payment → Triage →
+    Consultation → Laboratory → Radiology → Pharmacy → Checkout).
+
+    A pristine (never-edited) template is upgraded automatically; a customized
+    one is left as-is unless ``force=true`` is passed. Idempotent.
+    """
+    return reconcile_standard_visit_flow(db, force=force)
 
 
 def get_visit_flow_service(

@@ -491,6 +491,15 @@ Public auth endpoints (no bearer required):
 - ``POST {API_PREFIX}/auth/phone-verification/confirm``
 """.strip()
 
+# API docs exposure. The OpenAPI schema and ReDoc reveal the full API surface,
+# so in production they are disabled unless an operator explicitly opts in via
+# ENABLE_API_DOCS. Non-production keeps them on for developer convenience.
+_DOCS_ENABLED = (APP_ENV.lower() not in {"production", "staging"}) or bool(
+    getattr(settings, "ENABLE_API_DOCS", False)
+)
+_REDOC_URL = "/redoc" if _DOCS_ENABLED else None
+_OPENAPI_URL = "/openapi.json" if _DOCS_ENABLED else None
+
 app = FastAPI(
     title=APP_NAME,
     version=APP_VERSION,
@@ -500,8 +509,8 @@ app = FastAPI(
     # We replace docs_url with a custom Swagger UI further down so we can
     # auto-capture access tokens from public auth responses.
     docs_url=None,
-    redoc_url="/redoc",
-    openapi_url="/openapi.json",
+    redoc_url=_REDOC_URL,
+    openapi_url=_OPENAPI_URL,
 )
 
 
@@ -522,11 +531,43 @@ register_exception_handlers(app)
 # settings.UPLOADS_DIR, or <cwd>/uploads by default — so publicly served
 # assets like tenant branding logos and card-funding proofs are always
 # reachable at '/uploads/...', even when UPLOADS_DIR isn't explicitly set.
+class _HardenedStaticFiles(StaticFiles):
+    """
+    StaticFiles that serves user-uploaded content defensively.
+
+    ``/uploads`` is a public mount of files users can upload, so a file served
+    inline with a sniffable type is a stored-XSS vector on the API origin, and
+    direct navigation to a file is a data-exposure path. We force every served
+    file to be treated as an opaque, non-executable download:
+
+      * ``X-Content-Type-Options: nosniff`` — no MIME sniffing.
+      * ``Content-Disposition: attachment`` — never render inline on direct
+        navigation (``<img src>`` embeds still work).
+      * a locked-down CSP + sandbox — neutralises any HTML/SVG that slips in.
+
+    NOTE: this hardens *serving*. PHI/PII should still move off this open mount
+    to authorization-checked endpoints or S3 pre-signed URLs.
+    """
+
+    async def get_response(self, path, scope):
+        response = await super().get_response(path, scope)
+        try:
+            response.headers.setdefault("X-Content-Type-Options", "nosniff")
+            response.headers.setdefault("Content-Disposition", "attachment")
+            response.headers.setdefault(
+                "Content-Security-Policy", "default-src 'none'; sandbox"
+            )
+            response.headers.setdefault("X-Frame-Options", "DENY")
+        except Exception:
+            pass
+        return response
+
+
 try:
     from app.utils.storage import uploads_base_dir
 
     _uploads_dir = uploads_base_dir()
-    app.mount("/uploads", StaticFiles(directory=_uploads_dir), name="uploads")
+    app.mount("/uploads", _HardenedStaticFiles(directory=_uploads_dir), name="uploads")
     logger.info("Mounted uploads directory at '/uploads' from '%s'.", _uploads_dir)
 except Exception as exc:  # never block startup on a static mount
     logger.warning("Could not mount uploads directory at '/uploads': %s", exc)
@@ -593,7 +634,7 @@ app.add_middleware(
         "Accept",
         "Origin",
     ],
-    expose_headers=["X-Request-ID", "X-RateLimit-Remaining", "X-RateLimit-Reset"],
+    expose_headers=["X-Request-ID", "X-RateLimit-Remaining", "X-RateLimit-Reset", "Content-Disposition", "X-Backup-Filename"],
     max_age=600,
 )
 
@@ -903,6 +944,11 @@ async def custom_swagger_ui_html() -> HTMLResponse:
     - skips public auth URLs in the request interceptor so OTP/2FA flows
       don't accidentally send a bearer token
     """
+    # Docs are disabled in production (unless ENABLE_API_DOCS); the OpenAPI
+    # schema is unavailable, so serve a 404 rather than a broken page.
+    if not _DOCS_ENABLED or not app.openapi_url:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="Not found")
     openapi_url = app.openapi_url
     title = f"{app.title} - Swagger UI"
 

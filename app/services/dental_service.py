@@ -22,6 +22,8 @@ from app.core.exceptions import BadRequestError, NotFoundError
 from app.models.all_models import (
     DentalChart,
     DentalProcedure,
+    DentalProcedureCatalog,
+    DentalRecall,
     DentalToothRecord,
     Patient,
     StaffProfile,
@@ -90,6 +92,9 @@ class DentalService:
             "performed_by_staff_id": p.performed_by_staff_id,
             "performed_by": self._staff_name(p.performed_by_staff_id),
             "note": p.note,
+            "catalog_id": p.catalog_id,
+            "billed_at": p.billed_at.isoformat() if getattr(p, "billed_at", None) else None,
+            "is_billed": p.billed_at is not None,
             "created_at": p.created_at.isoformat() if getattr(p, "created_at", None) else None,
         }
 
@@ -231,6 +236,20 @@ class DentalService:
     def create_procedure(self, data: dict, actor) -> dict:
         if not data.get("patient_id"):
             raise BadRequestError("patient_id is required.")
+        # A catalogue selection fills in name / code / cost when not supplied.
+        catalog_id = data.get("catalog_id")
+        if catalog_id is not None:
+            cat = self.db.query(DentalProcedureCatalog).filter(
+                DentalProcedureCatalog.id == catalog_id,
+                DentalProcedureCatalog.is_deleted.is_(False)).first()
+            if not cat:
+                raise NotFoundError("Catalogue procedure not found.")
+            if not data.get("procedure_name"):
+                data["procedure_name"] = cat.name
+            if not data.get("procedure_code"):
+                data["procedure_code"] = cat.code
+            if data.get("cost") is None:
+                data["cost"] = cat.default_cost
         if not data.get("procedure_name"):
             raise BadRequestError("procedure_name is required.")
         p = DentalProcedure(
@@ -244,6 +263,7 @@ class DentalService:
             performed_date=data.get("performed_date"),
             performed_by_staff_id=data.get("performed_by_staff_id"),
             note=data.get("note"),
+            catalog_id=catalog_id,
         )
         self.db.add(p)
         self.db.commit()
@@ -296,8 +316,226 @@ class DentalService:
                      .filter(DentalToothRecord.is_deleted.is_(False))
                      .group_by(DentalToothRecord.condition).all())
         distribution = [{"condition": getattr(c, "value", c), "count": n} for c, n in dist_rows]
+        recalls_due = self.db.query(func.count(DentalRecall.id)).filter(
+            DentalRecall.is_deleted.is_(False),
+            DentalRecall.status.in_(["DUE", "SCHEDULED"]),
+            DentalRecall.due_date <= date.today()).scalar() or 0
+        unbilled = self.db.query(func.count(DentalProcedure.id)).filter(
+            DentalProcedure.is_deleted.is_(False),
+            DentalProcedure.status == DentalProcedureStatus.COMPLETED,
+            DentalProcedure.billed_at.is_(None),
+            DentalProcedure.cost.isnot(None)).scalar() or 0
         return {
             "charts_total": charts, "charts_open": open_charts,
             "procedures_planned": planned, "procedures_completed": completed,
             "completed_revenue": _d(revenue), "condition_distribution": distribution,
+            "recalls_due": recalls_due, "procedures_unbilled": unbilled,
+        }
+
+    # ======================================================================
+    # PROCEDURE CATALOGUE (price list)
+    # ======================================================================
+    def _catalog_dict(self, c: DentalProcedureCatalog) -> dict:
+        return {
+            "id": c.id, "code": c.code, "name": c.name, "category": c.category,
+            "default_cost": _d(c.default_cost), "tooth_specific": c.tooth_specific,
+            "billable_service_id": c.billable_service_id, "is_active": c.is_active,
+            "description": c.description,
+        }
+
+    def list_catalog(self, *, search: Optional[str] = None, category: Optional[str] = None,
+                     active_only: bool = False, skip: int = 0, limit: int = 200):
+        q = self.db.query(DentalProcedureCatalog).filter(
+            DentalProcedureCatalog.is_deleted.is_(False))
+        if active_only:
+            q = q.filter(DentalProcedureCatalog.is_active.is_(True))
+        if category:
+            q = q.filter(DentalProcedureCatalog.category == category)
+        if search:
+            like = f"%{search.strip()}%"
+            q = q.filter(DentalProcedureCatalog.name.ilike(like) |
+                         DentalProcedureCatalog.code.ilike(like))
+        total = q.count()
+        rows = (q.order_by(DentalProcedureCatalog.category, DentalProcedureCatalog.name)
+                .offset(skip).limit(limit).all())
+        return [self._catalog_dict(c) for c in rows], total
+
+    def create_catalog(self, data: dict) -> dict:
+        if not data.get("name"):
+            raise BadRequestError("name is required.")
+        c = DentalProcedureCatalog(
+            code=(data.get("code") or None),
+            name=data["name"].strip(),
+            category=(data.get("category") or None),
+            default_cost=Decimal(str(data.get("default_cost") or 0)),
+            tooth_specific=bool(data.get("tooth_specific") or False),
+            billable_service_id=data.get("billable_service_id"),
+            is_active=data.get("is_active", True),
+            description=(data.get("description") or None),
+        )
+        self.db.add(c)
+        self.db.commit()
+        self.db.refresh(c)
+        return self._catalog_dict(c)
+
+    def update_catalog(self, cat_id: int, data: dict) -> dict:
+        c = self.db.query(DentalProcedureCatalog).filter(
+            DentalProcedureCatalog.id == cat_id,
+            DentalProcedureCatalog.is_deleted.is_(False)).first()
+        if not c:
+            raise NotFoundError("Catalogue entry not found.")
+        for f in ("code", "name", "category", "tooth_specific", "billable_service_id",
+                  "is_active", "description"):
+            if f in data and data[f] is not None:
+                setattr(c, f, data[f])
+        if data.get("default_cost") is not None:
+            c.default_cost = Decimal(str(data["default_cost"]))
+        self.db.commit()
+        self.db.refresh(c)
+        return self._catalog_dict(c)
+
+    def delete_catalog(self, cat_id: int) -> None:
+        c = self.db.query(DentalProcedureCatalog).filter(
+            DentalProcedureCatalog.id == cat_id,
+            DentalProcedureCatalog.is_deleted.is_(False)).first()
+        if not c:
+            raise NotFoundError("Catalogue entry not found.")
+        c.is_deleted = True
+        self.db.commit()
+
+    # ======================================================================
+    # RECALLS (preventive-care follow-ups)
+    # ======================================================================
+    def _recall_dict(self, r: DentalRecall) -> dict:
+        today = date.today()
+        overdue = r.status in ("DUE", "SCHEDULED") and r.due_date is not None and r.due_date < today
+        return {
+            "id": r.id, "patient_id": r.patient_id, "chart_id": r.chart_id,
+            "recall_type": r.recall_type,
+            "due_date": r.due_date.isoformat() if r.due_date else None,
+            "interval_months": r.interval_months, "status": r.status, "note": r.note,
+            "created_by_staff_id": r.created_by_staff_id,
+            "created_by": self._staff_name(r.created_by_staff_id),
+            "completed_at": r.completed_at.isoformat() if r.completed_at else None,
+            "is_overdue": bool(overdue),
+            "patient": self._patient_brief(r.patient_id),
+        }
+
+    def list_recalls(self, *, patient_id: Optional[int] = None, status: Optional[str] = None,
+                     due_before: Optional[date] = None, skip: int = 0, limit: int = 100):
+        q = self.db.query(DentalRecall).filter(DentalRecall.is_deleted.is_(False))
+        if patient_id:
+            q = q.filter(DentalRecall.patient_id == patient_id)
+        if status:
+            q = q.filter(DentalRecall.status == status.upper())
+        if due_before:
+            q = q.filter(DentalRecall.due_date <= due_before)
+        total = q.count()
+        rows = (q.order_by(DentalRecall.due_date.asc()).offset(skip).limit(limit).all())
+        return [self._recall_dict(r) for r in rows], total
+
+    def create_recall(self, data: dict, actor) -> dict:
+        patient_id = data.get("patient_id")
+        if not patient_id:
+            raise BadRequestError("patient_id is required.")
+        if not data.get("due_date"):
+            raise BadRequestError("due_date is required.")
+        if not self.db.query(Patient.id).filter(
+                Patient.id == patient_id, Patient.is_deleted.is_(False)).first():
+            raise NotFoundError("Patient not found.")
+        r = DentalRecall(
+            patient_id=patient_id, chart_id=data.get("chart_id"),
+            recall_type=(data.get("recall_type") or None),
+            due_date=data["due_date"], interval_months=data.get("interval_months"),
+            status=(data.get("status") or "DUE").upper(),
+            note=data.get("note"),
+            created_by_staff_id=self._staff_id_for_user(actor),
+        )
+        self.db.add(r)
+        self.db.commit()
+        self.db.refresh(r)
+        return self._recall_dict(r)
+
+    def update_recall(self, recall_id: int, data: dict) -> dict:
+        r = self.db.query(DentalRecall).filter(
+            DentalRecall.id == recall_id, DentalRecall.is_deleted.is_(False)).first()
+        if not r:
+            raise NotFoundError("Recall not found.")
+        for f in ("recall_type", "due_date", "interval_months", "note", "chart_id"):
+            if f in data and data[f] is not None:
+                setattr(r, f, data[f])
+        if data.get("status"):
+            r.status = data["status"].upper()
+            if r.status == "COMPLETED" and r.completed_at is None:
+                r.completed_at = datetime.now(timezone.utc)
+        self.db.commit()
+        self.db.refresh(r)
+        return self._recall_dict(r)
+
+    # ======================================================================
+    # TREATMENT-PLAN BILLING
+    # ======================================================================
+    def bill_chart(self, chart_id: int, *, procedure_ids: Optional[list[int]] = None,
+                   actor=None) -> dict:
+        """Push a chart's billable procedures onto the patient's visit charge
+        sheet (reusing the shared billing engine), then mark them billed.
+
+        Bills the given ``procedure_ids`` when supplied, otherwise every
+        un-billed procedure on the chart that carries a cost."""
+        from app.services.billing_service import BillingService
+
+        chart = self.db.query(DentalChart).filter(
+            DentalChart.id == chart_id, DentalChart.is_deleted.is_(False)).first()
+        if not chart:
+            raise NotFoundError("Dental chart not found.")
+        if not chart.visit_id:
+            raise BadRequestError(
+                "This chart is not linked to a visit, so its procedures cannot be "
+                "billed. Attach the chart to a visit first.")
+
+        q = self.db.query(DentalProcedure).filter(
+            DentalProcedure.is_deleted.is_(False),
+            DentalProcedure.chart_id == chart_id,
+            DentalProcedure.billed_at.is_(None))
+        if procedure_ids:
+            q = q.filter(DentalProcedure.id.in_(procedure_ids))
+        procs = q.all()
+        billable = [p for p in procs if p.cost is not None and Decimal(str(p.cost)) > 0]
+        if not billable:
+            raise BadRequestError(
+                "No un-billed procedures with a cost were found on this chart.")
+
+        # Resolve the ledger link from each procedure's catalogue entry (if any).
+        cat_ids = {p.catalog_id for p in billable if p.catalog_id}
+        bs_by_cat: dict[int, Optional[int]] = {}
+        if cat_ids:
+            for c in self.db.query(DentalProcedureCatalog).filter(
+                    DentalProcedureCatalog.id.in_(cat_ids)).all():
+                bs_by_cat[c.id] = c.billable_service_id
+
+        items = []
+        for p in billable:
+            items.append({
+                "billable_service_id": bs_by_cat.get(p.catalog_id) if p.catalog_id else None,
+                "service_name": p.procedure_name,
+                "service_code": p.procedure_code,
+                "quantity": 1,
+                "unit_price": p.cost,
+                "discount_amount": 0,
+                "source_reference": f"DENTAL-PROC-{p.id}",
+            })
+
+        actor_user_id = getattr(actor, "id", None)
+        summary = BillingService(self.db).record_visit_services(
+            chart.visit_id, items, rendered_by_user_id=actor_user_id)
+
+        now = datetime.now(timezone.utc)
+        for p in billable:
+            p.billed_at = now
+        self.db.commit()
+
+        return {
+            "billed_count": len(billable),
+            "billed_procedure_ids": [p.id for p in billable],
+            "billing": summary,
         }

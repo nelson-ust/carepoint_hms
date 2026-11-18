@@ -769,8 +769,26 @@ class MortuaryChargeType(StringEnum):
     EMBALMING = "EMBALMING"
     AUTOPSY = "AUTOPSY"
     BODY_PREP = "BODY_PREP"
+    DRESSING = "DRESSING"          # body washing / dressing
+    PRESERVATION = "PRESERVATION"  # chemicals / refrigeration surcharge
+    COFFIN = "COFFIN"              # casket / coffin sale
+    HEARSE = "HEARSE"             # hearse / ambulance hire
+    PENALTY = "PENALTY"           # late-collection penalty
+    DOCUMENTATION = "DOCUMENTATION"  # certificates, forms, gate pass
     MORTUARY_FEE = "MORTUARY_FEE"
     OTHER = "OTHER"
+
+
+class MortuaryRatePeriod(StringEnum):
+    DAILY = "DAILY"
+    MONTHLY = "MONTHLY"
+
+
+class MortuaryBillingCadence(StringEnum):
+    """How a mortuary charge is billed: once, or recurring per day / per month."""
+    ONE_OFF = "ONE_OFF"
+    DAILY = "DAILY"
+    MONTHLY = "MONTHLY"
 
 
 class MortuaryChargeStatus(StringEnum):

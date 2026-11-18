@@ -31,6 +31,9 @@ from app.core.enums import (
     MortuaryEffectStatus,
     MortuaryChargeType,
     MortuaryChargeStatus,
+    MortuaryRatePeriod,
+    MortuaryBillingCadence,
+    AccountType,
     MortuaryPaymentMethod,
 )
 from app.core.exceptions import BadRequestError, NotFoundError
@@ -47,6 +50,9 @@ from app.models.all_models import (
     MortuaryCharge,
     MortuaryDeathCertificate,
     MortuaryPayment,
+    MortuaryFeeSchedule,
+    MortuaryUnitRateHistory,
+    Account,
 )
 from app.schemas.mortuary_schemas import (
     DeathRecordCreateSchema,
@@ -57,6 +63,8 @@ from app.schemas.mortuary_schemas import (
     DeceasedUpdateSchema,
     MortuaryUnitCreateSchema,
     MortuaryUnitUpdateSchema,
+    MortuaryFeeCreateSchema,
+    MortuaryFeeUpdateSchema,
 )
 
 
@@ -67,6 +75,25 @@ def _utcnow() -> datetime:
 # Records that still physically occupy a storage slot.
 _ACTIVE_STATUSES = (DeceasedStatus.REGISTERED, DeceasedStatus.IN_STORAGE)
 
+
+# Mortuary revenue sub-accounts (children of 4070 "Mortuary Services Revenue").
+# Splitting the income streams keeps the GL meaningful for a Nigerian mortuary.
+MORTUARY_SUB_ACCOUNTS = [
+    ("4071", "Mortuary Storage Revenue"),
+    ("4072", "Mortuary Embalming & Preservation Revenue"),
+    ("4073", "Mortuary Autopsy Revenue"),
+    ("4074", "Mortuary Documentation & Certificate Revenue"),
+    ("4075", "Mortuary Ancillary Revenue"),
+]
+# Which revenue sub-account each charge type posts to by default.
+CHARGE_TYPE_ACCOUNT_CODE = {
+    "STORAGE": "4071",
+    "EMBALMING": "4072", "PRESERVATION": "4072", "BODY_PREP": "4072", "DRESSING": "4072",
+    "AUTOPSY": "4073",
+    "DOCUMENTATION": "4074",
+    "COFFIN": "4075", "HEARSE": "4075", "PENALTY": "4075",
+    "VIEWING": "4075", "MORTUARY_FEE": "4075", "OTHER": "4075",
+}
 
 class MortuaryService:
     """Mortuary storage + deceased-record operations."""
@@ -116,6 +143,10 @@ class MortuaryService:
             "status": str(unit.status),
             "location": unit.location,
             "temperature_c": unit.temperature_c,
+            "rate": unit.rate,
+            "rate_period": str(unit.rate_period),
+            "account_id": unit.account_id,
+            "account_code": unit.account_code,
             "notes": unit.notes,
             "occupied": occupied,
             "available_slots": max(unit.capacity - occupied, 0),
@@ -150,9 +181,16 @@ class MortuaryService:
         if exists:
             raise BadRequestError(message="A storage unit with this code already exists.", detail={"code": payload.code})
         data = payload.model_dump(exclude_unset=True)
+        rate_period = data.pop("rate_period", "DAILY")
+        acct_code = data.pop("account_code", None)
+        acct_id = data.pop("account_id", None)
+        if acct_code or acct_id:
+            acct_id, acct_code = self._resolve_account(account_code=acct_code, account_id=acct_id, charge_type="STORAGE")
         unit = MortuaryUnit(
             unit_type=MortuaryUnitType(data.pop("unit_type", "COLD_CHAMBER")),
             status=MortuaryUnitStatus.AVAILABLE,
+            rate_period=MortuaryRatePeriod((rate_period or "DAILY").upper()),
+            account_id=acct_id, account_code=acct_code,
             **data,
         )
         self.db.add(unit)
@@ -160,20 +198,65 @@ class MortuaryService:
         self.db.refresh(unit)
         return unit
 
-    def update_unit(self, unit_id: int, payload: MortuaryUnitUpdateSchema) -> MortuaryUnit:
+    def update_unit(self, unit_id: int, payload: MortuaryUnitUpdateSchema, actor=None) -> MortuaryUnit:
+        from decimal import Decimal as _D
         unit = self.get_unit(unit_id)
+        before_rate = _D(str(unit.rate or 0))
+        before_period = str(unit.rate_period)
+        before_acct = unit.account_code
         data = payload.model_dump(exclude_unset=True)
         if "unit_type" in data and data["unit_type"]:
             unit.unit_type = MortuaryUnitType(data.pop("unit_type"))
         if "status" in data and data["status"]:
             unit.status = MortuaryUnitStatus(data.pop("status"))
+        if data.get("rate_period"):
+            unit.rate_period = MortuaryRatePeriod(data.pop("rate_period").upper())
+        if data.get("account_code") or data.get("account_id"):
+            unit.account_id, unit.account_code = self._resolve_account(
+                account_code=data.get("account_code"), account_id=data.get("account_id"), charge_type="STORAGE")
+        data.pop("account_code", None); data.pop("account_id", None)
         for k, v in data.items():
             setattr(unit, k, v)
         # Keep derived status honest unless the caller forced OUT_OF_SERVICE.
         self._refresh_unit_status(unit)
+
+        # Record a rate-change audit when the cost terms changed. Bodies already
+        # assigned keep the rate snapshotted on their record; this trail keeps
+        # the historical published rate so past charges can be reconciled.
+        after_rate = _D(str(unit.rate or 0))
+        if (after_rate != before_rate or str(unit.rate_period) != before_period
+                or unit.account_code != before_acct):
+            name = None
+            if actor is not None:
+                fn, ln = getattr(actor, "first_name", None), getattr(actor, "last_name", None)
+                name = (f"{fn} {ln}".strip() if (fn or ln) else getattr(actor, "username", None))
+            self.db.add(MortuaryUnitRateHistory(
+                mortuary_unit_id=unit.id, rate=unit.rate,
+                rate_period=str(unit.rate_period), account_code=unit.account_code,
+                changed_by=name, effective_from=_utcnow(),
+                note=f"Rate changed from {before_rate} to {after_rate}" if after_rate != before_rate else "Terms updated",
+            ))
         self.db.commit()
         self.db.refresh(unit)
         return unit
+
+    def rate_history_dict(self, h: MortuaryUnitRateHistory) -> dict:
+        return {
+            "id": h.id, "mortuary_unit_id": h.mortuary_unit_id,
+            "rate": h.rate, "rate_period": h.rate_period,
+            "account_code": h.account_code, "changed_by": h.changed_by,
+            "note": h.note, "effective_from": h.effective_from,
+        }
+
+    def unit_rate_history(self, unit_id: int):
+        self.get_unit(unit_id)
+        return (
+            self.db.query(MortuaryUnitRateHistory)
+            .filter(MortuaryUnitRateHistory.mortuary_unit_id == unit_id,
+                    MortuaryUnitRateHistory.is_deleted.is_(False))
+            .order_by(MortuaryUnitRateHistory.id.desc())
+            .all()
+        )
 
     def delete_unit(self, unit_id: int) -> MortuaryUnit:
         unit = self.get_unit(unit_id)
@@ -382,6 +465,12 @@ class MortuaryService:
         old_unit_id = r.mortuary_unit_id
         r.mortuary_unit_id = new_unit.id
         r.status = DeceasedStatus.IN_STORAGE
+        # Snapshot the unit's storage rate so a later rate change never
+        # re-prices this body's charges (historical integrity).
+        r.storage_rate = new_unit.rate
+        r.storage_rate_period = str(new_unit.rate_period)
+        r.storage_account_id = new_unit.account_id
+        r.storage_account_code = new_unit.account_code
         if payload.received_by_staff_id is not None:
             r.received_by_staff_id = payload.received_by_staff_id
         self.db.flush()
@@ -406,9 +495,15 @@ class MortuaryService:
         waive = data.pop("waive_outstanding", False)
         waiver_reason = data.pop("waiver_reason", None)
 
-        # 1) Accrue a storage charge for the time held (if a daily rate is given).
+        # 1) Accrue storage + recurrent charges to date before settling. Storage
+        # is driven by the assigned unit's rate (daily/monthly); an explicit rate
+        # or the daily STORAGE fee item are fallbacks.
+        _unit = r.mortuary_unit
         if storage_rate is not None and _D(str(storage_rate)) > 0:
             self._accrue_storage_fee(r, _D(str(storage_rate)))
+        elif (_unit is not None and _unit.rate and _D(str(_unit.rate)) > 0) or self._storage_fee_item() is not None:
+            self._accrue_storage_fee(r)
+        self._refresh_recurrent_charges(r)
 
         # 2) Collect payment presented at release.
         if payment and payment.get("amount") is not None and _D(str(payment["amount"])) > 0:
@@ -821,6 +916,8 @@ class MortuaryService:
             "id": c.id, "deceased_record_id": c.deceased_record_id, "charge_type": str(c.charge_type),
             "status": str(c.status), "description": c.description, "quantity": c.quantity,
             "unit_amount": c.unit_amount, "amount": c.amount, "charged_at": c.charged_at,
+            "account_id": c.account_id, "account_code": c.account_code,
+            "fee_schedule_id": c.fee_schedule_id, "billing_cadence": str(c.billing_cadence),
             "notes": c.notes, "created_at": c.created_at,
         }
         if c.deceased_record:
@@ -830,15 +927,252 @@ class MortuaryService:
     def create_charge(self, record_id, payload):
         self.get_deceased(record_id)
         from decimal import Decimal as _D
-        qty = _D(str(payload.quantity or 1))
-        unit = _D(str(payload.unit_amount or 0))
+        ctype = (payload.charge_type or "OTHER").strip().upper()
+        unit = payload.unit_amount
+        fee = None
+        acct_id = acct_code = None
+        if getattr(payload, "fee_schedule_id", None):
+            fee = (self.db.query(MortuaryFeeSchedule)
+                   .filter(MortuaryFeeSchedule.id == payload.fee_schedule_id,
+                           MortuaryFeeSchedule.is_deleted.is_(False)).first())
+            if not fee:
+                raise NotFoundError(message="Fee item not found.",
+                                    detail={"fee_schedule_id": payload.fee_schedule_id})
+            ctype = str(fee.charge_type)
+            if unit is None:
+                unit = fee.unit_price
+            acct_id, acct_code = fee.account_id, fee.account_code
+        # An explicit account choice always wins; otherwise keep the fee's
+        # account, else resolve by charge type.
+        if getattr(payload, "account_code", None) or getattr(payload, "account_id", None):
+            acct_id, acct_code = self._resolve_account(
+                account_code=getattr(payload, "account_code", None),
+                account_id=getattr(payload, "account_id", None),
+                charge_type=ctype,
+            )
+        elif acct_code is None:
+            acct_id, acct_code = self._resolve_account(charge_type=ctype)
+        cadence = fee.billing_cadence if fee is not None else MortuaryBillingCadence.ONE_OFF
+        # Recurrent charges default their quantity to the periods held so far.
+        req_qty = payload.quantity
+        if cadence != MortuaryBillingCadence.ONE_OFF and (req_qty is None or _D(str(req_qty)) <= 1):
+            rec = self.get_deceased(record_id)
+            qty = _D(str(self._periods_held(rec, cadence)))
+        else:
+            qty = _D(str(req_qty or 1))
+        unit = _D(str(unit or 0))
         c = MortuaryCharge(
             deceased_record_id=record_id,
-            charge_type=MortuaryChargeType(payload.charge_type.strip().upper()),
+            charge_type=MortuaryChargeType(ctype),
             status=MortuaryChargeStatus.PENDING, description=payload.description,
-            quantity=qty, unit_amount=unit, amount=qty * unit, charged_at=_utcnow(), notes=payload.notes,
+            quantity=qty, unit_amount=unit, amount=qty * unit,
+            account_id=acct_id, account_code=acct_code,
+            fee_schedule_id=(fee.id if fee else None), billing_cadence=cadence,
+            charged_at=_utcnow(), notes=payload.notes,
         )
         self.db.add(c); self.db.commit(); self.db.refresh(c); return c
+
+    # ------------------------------------------------------------------
+    # Chart-of-accounts resolution + mortuary fee schedule (price list)
+    # ------------------------------------------------------------------
+    def _default_revenue_account(self) -> Account:
+        acct = (self.db.query(Account)
+                .filter(func.upper(Account.code) == "4070", Account.is_deleted.is_(False))
+                .first())
+        if acct is None:
+            acct = Account(code="4070", name="Mortuary Services Revenue",
+                           account_type=AccountType.REVENUE, is_postable=True)
+            self.db.add(acct); self.db.flush()
+        return acct
+
+    def ensure_mortuary_accounts(self) -> Account:
+        """Idempotently create the mortuary revenue sub-accounts under 4070 so the
+        account-code picker is meaningful and the GL separates income streams."""
+        parent = self._default_revenue_account()
+        existing = {
+            c for (c,) in self.db.query(Account.code)
+            .filter(Account.is_deleted.is_(False)).all()
+        }
+        created = False
+        for code, name in MORTUARY_SUB_ACCOUNTS:
+            if code not in existing:
+                self.db.add(Account(
+                    code=code, name=name, account_type=AccountType.REVENUE,
+                    is_postable=True, parent_account_id=parent.id))
+                created = True
+        if created:
+            self.db.commit()
+        return parent
+
+    def account_dict(self, a: Account) -> dict:
+        return {"id": a.id, "code": a.code, "name": a.name,
+                "account_type": str(a.account_type), "is_postable": a.is_postable}
+
+    def list_mortuary_accounts(self):
+        """Postable revenue accounts that belong to the mortuary module: the 4070
+        family, anything named 'mortuary', plus any account already wired to a
+        mortuary fee item or storage unit (so custom/historical codes still show)."""
+        parent = self.ensure_mortuary_accounts()
+        used = set()
+        for (aid,) in (self.db.query(MortuaryFeeSchedule.account_id)
+                       .filter(MortuaryFeeSchedule.account_id.isnot(None),
+                               MortuaryFeeSchedule.is_deleted.is_(False)).all()):
+            used.add(aid)
+        for (aid,) in (self.db.query(MortuaryUnit.account_id)
+                       .filter(MortuaryUnit.account_id.isnot(None),
+                               MortuaryUnit.is_deleted.is_(False)).all()):
+            used.add(aid)
+        rows = (self.db.query(Account)
+                .filter(Account.is_deleted.is_(False),
+                        Account.is_postable.is_(True),
+                        Account.account_type == AccountType.REVENUE)
+                .all())
+        out = [a for a in rows if (
+            a.id == parent.id
+            or a.parent_account_id == parent.id
+            or (a.name and "mortuary" in a.name.lower())
+            or a.id in used)]
+        out.sort(key=lambda a: a.code)
+        return out
+
+    def _resolve_account(self, *, account_code=None, account_id=None, charge_type=None):
+        """Resolve a chart-of-accounts code for a costing. Priority: explicit
+        account -> active fee item for the charge type -> default mortuary
+        revenue account. Guarantees a non-null code (every costing has one)."""
+        acct = None
+        if account_id:
+            acct = self.db.query(Account).filter(
+                Account.id == account_id, Account.is_deleted.is_(False)).first()
+        if acct is None and account_code:
+            acct = self.db.query(Account).filter(
+                func.upper(Account.code) == str(account_code).strip().upper(),
+                Account.is_deleted.is_(False)).first()
+            if acct is None:
+                raise NotFoundError(message=f"Account code '{account_code}' not found.",
+                                    detail={"account_code": account_code})
+        if acct is None and charge_type:
+            try:
+                ct = MortuaryChargeType(str(charge_type).strip().upper())
+            except Exception:
+                ct = None
+            if ct is not None:
+                fee = (self.db.query(MortuaryFeeSchedule)
+                       .filter(MortuaryFeeSchedule.charge_type == ct,
+                               MortuaryFeeSchedule.is_active.is_(True),
+                               MortuaryFeeSchedule.account_id.isnot(None),
+                               MortuaryFeeSchedule.is_deleted.is_(False))
+                       .order_by(MortuaryFeeSchedule.id.asc()).first())
+                if fee and fee.account_id:
+                    acct = self.db.query(Account).filter(Account.id == fee.account_id).first()
+        if acct is None and charge_type:
+            code = CHARGE_TYPE_ACCOUNT_CODE.get(str(charge_type).strip().upper())
+            if code:
+                self.ensure_mortuary_accounts()
+                acct = self.db.query(Account).filter(
+                    func.upper(Account.code) == code,
+                    Account.is_deleted.is_(False)).first()
+        if acct is None:
+            acct = self._default_revenue_account()
+        return acct.id, acct.code
+
+    def _storage_fee_item(self):
+        return (self.db.query(MortuaryFeeSchedule)
+                .filter(MortuaryFeeSchedule.charge_type == MortuaryChargeType.STORAGE,
+                        MortuaryFeeSchedule.is_active.is_(True),
+                        MortuaryFeeSchedule.is_deleted.is_(False))
+                .order_by(MortuaryFeeSchedule.id.asc()).first())
+
+    def fee_dict(self, f: MortuaryFeeSchedule) -> dict:
+        return {
+            "id": f.id, "code": f.code, "name": f.name,
+            "charge_type": str(f.charge_type), "unit_price": f.unit_price,
+            "is_daily": f.is_daily, "billing_cadence": str(f.billing_cadence),
+            "account_id": f.account_id,
+            "account_code": f.account_code, "is_active": f.is_active,
+            "description": f.description, "created_at": f.created_at,
+        }
+
+    def list_fees(self, *, active_only: bool = False):
+        q = self.db.query(MortuaryFeeSchedule).filter(MortuaryFeeSchedule.is_deleted.is_(False))
+        if active_only:
+            q = q.filter(MortuaryFeeSchedule.is_active.is_(True))
+        return q.order_by(MortuaryFeeSchedule.charge_type, MortuaryFeeSchedule.name).all()
+
+    def create_fee(self, payload: "MortuaryFeeCreateSchema") -> MortuaryFeeSchedule:
+        code = payload.code.strip().upper()
+        if self.db.query(MortuaryFeeSchedule).filter(
+                MortuaryFeeSchedule.code == code,
+                MortuaryFeeSchedule.is_deleted.is_(False)).first():
+            raise BadRequestError(message="A fee item with this code already exists.",
+                                  detail={"code": code})
+        acct_id, acct_code = self._resolve_account(
+            account_code=payload.account_code, account_id=payload.account_id,
+            charge_type=payload.charge_type)
+        cadence = MortuaryBillingCadence((getattr(payload, "billing_cadence", None) or "ONE_OFF").strip().upper())
+        f = MortuaryFeeSchedule(
+            code=code, name=payload.name.strip(),
+            charge_type=MortuaryChargeType((payload.charge_type or "OTHER").strip().upper()),
+            unit_price=payload.unit_price or 0,
+            billing_cadence=cadence, is_daily=(cadence == MortuaryBillingCadence.DAILY),
+            account_id=acct_id, account_code=acct_code,
+            is_active=payload.is_active, description=payload.description,
+        )
+        self.db.add(f); self.db.commit(); self.db.refresh(f); return f
+
+    def update_fee(self, fee_id: int, payload: "MortuaryFeeUpdateSchema") -> MortuaryFeeSchedule:
+        f = self.db.query(MortuaryFeeSchedule).filter(
+            MortuaryFeeSchedule.id == fee_id, MortuaryFeeSchedule.is_deleted.is_(False)).first()
+        if not f:
+            raise NotFoundError(message="Fee item not found.", detail={"fee_id": fee_id})
+        data = payload.model_dump(exclude_unset=True)
+        if data.get("charge_type"):
+            f.charge_type = MortuaryChargeType(data.pop("charge_type").strip().upper())
+        if data.get("billing_cadence"):
+            f.billing_cadence = MortuaryBillingCadence(data.pop("billing_cadence").strip().upper())
+            f.is_daily = (f.billing_cadence == MortuaryBillingCadence.DAILY)
+        if data.get("account_code") or data.get("account_id"):
+            f.account_id, f.account_code = self._resolve_account(
+                account_code=data.get("account_code"), account_id=data.get("account_id"),
+                charge_type=str(f.charge_type))
+        data.pop("account_code", None); data.pop("account_id", None)
+        for k, v in data.items():
+            setattr(f, k, v)
+        self.db.commit(); self.db.refresh(f); return f
+
+    def delete_fee(self, fee_id: int) -> MortuaryFeeSchedule:
+        f = self.db.query(MortuaryFeeSchedule).filter(
+            MortuaryFeeSchedule.id == fee_id, MortuaryFeeSchedule.is_deleted.is_(False)).first()
+        if not f:
+            raise NotFoundError(message="Fee item not found.", detail={"fee_id": fee_id})
+        f.is_deleted = True
+        self.db.commit(); return f
+
+    def ensure_default_fees(self) -> int:
+        """Seed a starter Nigerian mortuary price list (idempotent)."""
+        from decimal import Decimal as _D
+        if self.db.query(MortuaryFeeSchedule).filter(MortuaryFeeSchedule.is_deleted.is_(False)).first():
+            return 0
+        self.ensure_mortuary_accounts()
+        defaults = [
+            ("MORT-STORAGE", "Daily body storage", "STORAGE", 5000, True),
+            ("MORT-EMBALM", "Embalming", "EMBALMING", 50000, False),
+            ("MORT-AUTOPSY", "Autopsy / post-mortem", "AUTOPSY", 80000, False),
+            ("MORT-WASH", "Body washing & dressing", "DRESSING", 15000, False),
+            ("MORT-PRESERVE", "Preservation chemicals", "PRESERVATION", 20000, False),
+            ("MORT-COFFIN", "Casket / coffin", "COFFIN", 150000, False),
+            ("MORT-HEARSE", "Hearse / ambulance hire", "HEARSE", 60000, False),
+            ("MORT-DOC", "Documentation & gate pass", "DOCUMENTATION", 5000, False),
+            ("MORT-PENALTY", "Late-collection penalty (daily)", "PENALTY", 10000, True),
+        ]
+        for code, name, ctype, price, daily in defaults:
+            cadence = MortuaryBillingCadence.DAILY if daily else MortuaryBillingCadence.ONE_OFF
+            acct_id, acct_code = self._resolve_account(charge_type=ctype)
+            self.db.add(MortuaryFeeSchedule(
+                code=code, name=name, charge_type=MortuaryChargeType(ctype),
+                unit_price=_D(str(price)), is_daily=daily, billing_cadence=cadence,
+                account_id=acct_id, account_code=acct_code, is_active=True))
+        self.db.commit()
+        return len(defaults)
 
     def set_charge_status(self, charge_id, status):
         c = self.db.query(MortuaryCharge).filter(MortuaryCharge.id == charge_id, MortuaryCharge.is_deleted.is_(False)).first()
@@ -1099,6 +1433,14 @@ class MortuaryService:
         except Exception:
             return 0
 
+    def _periods_held(self, r: DeceasedRecord, period) -> int:
+        """Billable periods held: whole days, or started 30-day months."""
+        import math
+        days = max(self._days_in_storage(r), 1)
+        if "MONTH" in str(period).upper():
+            return max(math.ceil(days / 30.0), 1)
+        return days
+
     def _bill_figures(self, record_id: int) -> dict:
         from decimal import Decimal as _D
         charges = (
@@ -1187,9 +1529,39 @@ class MortuaryService:
             .order_by(MortuaryPayment.paid_at.desc()).all()
         )
 
-    def _accrue_storage_fee(self, r: DeceasedRecord, daily_rate) -> MortuaryCharge:
-        """Create a STORAGE charge for the days held, once per record."""
+    def _accrue_storage_fee(self, r: DeceasedRecord, daily_rate=None) -> MortuaryCharge:
+        """Upsert the STORAGE charge for the time held, driven by the ASSIGNED
+        storage unit's rate and period (daily or monthly). Falls back to an
+        explicit ``daily_rate`` or the daily STORAGE fee item. Carries the
+        ledger account; an un-paid accrual is refreshed to the current period."""
         from decimal import Decimal as _D
+        unit_row = r.mortuary_unit
+        fee = None
+        acct_id = acct_code = None
+        if daily_rate is not None and _D(str(daily_rate)) > 0:
+            rate = _D(str(daily_rate)); period = MortuaryRatePeriod.DAILY
+        elif r.storage_rate is not None and _D(str(r.storage_rate)) > 0:
+            # Rate snapshotted on the record at assignment — the historical rate.
+            rate = _D(str(r.storage_rate))
+            period = r.storage_rate_period or MortuaryRatePeriod.DAILY
+            acct_id, acct_code = r.storage_account_id, r.storage_account_code
+        elif unit_row is not None and unit_row.rate is not None and _D(str(unit_row.rate)) > 0:
+            rate = _D(str(unit_row.rate)); period = unit_row.rate_period or MortuaryRatePeriod.DAILY
+            acct_id, acct_code = unit_row.account_id, unit_row.account_code
+        else:
+            fee = self._storage_fee_item()
+            rate = _D(str(fee.unit_price)) if fee else _D("0")
+            period = MortuaryRatePeriod.DAILY
+            if fee is not None:
+                acct_id, acct_code = fee.account_id, fee.account_code
+        if acct_code is None:
+            acct_id, acct_code = self._resolve_account(charge_type="STORAGE")
+        is_monthly = "MONTH" in str(period).upper()
+        cadence = MortuaryBillingCadence.MONTHLY if is_monthly else MortuaryBillingCadence.DAILY
+        label = "month(s)" if is_monthly else "day(s)"
+        periods = self._periods_held(r, period)
+        qty = _D(str(periods))
+        unitamt = rate
         existing = (
             self.db.query(MortuaryCharge)
             .filter(
@@ -1200,27 +1572,67 @@ class MortuaryService:
             .first()
         )
         if existing:
+            if existing.status == MortuaryChargeStatus.PENDING:
+                # Freeze the rate recorded on the charge (what was used when the
+                # transaction was raised); only the period count grows.
+                eff_monthly = existing.billing_cadence == MortuaryBillingCadence.MONTHLY
+                eff_periods = self._periods_held(r, "MONTHLY" if eff_monthly else "DAILY")
+                eff_label = "month(s)" if eff_monthly else "day(s)"
+                existing.quantity = _D(str(eff_periods))
+                existing.amount = existing.quantity * (existing.unit_amount or unitamt)
+                existing.description = f"{eff_periods} {eff_label} storage"
+                if existing.account_code is None:
+                    existing.account_id, existing.account_code = acct_id, acct_code
+                if existing.fee_schedule_id is None and fee is not None:
+                    existing.fee_schedule_id = fee.id
             return existing
-        days = max(self._days_in_storage(r), 1)
-        qty = _D(str(days))
-        unit = _D(str(daily_rate))
         c = MortuaryCharge(
             deceased_record_id=r.id,
             charge_type=MortuaryChargeType.STORAGE,
             status=MortuaryChargeStatus.PENDING,
-            description=f"{days} day(s) cold storage",
-            quantity=qty, unit_amount=unit, amount=qty * unit, charged_at=_utcnow(),
+            description=f"{periods} {label} storage",
+            quantity=qty, unit_amount=unitamt, amount=qty * unitamt,
+            account_id=acct_id, account_code=acct_code,
+            fee_schedule_id=(fee.id if fee else None), billing_cadence=cadence,
+            charged_at=_utcnow(),
         )
         self.db.add(c)
         self.db.flush()
         return c
 
-    def accrue_storage(self, record_id: int, daily_rate) -> MortuaryCharge:
+    def _refresh_recurrent_charges(self, r: DeceasedRecord) -> None:
+        """Re-tally un-paid recurrent (non-storage) charges to the periods held."""
+        from decimal import Decimal as _D
+        rows = (
+            self.db.query(MortuaryCharge)
+            .filter(
+                MortuaryCharge.deceased_record_id == r.id,
+                MortuaryCharge.is_deleted.is_(False),
+                MortuaryCharge.status == MortuaryChargeStatus.PENDING,
+            )
+            .all()
+        )
+        for c in rows:
+            if c.charge_type == MortuaryChargeType.STORAGE:
+                continue  # handled by _accrue_storage_fee
+            if c.billing_cadence in (MortuaryBillingCadence.DAILY, MortuaryBillingCadence.MONTHLY):
+                periods = self._periods_held(r, c.billing_cadence)
+                c.quantity = _D(str(periods))
+                c.amount = c.quantity * c.unit_amount
+
+    def accrue(self, record_id: int, daily_rate=None) -> MortuaryCharge:
+        """Refresh ALL time-based charges to date: storage (from the unit rate)
+        and any recurrent non-storage charges."""
         r = self.get_deceased(record_id)
         c = self._accrue_storage_fee(r, daily_rate)
+        self._refresh_recurrent_charges(r)
         self.db.commit()
         self.db.refresh(c)
         return c
+
+    # Backwards-compatible alias.
+    def accrue_storage(self, record_id: int, daily_rate=None) -> MortuaryCharge:
+        return self.accrue(record_id, daily_rate)
 
     def _waive_pending(self, record_id: int, reason: str) -> None:
         charges = (

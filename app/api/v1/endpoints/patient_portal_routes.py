@@ -4,7 +4,8 @@ from __future__ import annotations
 import os
 import uuid as _uuid
 from typing import List, Annotated, Optional
-from fastapi import APIRouter, Depends, HTTPException, status, Request, File, Form, UploadFile, Query
+from datetime import date
+from fastapi import APIRouter, Depends, HTTPException, status, Request, File, Form, UploadFile, Query, Response
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
@@ -18,6 +19,7 @@ from app.services.paystack_service import PaystackService
 from app.services.membership_card_service import MembershipCardService
 from app.services.auth_service import AuthService
 from app.schemas.patient_portal_schemas import (
+    PortalCardStatementSchema,
     PatientPortalDashboard,
     PatientPortalProfile,
     PortalProfileUpdateSchema,
@@ -684,6 +686,67 @@ async def get_payment_config(
         "online_provider": "PAYSTACK" if online_enabled else None,
         "manual_enabled": True,
     }
+
+
+@router.get(
+    "/card/transactions",
+    response_model=PortalCardStatementSchema,
+    summary="Patient card usage log (credits & debits)",
+)
+async def portal_card_transactions(
+    current_user: Annotated[User, Depends(get_current_user)],
+    portal_service: Annotated[PatientPortalService, Depends(get_portal_service)],
+    card_service: Annotated[MembershipCardService, Depends(get_card_service)],
+):
+    """
+    The authenticated patient's own card usage log: wallet balance plus the
+    full history of credits (funding) and debits (payments), each debit stating
+    the service it paid for.
+    """
+    patient = portal_service.get_patient_by_user_id(current_user.id)
+    cards = card_service.list_patient_cards(patient.id)
+    if not cards:
+        return {"transactions": []}
+    card = cards[0]
+    txns = card_service.get_card_transactions(card.id)
+    return {
+        "card_number": card.card_number,
+        "balance": card.balance,
+        "status": str(card.status) if card.status is not None else None,
+        "currency": "NGN",
+        "transactions": txns,
+    }
+
+
+@router.get(
+    "/card/statement",
+    summary="Generate the patient's own card usage statement (PDF)",
+)
+async def portal_card_statement(
+    current_user: Annotated[User, Depends(get_current_user)],
+    portal_service: Annotated[PatientPortalService, Depends(get_portal_service)],
+    card_service: Annotated[MembershipCardService, Depends(get_card_service)],
+    date_from: Optional[date] = Query(None, description="Only include transactions on/after this date."),
+    date_to: Optional[date] = Query(None, description="Only include transactions on/before this date."),
+):
+    """
+    The authenticated patient generates a printable PDF statement of their own
+    card wallet: credits, debits, and the service each debit paid for.
+    """
+    patient = portal_service.get_patient_by_user_id(current_user.id)
+    cards = card_service.list_patient_cards(patient.id)
+    if not cards:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No membership card found for this patient.",
+        )
+    card = cards[0]
+    pdf_bytes, filename = card_service.generate_statement_pdf(card.id, date_from=date_from, date_to=date_to)
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @router.post("/fund-card", response_model=PaystackTransactionRead)

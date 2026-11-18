@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
 
@@ -104,18 +104,25 @@ class ReimbursementService:
 
     # ── Self-service (individual staff acting for themselves) ──────────
 
-    def _resolve_my_staff_profile_id(self, user_id: int) -> int:
+    def _find_my_staff_profile_id(self, user_id: int) -> Optional[int]:
+        """The caller's staff-profile id, or None when their account isn't
+        linked to one. Reads use this so a profile-less account (e.g. a pure
+        admin) simply sees no personal records instead of an error."""
         sp = (
             self.db.query(StaffProfile)
             .filter(StaffProfile.user_id == user_id, StaffProfile.is_deleted.is_(False))
             .first()
         )
-        if sp is None:
+        return sp.id if sp is not None else None
+
+    def _resolve_my_staff_profile_id(self, user_id: int) -> int:
+        sp_id = self._find_my_staff_profile_id(user_id)
+        if sp_id is None:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Your account is not linked to a staff profile. Contact HR.",
             )
-        return sp.id
+        return sp_id
 
     def create_my_reimbursement(self, data: ReimbursementSelfCreateSchema, user_id: int) -> ReimbursementRequest:
         self._validate_account(data.account_id)
@@ -124,7 +131,13 @@ class ReimbursementService:
         return self.repository.create(full)
 
     def list_my_reimbursements(self, user_id: int, skip: int = 0, limit: int = 100):
-        staff_profile_id = self._resolve_my_staff_profile_id(user_id)
+        # A read: a user with no staff profile simply has no personal reimbursements,
+        # so return an empty page rather than 400-ing the whole self-service
+        # screen. (Passing None to the repo would match every staff's rows, so
+        # short-circuit here instead.)
+        staff_profile_id = self._find_my_staff_profile_id(user_id)
+        if staff_profile_id is None:
+            return [], 0
         return self.repository.list_requests(staff_profile_id, skip, limit)
 
     def _assert_owns(self, request_id: int, user_id: int) -> ReimbursementRequest:

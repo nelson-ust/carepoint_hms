@@ -16,6 +16,22 @@ from app.models.all_models import TenantScheduledJob
 from app.services.tenant_job_runner import _compute_next_run, get_handler
 
 
+def _validate_timezone(name: Optional[str]) -> Optional[str]:
+    """Return a cleaned IANA tz name, or raise BadRequestError if invalid."""
+    if name is None:
+        return None
+    cleaned = name.strip()
+    if not cleaned or cleaned.upper() == "UTC":
+        return cleaned or None
+    try:
+        from zoneinfo import ZoneInfo
+
+        ZoneInfo(cleaned)
+    except Exception:
+        raise BadRequestError(message=f"Unknown timezone '{cleaned}'.")
+    return cleaned
+
+
 class TenantJobService:
     def __init__(self, db: Session) -> None:
         self.db = db
@@ -50,6 +66,8 @@ class TenantJobService:
         schedule_interval_minutes: Optional[int] = None,
         params: Optional[dict] = None,
         is_enabled: bool = True,
+        timezone_name: Optional[str] = None,
+        max_failures: Optional[int] = None,
     ) -> TenantScheduledJob:
         if not handler or get_handler(handler) is None:
             raise BadRequestError(
@@ -67,6 +85,8 @@ class TenantJobService:
             schedule_interval_minutes=schedule_interval_minutes,
             params=params,
             is_enabled=is_enabled,
+            timezone=_validate_timezone(timezone_name),
+            max_failures=max_failures,
         )
         record.next_run_at = _compute_next_run(record, base=datetime.now(timezone.utc))
         self.db.add(record)
@@ -82,6 +102,8 @@ class TenantJobService:
         schedule_interval_minutes: Optional[int] = None,
         params: Optional[dict] = None,
         is_enabled: Optional[bool] = None,
+        timezone_name: Optional[str] = None,
+        max_failures: Optional[int] = None,
     ) -> TenantScheduledJob:
         record = self.get_job(job_id)
         if schedule_cron is not None:
@@ -92,7 +114,26 @@ class TenantJobService:
             record.params = params
         if is_enabled is not None:
             record.is_enabled = is_enabled
+            # Re-enabling a previously auto-paused job clears its failure streak.
+            if is_enabled:
+                record.consecutive_failures = 0
+        if timezone_name is not None:
+            record.timezone = _validate_timezone(timezone_name)
+        if max_failures is not None:
+            record.max_failures = max_failures
         record.next_run_at = _compute_next_run(record, base=datetime.now(timezone.utc))
+        self.db.commit()
+        self.db.refresh(record)
+        return record
+
+    def run_now(self, job_id: int) -> TenantScheduledJob:
+        """Make a job due immediately so the next dispatcher tick runs it.
+
+        Does not execute inline — the dispatcher owns execution (and its
+        concurrency guards). Setting ``next_run_at`` to now is enough.
+        """
+        record = self.get_job(job_id)
+        record.next_run_at = datetime.now(timezone.utc)
         self.db.commit()
         self.db.refresh(record)
         return record

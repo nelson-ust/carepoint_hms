@@ -34,6 +34,8 @@ from app.schemas.mortuary_schemas import (
     AutopsyUpdateSchema,
     CertificateCreateSchema,
     ChargeCreateSchema,
+    MortuaryFeeCreateSchema,
+    MortuaryFeeUpdateSchema,
     ChargeStatusSchema,
     EffectCreateSchema,
     EffectReleaseSchema,
@@ -147,11 +149,21 @@ def get_unit(
 def update_unit(
     unit_id: int,
     payload: MortuaryUnitUpdateSchema,
-    _: Annotated[User, Depends(require_permission("MORTUARY_MANAGE"))],
+    current_user: Annotated[User, Depends(require_permission("MORTUARY_MANAGE"))],
     service: Annotated[MortuaryService, Depends(get_mortuary_service)],
 ):
-    u = service.update_unit(unit_id, payload)
+    u = service.update_unit(unit_id, payload, actor=current_user)
     return {"success": True, "message": "Storage unit updated.", "unit": service.unit_dict(u)}
+
+
+@router.get("/units/{unit_id}/rate-history", response_model=SimpleListResponseSchema, summary="Rate-change history for a storage unit")
+def unit_rate_history(
+    unit_id: int,
+    _: Annotated[User, Depends(require_permission("MORTUARY_READ"))],
+    service: Annotated[MortuaryService, Depends(get_mortuary_service)],
+):
+    rows = service.unit_rate_history(unit_id)
+    return _list(rows, service.rate_history_dict, "Rate history fetched.")
 
 
 @router.delete("/units/{unit_id}", summary="Remove a storage unit")
@@ -440,6 +452,55 @@ def create_charge(record_id: int, payload: ChargeCreateSchema, _: Annotated[User
 def set_charge_status(charge_id: int, payload: ChargeStatusSchema, _: Annotated[User, Depends(MANAGE)], service: Annotated[MortuaryService, Depends(get_mortuary_service)]):
     c = service.set_charge_status(charge_id, payload.status)
     return {"success": True, "message": f"Charge marked {payload.status}.", "data": service.charge_dict(c)}
+
+
+# ---- Chart-of-accounts codes available to the mortuary module ----
+@router.get("/accounts", response_model=SimpleListResponseSchema, summary="Account codes available for mortuary costings")
+def list_mortuary_accounts(
+    _: Annotated[User, Depends(READ)], service: Annotated[MortuaryService, Depends(get_mortuary_service)],
+):
+    rows = service.list_mortuary_accounts()
+    return _list(rows, service.account_dict, "Mortuary account codes fetched.")
+
+
+# ---- Fee schedule (price list) — every costing points at a chart-of-accounts code ----
+@router.get("/fee-schedule", response_model=SimpleListResponseSchema, summary="List mortuary fee items (price list)")
+def list_fee_schedule(
+    _: Annotated[User, Depends(READ)], service: Annotated[MortuaryService, Depends(get_mortuary_service)],
+    active_only: bool = Query(False),
+):
+    items = service.list_fees(active_only=active_only)
+    return _list(items, service.fee_dict, "Fee schedule fetched.")
+
+
+@router.post("/fee-schedule", response_model=SimpleActionResponseSchema, status_code=status.HTTP_201_CREATED, summary="Add a fee item")
+def create_fee_item(payload: MortuaryFeeCreateSchema, _: Annotated[User, Depends(MANAGE)], service: Annotated[MortuaryService, Depends(get_mortuary_service)]):
+    f = service.create_fee(payload)
+    return {"success": True, "message": "Fee item added.", "data": service.fee_dict(f)}
+
+
+@router.put("/fee-schedule/{fee_id}", response_model=SimpleActionResponseSchema, summary="Update a fee item")
+def update_fee_item(fee_id: int, payload: MortuaryFeeUpdateSchema, _: Annotated[User, Depends(MANAGE)], service: Annotated[MortuaryService, Depends(get_mortuary_service)]):
+    f = service.update_fee(fee_id, payload)
+    return {"success": True, "message": "Fee item updated.", "data": service.fee_dict(f)}
+
+
+@router.delete("/fee-schedule/{fee_id}", response_model=SimpleActionResponseSchema, summary="Remove a fee item")
+def delete_fee_item(fee_id: int, _: Annotated[User, Depends(MANAGE)], service: Annotated[MortuaryService, Depends(get_mortuary_service)]):
+    service.delete_fee(fee_id)
+    return {"success": True, "message": "Fee item removed."}
+
+
+@router.post("/fee-schedule/seed-defaults", response_model=SimpleActionResponseSchema, summary="Seed the default Nigerian mortuary price list")
+def seed_fee_schedule(_: Annotated[User, Depends(MANAGE)], service: Annotated[MortuaryService, Depends(get_mortuary_service)]):
+    n = service.ensure_default_fees()
+    return {"success": True, "message": f"Seeded {n} default fee item(s)." if n else "Fee schedule already set up."}
+
+
+@router.post("/deceased/{record_id}/accrue-storage", response_model=SimpleActionResponseSchema, summary="Accrue storage charges to date")
+def accrue_storage(record_id: int, _: Annotated[User, Depends(MANAGE)], service: Annotated[MortuaryService, Depends(get_mortuary_service)]):
+    c = service.accrue_storage(record_id)
+    return {"success": True, "message": "Storage accrued to date.", "data": service.charge_dict(c)}
 
 
 # ---- Death certificate ----

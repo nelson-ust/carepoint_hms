@@ -355,17 +355,19 @@ class TenantMiddleware(BaseHTTPMiddleware):
                 if first_label in _resolved_reserved_labels() and not tenant_code_hdr:
                     return await call_next(request)
 
+                # Generic 404 — do NOT echo the host or tenant headers, which
+                # would let an unauthenticated caller enumerate which tenants
+                # exist. Resolution details are logged server-side instead.
                 identifier = tenant_code_hdr or tenant_domain_hdr or host_header or "unknown"
+                logger.info(
+                    "Tenant resolution failed (host=%s code=%s domain=%s).",
+                    host_header, tenant_code_hdr, tenant_domain_hdr,
+                )
                 return JSONResponse(
                     status_code=404,
                     content={
                         "success": False,
-                        "detail": f"Tenant '{identifier}' not found.",
-                        "tenant_resolution": {
-                            "host": host_header,
-                            "tenant_code_header": tenant_code_hdr,
-                            "tenant_domain_header": tenant_domain_hdr,
-                        },
+                        "detail": "The requested resource was not found.",
                     },
                 )
 

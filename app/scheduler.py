@@ -28,6 +28,9 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.core.database import MASTER_DATABASE_URL, get_engine_for_url
 from app.core.logger import get_logger
+from app.core.database import get_master_engine
+from app.core.pg_lock import try_advisory_lock
+import functools
 from app.models.all_models import Tenant, Admission, PatientPortalOtp, UserSession
 from app.services.admission_service import _OPEN_STATES
 from app.utils.charge_capture import capture_bed_day_charges_for_admission
@@ -241,6 +244,34 @@ def _run_daily_backups():
             logger.error(f"Failed to run automated backup for tenant {tenant_code}: {e}")
 
 
+def _run_single_instance(name: str, fn) -> None:
+    """
+    Run ``fn`` only if this worker can grab the master-DB advisory lock for
+    ``name``. With more than one API worker/replica, every worker starts its
+    own scheduler; without this guard each would fire the same job, producing
+    duplicate backups, invoices and reminders. A distinct lock key per job
+    means different jobs still run in parallel across workers — only the *same*
+    job is serialised to one runner at a time. If the lock is held elsewhere
+    the job is skipped silently this tick.
+    """
+    try:
+        engine = get_master_engine()
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.error("Scheduler: cannot acquire master engine for %s: %s", name, exc)
+        return
+    lock_name = f"carepoint:scheduler:{name}"
+    with try_advisory_lock(engine, lock_name) as acquired:
+        if not acquired:
+            logger.debug("Scheduler job %s skipped — another instance holds the lock.", name)
+            return
+        fn()
+
+
+def _locked(name: str, fn):
+    """Return a picklable-enough partial that runs ``fn`` under the ``name`` lock."""
+    return functools.partial(_run_single_instance, name, fn)
+
+
 def start_scheduler() -> None:
     """
     Idempotent start for the background task scheduler.
@@ -253,7 +284,7 @@ def start_scheduler() -> None:
     
     # Schedule Daily Bed-Day Rollover at 00:05 AM
     _scheduler.add_job(
-        _run_daily_bed_day_rollover,
+        _locked("daily_bed_day_rollover", _run_daily_bed_day_rollover),
         trigger="cron",
         hour=15,
         minute=12,
@@ -263,7 +294,7 @@ def start_scheduler() -> None:
     
     # Schedule Leave Reminders at 08:00 AM
     _scheduler.add_job(
-        _run_leave_reminders,
+        _locked("daily_leave_reminders", _run_leave_reminders),
         trigger="cron",
         hour=8,
         minute=0,
@@ -273,7 +304,7 @@ def start_scheduler() -> None:
     
     # Nightly insurance policy expiry + extended ledger sweep at 01:30
     _scheduler.add_job(
-        _run_policy_expiry_sweep,
+        _locked("nightly_policy_expiry_posting_sweep", _run_policy_expiry_sweep),
         trigger="cron",
         hour=1,
         minute=30,
@@ -283,7 +314,7 @@ def start_scheduler() -> None:
 
     # Schedule OTP & Session Cleanup every hour
     _scheduler.add_job(
-        _run_otp_cleanup,
+        _locked("hourly_otp_cleanup", _run_otp_cleanup),
         trigger="interval",
         hours=1,
         id="hourly_otp_cleanup",
@@ -293,7 +324,7 @@ def start_scheduler() -> None:
     # Dispatch due appointment reminders every 5 minutes. Each tick delivers
     # the day-before and 3-hours-before reminders whose fire time has passed.
     _scheduler.add_job(
-        _run_appointment_reminders,
+        _locked("appointment_reminders_dispatch", _run_appointment_reminders),
         trigger="interval",
         minutes=5,
         id="appointment_reminders_dispatch",
@@ -304,7 +335,7 @@ def start_scheduler() -> None:
     
     # Schedule Daily Backups at 01:00 AM
     _scheduler.add_job(
-        _run_daily_backups,
+        _locked("daily_database_backups", _run_daily_backups),
         trigger="cron",
         hour=15,
         minute=20,
@@ -316,7 +347,7 @@ def start_scheduler() -> None:
     # all active tenants and runs any due TenantScheduledJob rows for them.
     if run_tenant_jobs is not None:
         _scheduler.add_job(
-            _safe_run_tenant_jobs,
+            _locked("tenant_job_dispatcher", _safe_run_tenant_jobs),
             trigger="interval",
             minutes=1,
             id="tenant_job_dispatcher",
@@ -330,7 +361,7 @@ def start_scheduler() -> None:
     # live connectivity state.
     if sweep_offline_nodes is not None:
         _scheduler.add_job(
-            _safe_sweep_offline_nodes,
+            _locked("edge_node_offline_sweep", _safe_sweep_offline_nodes),
             trigger="interval",
             seconds=60,
             id="edge_node_offline_sweep",
@@ -343,7 +374,7 @@ def start_scheduler() -> None:
     # subscriptions whose period is closing and to flip overdue invoices.
     if SubscriptionBillingService is not None:
         _scheduler.add_job(
-            _safe_run_subscription_billing,
+            _locked("daily_subscription_billing", _safe_run_subscription_billing),
             trigger="cron",
             hour=2,
             minute=30,
@@ -357,7 +388,7 @@ def start_scheduler() -> None:
     # window has closed so members return to their original plan on time.
     if PromoPlanService is not None:
         _scheduler.add_job(
-            _safe_revert_due_promos,
+            _locked("promo_plan_auto_revert", _safe_revert_due_promos),
             trigger="interval",
             hours=1,
             id="promo_plan_auto_revert",
@@ -377,7 +408,7 @@ def _safe_run_subscription_billing() -> None:
         logger.warning("Subscription billing tick skipped: MASTER_DATABASE_URL is unset.")
         return
 
-    master_engine = create_engine(MASTER_DATABASE_URL, future=True)
+    master_engine = get_master_engine()
     try:
         with Session(master_engine) as master_db:
             service = SubscriptionBillingService(master_db)
@@ -402,7 +433,8 @@ def _safe_run_subscription_billing() -> None:
             except Exception as exc:
                 logger.exception("sweep_overdue failed: %s", exc)
     finally:
-        master_engine.dispose()
+        # Cached engine — do NOT dispose; its pool is shared process-wide.
+        pass
 
 
 def _safe_sweep_offline_nodes() -> None:
@@ -423,12 +455,13 @@ def _safe_run_tenant_jobs() -> None:
         return
     try:
         summary = run_tenant_jobs()
-        if summary.get("jobs_run") or summary.get("jobs_failed"):
+        if summary.get("jobs_run") or summary.get("jobs_failed") or summary.get("stale_reaped"):
             logger.info(
-                "Tenant job dispatcher tick: tenants=%s ran=%s failed=%s",
+                "Tenant job dispatcher tick: tenants=%s ran=%s failed=%s stale_reaped=%s",
                 summary.get("tenants"),
                 summary.get("jobs_run"),
                 summary.get("jobs_failed"),
+                summary.get("stale_reaped"),
             )
     except Exception as exc:
         logger.exception("Tenant job dispatcher tick raised: %s", exc)
@@ -440,7 +473,7 @@ def _safe_revert_due_promos() -> None:
         return
     if not MASTER_DATABASE_URL:
         return
-    master_engine = create_engine(MASTER_DATABASE_URL, future=True)
+    master_engine = get_master_engine()
     try:
         with Session(master_engine) as master_db:
             reverted = PromoPlanService(master_db).revert_due_campaigns()
@@ -449,7 +482,8 @@ def _safe_revert_due_promos() -> None:
     except Exception as exc:  # pragma: no cover
         logger.exception("Promo auto-revert tick raised: %s", exc)
     finally:
-        master_engine.dispose()
+        # Cached engine — do NOT dispose; its pool is shared process-wide.
+        pass
 
 
 def shutdown_scheduler() -> None:
@@ -459,23 +493,3 @@ def shutdown_scheduler() -> None:
     if _scheduler.running:
         logger.info("Shutting down background task scheduler...")
         _scheduler.shutdown(wait=True)
-
-
-
-'''
-lsof -i :8005 -t | xargs kill
-
-
-{
-  "tenant_name": "St. Nicholas Hospital",
-  "tenant_code": "stnicholas",
-  "domain_url": "stnicholas.carepointhms.com",
-  "plan_code": "ENTERPRISE",
-  "admin_email": "admin@stnicholas.com",
-  "admin_username": "stadmin",
-  "admin_password": "SecurePassword123!",
-  "admin_first_name": "Nelson",
-  "admin_last_name": "Attah"
-}
-
-'''

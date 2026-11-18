@@ -16,17 +16,29 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, Optional
 
-from sqlalchemy import create_engine, inspect
+from sqlalchemy import inspect, or_
 from sqlalchemy.exc import ProgrammingError, OperationalError
 from sqlalchemy.orm import Session
 
 from app.core.cryptography import decrypt_string
-from app.core.database import MASTER_DATABASE_URL, get_engine_for_url
+from app.core.database import MASTER_DATABASE_URL, get_engine_for_url, get_master_engine
 from app.core.multitenancy import clear_current_tenant, set_current_tenant
 from app.models.all_models import Tenant, TenantScheduledJob
 
 
 logger = logging.getLogger(__name__)
+
+try:
+    from app.core.config import settings as _settings
+except Exception:  # pragma: no cover - config should always import
+    _settings = None
+
+def _stale_lease_minutes() -> int:
+    """Minutes before a RUNNING job's lease is considered stale and reclaimed."""
+    try:
+        return max(int(getattr(_settings, "JOB_STALE_LEASE_MINUTES", 30) or 30), 1)
+    except Exception:
+        return 30
 
 
 # Per-engine cache: maps an engine's URL → bool indicating whether the
@@ -120,20 +132,19 @@ def _iter_active_tenants() -> list[Tenant]:
         return []
 
     try:
-        master_engine = create_engine(MASTER_DATABASE_URL, future=True)
-        try:
-            with Session(master_engine) as master_db:
-                return (
-                    master_db.query(Tenant)
-                    .filter(
-                        Tenant.is_active.is_(True),
-                        Tenant.is_provisioned.is_(True),
-                        Tenant.is_deleted.is_(False),
-                    )
-                    .all()
+        # Reuse the process-wide cached master engine instead of building and
+        # disposing a fresh engine (and its connection pool) on every tick.
+        master_engine = get_master_engine()
+        with Session(master_engine) as master_db:
+            return (
+                master_db.query(Tenant)
+                .filter(
+                    Tenant.is_active.is_(True),
+                    Tenant.is_provisioned.is_(True),
+                    Tenant.is_deleted.is_(False),
                 )
-        finally:
-            master_engine.dispose()
+                .all()
+            )
     except Exception as exc:
         logger.error("Tenant job runner: failed to connect to master database: %s", exc)
         return []
@@ -154,24 +165,84 @@ def _resolve_tenant_db_url(tenant: Tenant) -> Optional[str]:
 # ---------------------------------------------------------------------------
 
 
-def _compute_next_run(job: TenantScheduledJob, *, base: datetime) -> datetime:
+def _job_timezone(job: TenantScheduledJob) -> Any:
     """
-    Determine the next scheduled run for ``job``.
+    Resolve the tzinfo used to interpret a job's cron expression.
 
-    Cron expressions are honored when possible (via croniter, which ships
-    with APScheduler); otherwise we fall back to a plain interval window.
+    Precedence: the job's ``timezone`` column, then a ``timezone`` key inside
+    ``params``, then UTC. An unknown name falls back to UTC rather than
+    raising, so a bad value can never wedge the dispatcher.
     """
+    name = (
+        getattr(job, "timezone", None) or (job.params or {}).get("timezone") or ""
+    ).strip()
+    if not name or name.upper() == "UTC":
+        return timezone.utc
+    try:
+        from zoneinfo import ZoneInfo
+
+        return ZoneInfo(name)
+    except Exception:
+        logger.warning(
+            "Job %s: unknown timezone %r; falling back to UTC.",
+            getattr(job, "job_code", "?"),
+            name,
+        )
+        return timezone.utc
+
+
+def _compute_next_run(
+    job: TenantScheduledJob,
+    *,
+    base: datetime,
+    prev: Optional[datetime] = None,
+) -> datetime:
+    """
+    Determine the next scheduled run for ``job`` as a timezone-aware UTC time.
+
+    Cron expressions are honoured via croniter and evaluated in the job's
+    timezone (see :func:`_job_timezone`); otherwise a plain interval window is
+    used. ``prev`` is the slot that just fired — basing the computation on it
+    rather than on wall-clock ``base`` keeps a fixed cadence instead of
+    drifting by each run's duration. A single catch-up cap avoids a backlog
+    storm after downtime: if the computed time is already in the past we
+    recompute once from ``base`` (now).
+    """
+    base = base if base.tzinfo else base.replace(tzinfo=timezone.utc)
+    anchor = prev if prev is not None else base
+    if anchor.tzinfo is None:
+        anchor = anchor.replace(tzinfo=timezone.utc)
+
     if job.schedule_cron:
         try:
             from croniter import croniter  # type: ignore
 
-            it = croniter(job.schedule_cron, base)
-            return it.get_next(datetime).astimezone(timezone.utc)
+            tz = _job_timezone(job)
+            nxt = (
+                croniter(job.schedule_cron, anchor.astimezone(tz))
+                .get_next(datetime)
+                .astimezone(timezone.utc)
+            )
+            if nxt <= base:
+                # Missed one or more slots (downtime) — jump to the next slot
+                # from now so we fire once, not once per missed slot.
+                nxt = (
+                    croniter(job.schedule_cron, base.astimezone(tz))
+                    .get_next(datetime)
+                    .astimezone(timezone.utc)
+                )
+            return nxt
         except Exception as exc:
-            logger.warning("croniter unavailable or cron invalid (%s); using interval fallback", exc)
+            logger.warning(
+                "croniter unavailable or cron invalid (%s); using interval fallback",
+                exc,
+            )
 
-    minutes = int(job.schedule_interval_minutes or 60)
-    return base + timedelta(minutes=max(minutes, 1))
+    minutes = max(int(job.schedule_interval_minutes or 60), 1)
+    nxt = anchor + timedelta(minutes=minutes)
+    if nxt <= base:
+        nxt = base + timedelta(minutes=minutes)
+    return nxt
 
 
 # ---------------------------------------------------------------------------
@@ -183,10 +254,18 @@ def run_tenant_jobs() -> dict[str, Any]:
     """
     Tick: scan every active tenant, run any due jobs, update bookkeeping.
 
-    Returns a summary with counts so the caller (the global scheduler) can
-    log a single line per tick.
+    Concurrency model
+    -----------------
+    The global scheduler already wraps this tick in a master-DB advisory lock
+    (see ``app/scheduler.py``) so only one worker dispatches at a time. As a
+    second line of defence, due jobs are claimed with ``FOR UPDATE SKIP
+    LOCKED`` and their ``next_run_at`` is advanced *before* the handler runs,
+    so a job can never be executed twice for the same slot even if two ticks
+    overlap.
+
+    Returns a summary with counts so the caller can log a single line per tick.
     """
-    summary = {"tenants": 0, "skipped_unmigrated": 0, "jobs_run": 0, "jobs_failed": 0}
+    summary = {"tenants": 0, "skipped_unmigrated": 0, "jobs_run": 0, "jobs_failed": 0, "stale_reaped": 0}
 
     for tenant in _iter_active_tenants():
         summary["tenants"] += 1
@@ -196,96 +275,199 @@ def run_tenant_jobs() -> dict[str, Any]:
 
         engine = get_engine_for_url(db_url)
 
-        # Short-circuit before opening a session if the tenant DB hasn't
-        # been migrated yet. This avoids the per-minute UndefinedTable
-        # spam when new tenant tables (e.g. ``tenant_scheduled_job``) are
-        # added to the model but a tenant DB hasn't been forward-migrated.
+        # Short-circuit before opening a session if the tenant DB hasn't been
+        # migrated yet (avoids per-minute UndefinedTable spam).
         if not _scheduled_jobs_table_present(engine):
             summary["skipped_unmigrated"] += 1
             logger.debug(
-                "Tenant-job runner: skipping tenant=%s (tenant_scheduled_job missing — run "
-                "`python -m app.init_db --sync-tenants`)",
+                "Tenant-job runner: skipping tenant=%s (tenant_scheduled_job missing — "
+                "run `python -m app.init_db --sync-tenants`)",
                 tenant.code,
             )
             continue
 
-        with Session(engine) as tenant_db:
-            try:
-                set_current_tenant(tenant)
-                _run_due_jobs(tenant_db, summary)
-            except (ProgrammingError, OperationalError) as exc:
-                # Most likely a UndefinedTable / UndefinedColumn during a
-                # rolling deploy. Drop the cache entry so the next tick
-                # re-checks (the table may appear after a migration), and
-                # continue on to the next tenant.
-                _TABLE_PRESENCE_CACHE.pop(str(engine.url), None)
-                summary["skipped_unmigrated"] += 1
-                logger.warning(
-                    "Tenant-job runner: schema drift on tenant=%s: %s. "
-                    "Run `python -m app.init_db --sync-tenants` to migrate.",
-                    tenant.code,
-                    str(exc).splitlines()[0],
-                )
-            finally:
-                clear_current_tenant()
+        try:
+            set_current_tenant(tenant)
+            with Session(engine) as tenant_db:
+                # Reclaim leases from runs whose worker died mid-execution so
+                # the job stops showing as permanently RUNNING and recovers.
+                summary["stale_reaped"] += _reap_stale_leases(tenant_db)
+                claimed_ids = _claim_due_jobs(tenant_db)
+                for job_id in claimed_ids:
+                    _execute_claimed_job(tenant_db, job_id, summary)
+        except (ProgrammingError, OperationalError) as exc:
+            # Schema drift during a rolling deploy. Drop the cache entry so the
+            # next tick re-checks, and continue to the next tenant.
+            _TABLE_PRESENCE_CACHE.pop(str(engine.url), None)
+            summary["skipped_unmigrated"] += 1
+            logger.warning(
+                "Tenant-job runner: schema drift on tenant=%s: %s. "
+                "Run `python -m app.init_db --sync-tenants` to migrate.",
+                tenant.code,
+                str(exc).splitlines()[0],
+            )
+        finally:
+            clear_current_tenant()
 
     return summary
 
 
-def _run_due_jobs(tenant_db: Session, summary: dict) -> None:
+def _reap_stale_leases(tenant_db: Session) -> int:
+    """
+    Reclaim leases for jobs stuck in RUNNING past the stale threshold.
+
+    A job is marked RUNNING at claim time and cleared when it finishes. If
+    the worker crashes or is restarted mid-run, the row stays RUNNING with a
+    ``locked_at`` in the past. This bulk UPDATE flips such rows to STALE and
+    clears the lease so they stop displaying as permanently running; their
+    ``next_run_at`` was already advanced at claim time, so they simply resume
+    on their normal schedule. The threshold must exceed the longest expected
+    job (see ``JOB_STALE_LEASE_MINUTES``) so a legitimately long run is not
+    reaped out from under itself.
+    """
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=_stale_lease_minutes())
+    updated = (
+        tenant_db.query(TenantScheduledJob)
+        .filter(
+            TenantScheduledJob.last_status == "RUNNING",
+            TenantScheduledJob.locked_at.isnot(None),
+            TenantScheduledJob.locked_at < cutoff,
+        )
+        .update(
+            {
+                TenantScheduledJob.last_status: "STALE",
+                TenantScheduledJob.last_error: (
+                    "Run did not complete (worker restarted or crashed); "
+                    "lease reclaimed by the dispatcher."
+                ),
+                TenantScheduledJob.locked_at: None,
+            },
+            synchronize_session=False,
+        )
+    )
+    if updated:
+        tenant_db.commit()
+        logger.warning("tenant_job: reclaimed %s stale RUNNING lease(s).", updated)
+    return updated
+
+
+def _claim_due_jobs(tenant_db: Session) -> list[int]:
+    """
+    Atomically claim all due jobs for the current tenant.
+
+    Due rows are selected ``FOR UPDATE SKIP LOCKED`` (so a concurrent runner
+    skips anything already claimed), their schedule is advanced to the next
+    slot, their status is set to RUNNING, and the claim is committed. The
+    advanced ``next_run_at`` is what prevents a second execution of the same
+    slot. Returns the ids of the jobs this runner claimed.
+    """
     now = datetime.now(timezone.utc)
 
-    due_jobs = (
+    query = (
         tenant_db.query(TenantScheduledJob)
         .filter(
             TenantScheduledJob.is_enabled.is_(True),
             TenantScheduledJob.is_deleted.is_(False),
+            or_(
+                TenantScheduledJob.next_run_at.is_(None),
+                TenantScheduledJob.next_run_at <= now,
+            ),
         )
-        .all()
+        .order_by(TenantScheduledJob.next_run_at.asc())
     )
+    due_jobs = query.with_for_update(skip_locked=True).all()
 
+    claimed: list[int] = []
     for job in due_jobs:
-        next_run = job.next_run_at
-        if next_run is not None and next_run.tzinfo is None:
-            next_run = next_run.replace(tzinfo=timezone.utc)
+        prev_slot = job.next_run_at
+        if prev_slot is not None and prev_slot.tzinfo is None:
+            prev_slot = prev_slot.replace(tzinfo=timezone.utc)
+        job.last_status = "RUNNING"
+        job.locked_at = now
+        job.next_run_at = _compute_next_run(job, base=now, prev=prev_slot)
+        claimed.append(job.id)
 
-        if next_run is not None and next_run > now:
-            continue
+    tenant_db.commit()
+    return claimed
 
-        handler = get_handler(job.handler)
-        if handler is None:
-            job.last_status = "FAILED"
-            job.last_error = f"unknown handler: {job.handler}"
-            job.last_run_at = now
-            job.next_run_at = _compute_next_run(job, base=now)
-            tenant_db.commit()
+
+def _execute_claimed_job(tenant_db: Session, job_id: int, summary: dict) -> None:
+    """
+    Run one already-claimed job and record the outcome in its own transaction.
+
+    The handler runs independently of the claim: on failure we roll back any
+    partial handler work (so a poisoned transaction can't swallow the
+    bookkeeping write) and then persist FAILED status + error in a fresh
+    commit. ``next_run_at`` was already advanced at claim time, so the outcome
+    here never changes *when* the job next runs.
+    """
+    job = tenant_db.get(TenantScheduledJob, job_id)
+    if job is None:
+        return
+
+    handler = get_handler(job.handler)
+    started = datetime.now(timezone.utc)
+
+    if handler is None:
+        tenant_db.rollback()
+        job = tenant_db.get(TenantScheduledJob, job_id)
+        if job is None:
+            return
+        job.last_status = "FAILED"
+        job.last_error = f"unknown handler: {job.handler}"
+        job.consecutive_failures = (job.consecutive_failures or 0) + 1
+        _finalize_run(tenant_db, job, started, ok=False, summary=summary)
+        return
+
+    try:
+        result = handler(tenant_db, job) or {}
+        job.last_status = "OK"
+        job.last_error = None
+        job.consecutive_failures = 0
+        _finalize_run(tenant_db, job, started, ok=True, summary=summary)
+        logger.info(
+            "tenant_job: ran %s for job=%s result=%s",
+            job.handler,
+            job.job_code,
+            {k: v for k, v in result.items() if k != "details"},
+        )
+    except Exception as exc:
+        # Clear any partially-applied / poisoned transaction before writing the
+        # failure record, then reload the row in the fresh transaction.
+        tenant_db.rollback()
+        job = tenant_db.get(TenantScheduledJob, job_id)
+        if job is None:
             summary["jobs_failed"] += 1
-            continue
-
-        started = datetime.now(timezone.utc)
-        try:
-            result = handler(tenant_db, job) or {}
-            job.last_status = "OK"
-            job.last_error = None
-            summary["jobs_run"] += 1
-            logger.info(
-                "tenant_job: ran %s for job=%s result=%s",
-                job.handler,
+            return
+        job.last_status = "FAILED"
+        job.last_error = str(exc)[:1000]
+        job.consecutive_failures = (job.consecutive_failures or 0) + 1
+        if job.max_failures and job.consecutive_failures >= job.max_failures:
+            job.is_enabled = False
+            logger.error(
+                "tenant_job: auto-paused job=%s after %s consecutive failures",
                 job.job_code,
-                {k: v for k, v in result.items() if k != "details"},
+                job.consecutive_failures,
             )
-        except Exception as exc:
-            job.last_status = "FAILED"
-            job.last_error = str(exc)[:1000]
-            summary["jobs_failed"] += 1
-            logger.exception("tenant_job: handler %s failed: %s", job.handler, exc)
+        _finalize_run(tenant_db, job, started, ok=False, summary=summary)
+        logger.exception("tenant_job: handler %s failed: %s", job.handler, exc)
 
-        finished = datetime.now(timezone.utc)
-        job.last_run_at = finished
-        job.next_run_at = _compute_next_run(job, base=finished)
-        job.run_count = (job.run_count or 0) + 1
-        job.last_duration_ms = int((finished - started).total_seconds() * 1000)
-        tenant_db.commit()
+
+def _finalize_run(
+    tenant_db: Session,
+    job: TenantScheduledJob,
+    started: datetime,
+    *,
+    ok: bool,
+    summary: dict,
+) -> None:
+    finished = datetime.now(timezone.utc)
+    job.last_run_at = finished
+    job.run_count = (job.run_count or 0) + 1
+    job.last_duration_ms = int((finished - started).total_seconds() * 1000)
+    job.locked_at = None
+    tenant_db.commit()
+    summary["jobs_run" if ok else "jobs_failed"] += 1
 
 
 # ---------------------------------------------------------------------------

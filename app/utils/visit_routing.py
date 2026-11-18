@@ -19,7 +19,9 @@ from typing import Optional
 from sqlalchemy.orm import Session
 
 from app.core.enums import (
+    OrderStatus,
     QueueStatus,
+    RadiologyOrderStatus,
     ServicePointType,
     VisitFlowStepStatus,
     VisitStatus,
@@ -188,4 +190,126 @@ def validate_visit_sdp_activity(
     return current_step
 
 
+# ============================================================
+# Investigation return-loop helpers
+# ============================================================
 
+# A consultation can be resumed at any of these point types (the patient is
+# sent back to the doctor who ordered the investigation).
+CONSULT_SDP_TYPES = {
+    ServicePointType.CLINIC,
+    ServicePointType.EMERGENCY,
+    ServicePointType.PROCEDURE_ROOM,
+}
+
+
+def resolve_ordering_consultation_sdp(db: Session, *, visit_id: int) -> Optional[int]:
+    """
+    Find the consulting room to send a patient back to after investigations:
+    the most recent CLINIC/EMERGENCY/PROCEDURE_ROOM step on the visit, falling
+    back to any clinic in the facility. Returns the SDP id or None.
+    """
+    steps = (
+        db.query(VisitFlowStep)
+        .filter(
+            VisitFlowStep.visit_id == visit_id,
+            VisitFlowStep.is_deleted.is_(False),
+        )
+        .order_by(VisitFlowStep.step_order.desc())
+        .all()
+    )
+    for st in steps:
+        sdp = (
+            db.query(ServiceDeliveryPoint)
+            .filter(ServiceDeliveryPoint.id == st.service_delivery_point_id)
+            .first()
+        )
+        if sdp is not None and sdp.service_point_type in CONSULT_SDP_TYPES:
+            return sdp.id
+
+    sdp = (
+        db.query(ServiceDeliveryPoint)
+        .filter(
+            ServiceDeliveryPoint.service_point_type == ServicePointType.CLINIC,
+            ServiceDeliveryPoint.is_deleted.is_(False),
+        )
+        .first()
+    )
+    return sdp.id if sdp else None
+
+
+def has_pending_investigations(db: Session, *, visit_id: int) -> bool:
+    """
+    True while the visit still has lab or radiology work outstanding, so the
+    patient is only routed back to the doctor once every ordered investigation
+    has produced a (released) result.
+    """
+    from app.models.all_models import LabOrder, LabOrderItem, RadiologyOrder
+
+    lab_pending = (
+        db.query(LabOrderItem.id)
+        .join(LabOrder, LabOrder.id == LabOrderItem.lab_order_id)
+        .filter(
+            LabOrder.visit_id == visit_id,
+            LabOrder.is_deleted.is_(False),
+            LabOrderItem.is_deleted.is_(False),
+            LabOrderItem.status.notin_(
+                [OrderStatus.COMPLETED, OrderStatus.CANCELLED]
+            ),
+        )
+        .first()
+    )
+    if lab_pending is not None:
+        return True
+
+    rad_pending = (
+        db.query(RadiologyOrder.id)
+        .filter(
+            RadiologyOrder.visit_id == visit_id,
+            RadiologyOrder.is_deleted.is_(False),
+            RadiologyOrder.status.notin_(
+                [
+                    RadiologyOrderStatus.COMPLETED,
+                    RadiologyOrderStatus.CANCELLED,
+                    RadiologyOrderStatus.RELEASED,
+                ]
+            ),
+        )
+        .first()
+    )
+    return rad_pending is not None
+
+
+def maybe_route_back_to_consultation(
+    db: Session,
+    *,
+    visit_id: int,
+    routed_by_id: Optional[int] = None,
+    note: Optional[str] = None,
+) -> Optional[tuple[VisitFlowStep, QueueTicket]]:
+    """
+    When a visit has no further pending investigations, route the patient back
+    to the ordering consulting room for results review. No-op (returns None)
+    when investigations are still outstanding, no consulting room can be found,
+    or the patient is already queued at a consulting room.
+    """
+    if has_pending_investigations(db, visit_id=visit_id):
+        return None
+
+    target_sdp_id = resolve_ordering_consultation_sdp(db, visit_id=visit_id)
+    if target_sdp_id is None:
+        return None
+
+    # Don't double-route if the patient is already at that consulting room.
+    flow_repo = VisitFlowRepository(db)
+    current = flow_repo.get_current_visit_step(visit_id)
+    if current is not None and current.service_delivery_point_id == target_sdp_id:
+        return None
+
+    return route_visit_to_next_sdp(
+        db,
+        visit_id=visit_id,
+        target_service_delivery_point_id=target_sdp_id,
+        routed_by_id=routed_by_id,
+        notes=note or "Investigations complete — returned to consulting room for review.",
+    )

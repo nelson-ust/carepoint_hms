@@ -2,8 +2,9 @@
 from __future__ import annotations
 
 import os
+from datetime import date
 from typing import List
-from fastapi import APIRouter, Depends, Query, status, HTTPException
+from fastapi import APIRouter, Depends, Query, Response, status, HTTPException
 from fastapi.responses import FileResponse
 
 from app.core.database import get_db
@@ -311,3 +312,28 @@ def list_membership_card_transactions(card_id: int, db=Depends(get_db)):
     """Retrieve the full transaction history for a specific membership card."""
     service = MembershipCardService(db)
     return service.get_card_transactions(card_id)
+
+
+@router.get(
+    "/{card_id}/statement",
+    dependencies=[Depends(require_permission("PATIENT_CARD_VIEW"))],
+    summary="Generate a card usage statement (PDF)",
+)
+def generate_membership_card_statement(
+    card_id: int,
+    date_from: Optional[date] = Query(None, description="Only include transactions on/after this date."),
+    date_to: Optional[date] = Query(None, description="Only include transactions on/before this date."),
+    db=Depends(get_db),
+):
+    """
+    Generate a printable card usage statement (credits & debits, each debit
+    stating the service paid for) for any patient's card. Available to billing,
+    cashier and accounting staff (PATIENT_CARD_VIEW).
+    """
+    service = MembershipCardService(db)
+    pdf_bytes, filename = service.generate_statement_pdf(card_id, date_from=date_from, date_to=date_to)
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )

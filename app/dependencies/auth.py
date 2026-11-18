@@ -20,6 +20,9 @@ from fastapi import Depends
 from fastapi.security import OAuth2PasswordBearer, HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session, joinedload
 
+from datetime import datetime, timezone
+
+from app.core.config import settings
 from app.core.database import get_db, get_master_db
 from app.core.multitenancy import get_current_tenant_id
 from app.core.exceptions import NotFoundError, UnauthorizedError, ForbiddenError
@@ -140,16 +143,25 @@ def get_current_user(
             raise NotFoundError(message="Authenticated SaaS Admin was not found.")
         return admin
     
-    # Cross-tenant token prevention
+    # Fail-closed cross-tenant isolation for tenant (non-SaaS) users.
+    #
+    # The request DB is routed by the X-Tenant-Code header, so the ONLY thing
+    # binding a token to its tenant is this check. Previously it was skipped
+    # whenever either side was None, which meant a token without tenant_id, or
+    # a request whose tenant context failed to resolve, could read another
+    # tenant's data. We now require both to be present and equal.
     token_tenant_id = payload.get("tenant_id")
     current_tenant_id = get_current_tenant_id()
-    
-    if token_tenant_id is not None and current_tenant_id is not None:
-        if token_tenant_id != current_tenant_id:
-            raise ForbiddenError(
-                message="Token is not valid for this tenant.",
-                detail={"token_tenant": token_tenant_id, "current_tenant": current_tenant_id}
-            )
+
+    if current_tenant_id is None:
+        raise ForbiddenError(
+            message="Tenant context could not be resolved for this request.",
+        )
+    if token_tenant_id is None or int(token_tenant_id) != int(current_tenant_id):
+        raise ForbiddenError(
+            message="Token is not valid for this tenant.",
+            detail={"token_tenant": token_tenant_id, "current_tenant": current_tenant_id},
+        )
 
     user = (
         db.query(User)
@@ -172,11 +184,52 @@ def get_current_user(
     return user
 
 
+def _assert_session_live(payload: dict, db: Session) -> None:
+    """
+    Enforce server-side session revocation for a tenant access token.
+
+    An access token is only honoured while its ``UserSession`` row (keyed by
+    the token ``jti``) exists and is neither revoked nor expired. This is what
+    makes logout and "revoke all sessions" actually invalidate a token —
+    previously no route checked it, so a token stayed valid for its full TTL.
+
+    The refresh flow rotates the session's ``session_token_jti`` to the new
+    access token, so a refreshed token continues to match; the superseded one
+    stops matching (and is correctly rejected).
+    """
+    jti = payload.get("jti")
+    if not jti:
+        raise UnauthorizedError(message="Token is missing its session identifier.")
+
+    session = (
+        db.query(UserSession)
+        .filter(
+            UserSession.session_token_jti == jti,
+            UserSession.is_deleted.is_(False),
+        )
+        .first()
+    )
+    if session is None:
+        raise UnauthorizedError(message="Session not found or has been revoked.")
+    if session.revoked_at is not None or session.is_current is False:
+        raise UnauthorizedError(message="Session has been revoked.")
+
+    expires_at = session.expires_at
+    if expires_at is not None:
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        if datetime.now(timezone.utc) >= expires_at:
+            raise UnauthorizedError(message="Session has expired.")
+
+
 def get_current_active_user(
     current_user: Annotated[User | SaaSAdmin, Depends(get_current_user)],
+    payload: Annotated[dict, Depends(get_access_token_payload)],
+    db: Annotated[Session, Depends(get_db)],
 ) -> User | SaaSAdmin:
     """
-    Ensure the current user is active and allowed to access the system.
+    Ensure the current user is active and allowed to access the system, and
+    that the backing session has not been revoked (tenant users).
     """
     if str(current_user.status).upper() != "ACTIVE":
         raise UnauthorizedError(
@@ -184,8 +237,15 @@ def get_current_active_user(
             detail={"status": str(current_user.status)},
         )
 
-    if current_user.is_deleted:
+    if getattr(current_user, "is_deleted", False):
         raise UnauthorizedError(message="User account is no longer available.")
+
+    # SaaS admins authenticate against the master DB and have no tenant
+    # UserSession row, so the session gate applies to tenant users only.
+    if not isinstance(current_user, SaaSAdmin) and getattr(
+        settings, "ENFORCE_SESSION_REVOCATION", True
+    ):
+        _assert_session_live(payload, db)
 
     return current_user
 

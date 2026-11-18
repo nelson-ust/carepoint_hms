@@ -52,12 +52,29 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         window_seconds: int = 60,
         by_path: bool = True,
         exclude_paths: tuple[str, ...] = ("/docs", "/openapi.json", "/redoc"),
+        strict_paths: tuple[str, ...] = (
+            "/api/v1/auth/login",
+            "/api/v1/auth/refresh",
+            "/api/v1/auth/password",
+            "/api/v1/auth/forgot",
+            "/api/v1/auth/reset",
+            "/api/v1/auth/2fa",
+            "/api/v1/auth/otp",
+            "/api/v1/auth/verify",
+        ),
+        strict_max_requests: int = 10,
+        strict_window_seconds: int = 300,
     ) -> None:
         super().__init__(app)
         self.max_requests = max_requests
         self.window_seconds = window_seconds
         self.by_path = by_path
         self.exclude_paths = exclude_paths
+        # Sensitive auth/credential paths get a much tighter bucket to blunt
+        # brute-force / credential-stuffing / OTP-guessing.
+        self.strict_paths = strict_paths
+        self.strict_max_requests = strict_max_requests
+        self.strict_window_seconds = strict_window_seconds
 
         # Store request timestamps per rate-limit key.
         self._requests: Dict[str, Deque[float]] = defaultdict(deque)
@@ -76,7 +93,8 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         client_ip = self._get_client_ip(request)
         key = self._build_rate_limit_key(client_ip=client_ip, path=request.url.path)
 
-        allowed, remaining, reset_in = self._check_rate_limit(key)
+        max_req, window = self._limit_for_path(request.url.path)
+        allowed, remaining, reset_in = self._check_rate_limit(key, max_req, window)
 
         if not allowed:
             logger.warning(
@@ -91,18 +109,18 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
                     "message": "Rate limit exceeded. Please try again later.",
                     "error_code": "RATE_LIMIT_EXCEEDED",
                     "detail": {
-                        "max_requests": self.max_requests,
-                        "window_seconds": self.window_seconds,
+                        "max_requests": max_req,
+                        "window_seconds": window,
                         "retry_after_seconds": reset_in,
                     },
                 },
             )
-            self._attach_rate_limit_headers(response, remaining=0, reset_in=reset_in)
+            self._attach_rate_limit_headers(response, limit=max_req, remaining=0, reset_in=reset_in)
             response.headers["Retry-After"] = str(reset_in)
             return response
 
         response = await call_next(request)
-        self._attach_rate_limit_headers(response, remaining=remaining, reset_in=reset_in)
+        self._attach_rate_limit_headers(response, limit=max_req, remaining=remaining, reset_in=reset_in)
         return response
 
     def _is_excluded_path(self, path: str) -> bool:
@@ -110,6 +128,15 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         Check whether a path should skip rate limiting.
         """
         return any(path.startswith(excluded) for excluded in self.exclude_paths)
+
+    def _limit_for_path(self, path: str) -> Tuple[int, int]:
+        """
+        Return the (max_requests, window_seconds) that apply to ``path``.
+        Sensitive auth paths get the tighter strict limit.
+        """
+        if any(path.startswith(p) for p in self.strict_paths):
+            return self.strict_max_requests, self.strict_window_seconds
+        return self.max_requests, self.window_seconds
 
     def _get_client_ip(self, request: Request) -> str:
         """
@@ -137,9 +164,11 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         """
         return f"{client_ip}:{path}" if self.by_path else client_ip
 
-    def _check_rate_limit(self, key: str) -> Tuple[bool, int, int]:
+    def _check_rate_limit(
+        self, key: str, max_requests: int, window_seconds: int
+    ) -> Tuple[bool, int, int]:
         """
-        Apply a rolling-window rate limit check.
+        Apply a rolling-window rate limit check against the given limit/window.
 
         Returns:
             tuple:
@@ -148,7 +177,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
                 reset_in_seconds (int)
         """
         now = time()
-        window_start = now - self.window_seconds
+        window_start = now - window_seconds
 
         with self._lock:
             bucket = self._requests[key]
@@ -157,20 +186,22 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             while bucket and bucket[0] <= window_start:
                 bucket.popleft()
 
-            if len(bucket) >= self.max_requests:
+            if len(bucket) >= max_requests:
                 oldest = bucket[0]
-                reset_in = max(1, int((oldest + self.window_seconds) - now))
+                reset_in = max(1, int((oldest + window_seconds) - now))
                 return False, 0, reset_in
 
             bucket.append(now)
-            remaining = max(0, self.max_requests - len(bucket))
-            reset_in = self.window_seconds
+            remaining = max(0, max_requests - len(bucket))
+            reset_in = window_seconds
             return True, remaining, reset_in
 
-    def _attach_rate_limit_headers(self, response: Response, *, remaining: int, reset_in: int) -> None:
+    def _attach_rate_limit_headers(
+        self, response: Response, *, limit: int, remaining: int, reset_in: int
+    ) -> None:
         """
         Add informative rate-limit headers to the response.
         """
-        response.headers["X-RateLimit-Limit"] = str(self.max_requests)
+        response.headers["X-RateLimit-Limit"] = str(limit)
         response.headers["X-RateLimit-Remaining"] = str(remaining)
         response.headers["X-RateLimit-Reset"] = str(reset_in)

@@ -26,6 +26,12 @@ class S3Service:
         self._account_suffix_cache: Optional[str] = None
         self._configure_for_backend(backend or active_backend() or "s3")
 
+    def transfer_client(self):
+        """A boto3 client tuned for large uploads/downloads (backups): generous
+        read timeout, adaptive retries and backend-correct addressing."""
+        from app.utils.object_storage import make_transfer_client
+        return make_transfer_client(self.backend)
+
     @classmethod
     def for_tenant(cls, tenant) -> "S3Service":
         """Build a service bound to the storage backend implied by the tenant's
@@ -302,6 +308,24 @@ class S3Service:
             self.last_error = f"Could not reach S3: {e}"
             logger.error(f"Failed to upload file to S3: {e}")
             raise RuntimeError(f"S3 upload failure: {self.last_error}")
+
+    def get_object_bytes(self, bucket_name: str, s3_key: str) -> Optional[bytes]:
+        """
+        Fetch the full body of an S3 object as bytes.
+
+        Used to pull an encrypted-at-rest backup artifact back through the app
+        server so it can be decrypted before being streamed to the operator
+        (a presigned URL would only ever expose the raw ciphertext).
+        """
+        if not self.is_enabled or not bucket_name or not s3_key:
+            return None
+        try:
+            resp = self.s3_client.get_object(Bucket=bucket_name, Key=s3_key)
+            return resp["Body"].read()
+        except ClientError as e:
+            self.last_error = f"Could not fetch object: {e}"
+            logger.error(f"Failed to fetch S3 object {s3_key}: {e}")
+            return None
 
     def generate_presigned_url(self, bucket_name: str, s3_key: str, expires_in: int = 3600) -> Optional[str]:
         """

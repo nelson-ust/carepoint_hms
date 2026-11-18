@@ -29,7 +29,7 @@ from app.schemas.lab_result_schema import (
     LabResultVerifySchema,
 )
 from app.utils.security_event_util import record_security_event
-from app.utils.visit_routing import route_visit_to_next_sdp, validate_visit_sdp_activity
+from app.utils.visit_routing import maybe_route_back_to_consultation, route_visit_to_next_sdp, validate_visit_sdp_activity
 
 
 class LabResultService:
@@ -278,16 +278,26 @@ class LabResultService:
             pass
 
         # ----- Route the patient back to the originating clinic SDP -------
+        # An explicit target wins; otherwise, once every ordered investigation
+        # is complete, the patient is auto-returned to the ordering consulting
+        # room for results review (the investigation return-loop).
         target_sdp_id = getattr(payload, "route_to_service_delivery_point_id", None)
-        if target_sdp_id is not None and order.visit_id is not None:
+        if order.visit_id is not None:
             try:
-                route_visit_to_next_sdp(
-                    self.db,
-                    visit_id=order.visit_id,
-                    target_service_delivery_point_id=target_sdp_id,
-                    routed_by_id=actor_user_id,
-                    notes=f"Routed back to clinic after lab release {result.id}.",
-                )
+                if target_sdp_id is not None:
+                    route_visit_to_next_sdp(
+                        self.db,
+                        visit_id=order.visit_id,
+                        target_service_delivery_point_id=target_sdp_id,
+                        routed_by_id=actor_user_id,
+                        notes=f"Routed back to clinic after lab release {result.id}.",
+                    )
+                else:
+                    maybe_route_back_to_consultation(
+                        self.db,
+                        visit_id=order.visit_id,
+                        routed_by_id=actor_user_id,
+                    )
             except Exception:
                 # Routing failure should not block the release. The release stands.
                 pass

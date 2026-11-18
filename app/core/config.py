@@ -86,6 +86,33 @@ class Settings(BaseSettings):
         False,
         validation_alias=AliasChoices("ENABLE_SCHEDULER", "CAREPOINT_HMS_ENABLE_SCHEDULER"),
     )
+    # Minutes after which a scheduled job still marked RUNNING is treated as
+    # stale (its worker crashed/restarted mid-run) and its lease is reclaimed
+    # by the dispatcher. Set this comfortably above the longest expected job.
+    JOB_STALE_LEASE_MINUTES: int = Field(
+        30,
+        validation_alias=AliasChoices("JOB_STALE_LEASE_MINUTES", "CAREPOINT_HMS_JOB_STALE_LEASE_MINUTES"),
+    )
+    # Enforce server-side session revocation: reject an access token whose
+    # UserSession row has been revoked (logout / "revoke all sessions") or is
+    # missing. Secure by default; the flag is an operational escape hatch in
+    # case an unforeseen token flow is found not to maintain a session row.
+    ENFORCE_SESSION_REVOCATION: bool = Field(
+        True,
+        validation_alias=AliasChoices("ENFORCE_SESSION_REVOCATION", "CAREPOINT_HMS_ENFORCE_SESSION_REVOCATION"),
+    )
+    # Recognise patient cash-billing revenue in the GL (per-service account
+    # code) during the posting sweep. On by default; finance can disable it
+    # (e.g. while reviewing tax treatment for VAT-itemised tenants).
+    RECOGNIZE_PATIENT_REVENUE: bool = Field(
+        True,
+        validation_alias=AliasChoices("RECOGNIZE_PATIENT_REVENUE", "CAREPOINT_HMS_RECOGNIZE_PATIENT_REVENUE"),
+    )
+    # Recognise paid ambulance trip charges as revenue during the sweep.
+    RECOGNISE_AMBULANCE_REVENUE: bool = Field(
+        True,
+        validation_alias=AliasChoices("RECOGNISE_AMBULANCE_REVENUE", "CAREPOINT_HMS_RECOGNISE_AMBULANCE_REVENUE"),
+    )
 
     # =========================================================
     # SERVER / HOST SETTINGS
@@ -641,6 +668,9 @@ class Settings(BaseSettings):
     _DEFAULT_DATABASE_ENCRYPTION_KEY = (
         "CarepointHMS-Super-Secret-Encryption-Key-2026!"
     )
+    _DEFAULT_SECRET_KEY = (
+        "carepoint-hms-secret-key-at-least-32-chars-long-for-pydantic-v2-compliance"
+    )
     _MIN_SECRET_KEY_LENGTH = 32
 
     @model_validator(mode="after")
@@ -648,16 +678,40 @@ class Settings(BaseSettings):
         import logging
         import warnings
 
+        log = logging.getLogger("carepoint_hms")
+
         env = (self.ENVIRONMENT or "development").lower()
         is_prod_like = env in {"production", "staging"}
 
-        # SECRET_KEY validation.
+        # SECRET_KEY validation. The built-in default is published in the
+        # repository, so allowing it in a deployed environment means anyone
+        # can forge JWTs for any user/tenant/role. Refuse to boot in
+        # production/staging when the default or a too-short key is in use;
+        # warn loudly everywhere else.
         secret = ""
         try:
             secret = self.SECRET_KEY.get_secret_value() if self.SECRET_KEY else ""
         except Exception:
             secret = ""
-        # SECRET_KEY validation removed for test stability.
+
+        if secret == self._DEFAULT_SECRET_KEY:
+            msg = (
+                "SECRET_KEY is using its built-in default value. Set SECRET_KEY "
+                "to a strong, deployment-specific secret (>= "
+                f"{self._MIN_SECRET_KEY_LENGTH} chars) before going live — the "
+                "default is public and allows JWT forgery."
+            )
+            if is_prod_like:
+                raise ValueError(msg)
+            log.warning(msg)
+        elif len(secret) < self._MIN_SECRET_KEY_LENGTH:
+            msg = (
+                f"SECRET_KEY is shorter than {self._MIN_SECRET_KEY_LENGTH} "
+                "characters, which weakens JWT signing."
+            )
+            if is_prod_like:
+                raise ValueError(msg)
+            log.warning(msg)
 
         # DATABASE_ENCRYPTION_KEY validation.
         if self.DATABASE_ENCRYPTION_KEY == self._DEFAULT_DATABASE_ENCRYPTION_KEY:
@@ -669,7 +723,18 @@ class Settings(BaseSettings):
             )
             if is_prod_like:
                 raise ValueError(msg)
-            logging.getLogger("carepoint_hms").warning(msg)
+            log.warning(msg)
+
+        # Posture note: ENVIRONMENT defaults to "development", under which the
+        # guards above only warn. A deployment that forgets to set
+        # ENVIRONMENT=production therefore runs with the guards relaxed, so
+        # surface it explicitly rather than failing silently.
+        if (self.ENVIRONMENT or "development").lower() == "development":
+            log.info(
+                "ENVIRONMENT=development: secret-strength guards are advisory "
+                "only. Set ENVIRONMENT=production (or staging) in any deployed "
+                "environment so these become hard failures."
+            )
 
         return self
 

@@ -108,3 +108,15 @@ class PatientPortalOTPVerify(BaseModel):
     identifier: str
     otp_code: str
     challenge_reference: Optional[str] = None
+
+
+class PortalCardStatementSchema(BaseModel):
+    """Patient card usage log — wallet summary plus full credit/debit history."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    card_number: Optional[str] = None
+    balance: Decimal = Decimal("0.00")
+    status: Optional[str] = None
+    currency: str = "NGN"
+    transactions: List[MembershipCardTransactionRead] = []

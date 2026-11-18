@@ -36,6 +36,8 @@ from app.schemas.visit_schemas import (
     VisitAdvanceResultSchema,
     VisitAdvanceSchema,
     VisitDetailedReadSchema,
+    VisitDispositionResultSchema,
+    VisitDispositionSchema,
     VisitInitiateSchema,
     VisitInitiationResultSchema,
     VisitListResponseSchema,
@@ -201,6 +203,40 @@ def return_to_consultation(
         "message": result["message"],
         "visit": result["visit"],
         "new_flow_step": result["new_flow_step"],
+        "new_queue_ticket": result.get("new_queue_ticket"),
+    }
+
+
+@router.post(
+    "/{visit_id}/dispose",
+    response_model=VisitDispositionResultSchema,
+    status_code=status.HTTP_200_OK,
+    summary="Disposition a visit (discharge / admit / refer / follow-up)",
+)
+def dispose_visit(
+    visit_id: int,
+    payload: VisitDispositionSchema,
+    current_user: Annotated[User, Depends(require_permission("VISIT_ROUTE"))],
+    service: Annotated[VisitService, Depends(get_visit_service)],
+):
+    """
+    Apply an end-of-encounter disposition: discharge the patient (checkout),
+    close with a follow-up review, refer them to a specialist clinic, or
+    authorise admission (gated on a doctor's recommendation or an emergency).
+    """
+    result = service.dispose_visit(
+        visit_id,
+        disposition=payload.disposition,
+        target_service_delivery_point_id=payload.target_service_delivery_point_id,
+        note=payload.note,
+        routed_by_id=current_user.id,
+    )
+    return {
+        "success": True,
+        "message": result["message"],
+        "disposition": result["disposition"],
+        "visit": result["visit"],
+        "new_flow_step": result.get("new_flow_step"),
         "new_queue_ticket": result.get("new_queue_ticket"),
     }
 

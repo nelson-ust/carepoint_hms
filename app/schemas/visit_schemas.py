@@ -628,6 +628,42 @@ class VisitRerouteResultSchema(BaseModel):
     new_queue_ticket: Optional[QueueTicketReadSchema] = None
 
 
+class VisitDispositionSchema(BaseModel):
+    """
+    End-of-encounter disposition for a visit. ``disposition`` is one of:
+      - ``DISCHARGED``  — close the visit (checkout).
+      - ``FOLLOW_UP``   — close the visit, flagged for a follow-up review.
+      - ``REFERRED``    — route the patient to a specialist clinic
+        (``target_service_delivery_point_id`` required).
+      - ``ADMITTED``    — authorise admission (requires a doctor's recommendation
+        or an emergency visit); optionally route to a ward service point.
+    """
+
+    disposition: str = Field(..., max_length=30)
+    target_service_delivery_point_id: Optional[int] = Field(None, gt=0)
+    note: Optional[str] = None
+
+    @field_validator("disposition")
+    @classmethod
+    def normalize_disposition(cls, value: str) -> str:
+        normalized = (value or "").strip().upper()
+        allowed = {"DISCHARGED", "FOLLOW_UP", "REFERRED", "ADMITTED"}
+        if normalized not in allowed:
+            raise ValueError(f"disposition must be one of {sorted(allowed)}.")
+        return normalized
+
+
+class VisitDispositionResultSchema(BaseModel):
+    """Response schema for a visit disposition."""
+
+    success: bool = True
+    message: str
+    disposition: str
+    visit: VisitDetailedReadSchema
+    new_flow_step: Optional[VisitFlowStepReadSchema] = None
+    new_queue_ticket: Optional[QueueTicketReadSchema] = None
+
+
 class VisitAdvanceSchema(BaseModel):
     """
     Schema for advancing a visit one stage along its configured flow.

@@ -272,6 +272,13 @@ async def _store_user_image(current_user: User, file: UploadFile, request: Reque
             message=f"Image exceeds the {getattr(_settings, 'MAX_UPLOAD_SIZE_MB', 20)}MB limit.",
         )
 
+    # Validate by content, not just the (spoofable) extension, and derive the
+    # stored extension from the real bytes so a disguised file cannot be
+    # written with a misleading name and later served from /uploads.
+    from app.utils.image_validation import assert_valid_image
+
+    file_ext = assert_valid_image(raw)
+
     # 1) Tenant S3 bucket (production isolation) when a tenant + S3 are present.
     tenant = get_current_tenant()
     if tenant is not None:

@@ -31,6 +31,12 @@ class JobCreateSchema(BaseModel):
     schedule_interval_minutes: Optional[int] = None
     params: Optional[dict[str, Any]] = None
     is_enabled: bool = True
+    timezone: Optional[str] = Field(None, examples=["Africa/Lagos"])
+    max_failures: Optional[int] = Field(
+        None,
+        ge=1,
+        description="Auto-pause the job after this many consecutive failures.",
+    )
 
 
 class JobUpdateSchema(BaseModel):
@@ -38,6 +44,8 @@ class JobUpdateSchema(BaseModel):
     schedule_interval_minutes: Optional[int] = None
     params: Optional[dict[str, Any]] = None
     is_enabled: Optional[bool] = None
+    timezone: Optional[str] = None
+    max_failures: Optional[int] = Field(None, ge=1)
 
 
 class JobReadSchema(BaseModel):
@@ -54,6 +62,10 @@ class JobReadSchema(BaseModel):
     last_error: Optional[str] = None
     last_duration_ms: Optional[int] = None
     run_count: int
+    timezone: Optional[str] = None
+    consecutive_failures: Optional[int] = None
+    max_failures: Optional[int] = None
+    locked_at: Optional[datetime] = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -67,9 +79,31 @@ def _service(db: Annotated[Session, Depends(get_db)]) -> TenantJobService:
     return TenantJobService(db)
 
 
-@router.get("/handlers", summary="List registered job handlers")
+class JobHandlerSchema(BaseModel):
+    name: str
+    description: str = ""
+
+
+@router.get(
+    "/handlers",
+    response_model=list[JobHandlerSchema],
+    summary="List registered job handlers",
+)
 def list_handlers(_: AdminUser):
-    return {"handlers": sorted(_HANDLER_REGISTRY.keys())}
+    """
+    Return the registered job handlers as a flat array of ``{name,
+    description}``. The description is taken from each handler's docstring
+    first line. (Previously this returned ``{"handlers": [...]}`` — an object
+    of bare strings — which the UI tried to ``.map`` over, crashing the page.)
+    """
+    def _describe(fn) -> str:
+        doc = (getattr(fn, "__doc__", "") or "").strip()
+        return doc.split("\n", 1)[0].strip() if doc else ""
+
+    return [
+        {"name": name, "description": _describe(_HANDLER_REGISTRY[name])}
+        for name in sorted(_HANDLER_REGISTRY.keys())
+    ]
 
 
 @router.get("", response_model=list[JobReadSchema], summary="List scheduled jobs")
@@ -98,6 +132,8 @@ def create_job(
         schedule_interval_minutes=payload.schedule_interval_minutes,
         params=payload.params,
         is_enabled=payload.is_enabled,
+        timezone_name=payload.timezone,
+        max_failures=payload.max_failures,
     )
 
 
@@ -118,7 +154,28 @@ def update_job(
         schedule_interval_minutes=payload.schedule_interval_minutes,
         params=payload.params,
         is_enabled=payload.is_enabled,
+        timezone_name=payload.timezone,
+        max_failures=payload.max_failures,
     )
+
+
+@router.post(
+    "/{job_id}/run",
+    response_model=JobReadSchema,
+    summary="Run a scheduled job now",
+)
+def run_job_now(
+    job_id: int,
+    _: AdminUser,
+    service: Annotated[TenantJobService, Depends(_service)],
+):
+    """
+    Make the job due immediately. The background dispatcher picks it up on its
+    next tick (within ~1 minute) and runs it under the same concurrency guards
+    as a normal scheduled run — this endpoint never executes the handler
+    inline.
+    """
+    return service.run_now(job_id)
 
 
 @router.delete(

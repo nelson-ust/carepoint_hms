@@ -371,5 +371,157 @@ class PostingRulesService:
                 user_id=user_id, auto_post=True)
             created.append(ref)
 
+        # ---- 9) Patient cash-billing payments -> revenue (per service account) ----
+        try:
+            from app.core.config import settings as _settings
+            _recognise = bool(getattr(_settings, "RECOGNIZE_PATIENT_REVENUE", True))
+        except Exception:
+            _recognise = True
+        if _recognise:
+            from app.models.all_models import BillingPayment as _BillingPayment, PaymentStatus as _PaymentStatus
+
+            for p in (self.db.query(_BillingPayment)
+                      .filter(_BillingPayment.is_deleted.is_(False),
+                              _BillingPayment.payment_status == _PaymentStatus.SUCCESSFUL)
+                      .order_by(_BillingPayment.id.asc()).limit(limit).all()):
+                ref = f"billing_payment:{p.id}"
+                if _d(p.amount) <= 0:
+                    continue
+                if self._posted(ref):
+                    skipped += 1
+                    continue
+                try:
+                    if self._recognise_billing_payment(p, user_id=user_id):
+                        created.append(ref)
+                except Exception:
+                    # One bad receipt (e.g. a closed period) must not abort the
+                    # whole sweep; it will be retried on the next run.
+                    self.db.rollback()
+                    skipped += 1
+
+        # ---- 10) Ambulance trip charges (PAID) -> revenue ----
+        try:
+            from app.core.config import settings as _settings_amb
+            _recognise_amb = bool(getattr(_settings_amb, "RECOGNISE_AMBULANCE_REVENUE", True))
+        except Exception:
+            _recognise_amb = True
+        if _recognise_amb:
+            from app.models.all_models import (
+                AmbulanceTripCharge as _AmbCharge,
+                AmbulanceChargeStatus as _AmbStatus,
+            )
+            from app.utils.charge_capture import resolve_cash_account, resolve_revenue_account
+
+            for c in (self.db.query(_AmbCharge)
+                      .filter(_AmbCharge.is_deleted.is_(False),
+                              _AmbCharge.status == _AmbStatus.PAID)
+                      .order_by(_AmbCharge.id.asc()).limit(limit).all()):
+                ref = f"ambulance_trip_charge:{c.id}"
+                amount = _d(c.amount)
+                if amount <= 0:
+                    continue
+                if self._posted(ref):
+                    skipped += 1
+                    continue
+                try:
+                    cash_acct = (resolve_cash_account(self.db, payment_method=None)
+                                 or resolve_system_account(self.db, "CASH_ON_HAND"))
+                    rev_acct = (resolve_revenue_account(self.db, category="AMBULANCE")
+                                or resolve_system_account(self.db, "PATIENT_REVENUE"))
+                    self.accounting.create_entry(
+                        entry_date=(c.charged_at.date() if c.charged_at else date.today()),
+                        memo=f"Ambulance charge #{c.id}" + (f" - {c.payer_name}" if c.payer_name else ""),
+                        lines=[
+                            {"account_id": cash_acct.id, "debit": amount, "credit": 0,
+                             "description": "Ambulance trip receipt"},
+                            {"account_id": rev_acct.id, "debit": 0, "credit": amount,
+                             "description": "Ambulance revenue"},
+                        ],
+                        source_type=JournalSourceType.BILLING_PAYMENT,
+                        source_ref=ref, user_id=user_id, auto_post=True)
+                    created.append(ref)
+                except Exception:
+                    self.db.rollback()
+                    skipped += 1
+
         return {"created": len(created), "skipped_existing": skipped,
                 "refs": created[:100]}
+
+    def _recognise_billing_payment(self, p, *, user_id: Optional[int] = None) -> bool:
+        """
+        Post one patient cash-billing payment to the GL, routed per service
+        account code: Dr Cash/Bank, Cr each charge line's revenue account
+        (allocated across the payment by the self-pay share of each line).
+        Returns True when an entry was posted.
+        """
+        from app.models.all_models import Account as _Account, BillingItem as _BillingItem
+        from app.utils.charge_capture import resolve_cash_account, resolve_revenue_account
+
+        CENT = Decimal("0.01")
+        amount = _d(p.amount)
+
+        cash_acct = None
+        if p.account_code:
+            cash_acct = (self.db.query(_Account)
+                         .filter(_Account.code == p.account_code,
+                                 _Account.is_deleted.is_(False)).first())
+        if cash_acct is None:
+            cash_acct = resolve_cash_account(self.db, payment_method=p.payment_method)
+        if cash_acct is None:
+            cash_acct = resolve_system_account(self.db, "CASH_ON_HAND")
+
+        items = (self.db.query(_BillingItem)
+                 .filter(_BillingItem.billing_id == p.billing_id,
+                         _BillingItem.is_deleted.is_(False)).all())
+        groups: dict[str, Decimal] = {}
+        base = Decimal("0.00")
+        for it in items:
+            share = _d(it.patient_amount) if it.patient_amount is not None else _d(it.line_total)
+            if share <= 0:
+                continue
+            code = it.account_code
+            if not code:
+                cat = getattr(getattr(it, "billable_service", None), "category", None)
+                acct = resolve_revenue_account(self.db, category=cat)
+                code = acct.code if acct is not None else None
+            if not code:
+                continue
+            groups[code] = groups.get(code, Decimal("0.00")) + share
+            base += share
+
+        rev_lines: list[dict] = []
+        if base > 0 and groups:
+            allocated = Decimal("0.00")
+            codes = list(groups.keys())
+            for idx, code in enumerate(codes):
+                acct = (self.db.query(_Account)
+                        .filter(_Account.code == code,
+                                _Account.is_deleted.is_(False)).first())
+                if acct is None:
+                    continue
+                alloc = (amount - allocated) if idx == len(codes) - 1 else (amount * groups[code] / base).quantize(CENT)
+                if idx != len(codes) - 1:
+                    allocated += alloc
+                if alloc > 0:
+                    rev_lines.append({"account_id": acct.id, "debit": 0, "credit": alloc,
+                                      "description": f"Revenue {code}"})
+
+        if not rev_lines:
+            rev = resolve_system_account(self.db, "PATIENT_REVENUE")
+            rev_lines = [{"account_id": rev.id, "debit": 0, "credit": amount,
+                          "description": "Patient services revenue"}]
+
+        credit_sum = sum((_d(l["credit"]) for l in rev_lines), Decimal("0.00"))
+        if credit_sum != amount:
+            rev_lines[-1]["credit"] = _d(rev_lines[-1]["credit"]) + (amount - credit_sum)
+
+        lines = [{"account_id": cash_acct.id, "debit": amount, "credit": 0,
+                  "description": f"Receipt {p.payment_reference}"}] + rev_lines
+        self.accounting.create_entry(
+            entry_date=p.paid_at.date() if p.paid_at else date.today(),
+            memo=f"Patient payment {p.payment_reference}",
+            lines=lines,
+            source_type=JournalSourceType.BILLING_PAYMENT,
+            source_ref=f"billing_payment:{p.id}",
+            user_id=user_id, auto_post=True)
+        return True

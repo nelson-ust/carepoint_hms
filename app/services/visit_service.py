@@ -512,6 +512,149 @@ class VisitService:
     # RETURN TO CONSULTATION (post-diagnostics review)
     # ============================================================
 
+    def dispose_visit(
+        self,
+        visit_id: int,
+        *,
+        disposition: str,
+        target_service_delivery_point_id: Optional[int] = None,
+        note: Optional[str] = None,
+        routed_by_id: Optional[int] = None,
+    ):
+        """
+        Apply an end-of-encounter disposition to a visit:
+
+          - DISCHARGED / FOLLOW_UP → close the visit (checkout). FOLLOW_UP also
+            tags the closing note so a review appointment can be booked.
+          - REFERRED → route the patient to a specialist clinic
+            (``target_service_delivery_point_id`` required).
+          - ADMITTED → authorise admission. Allowed only when a consultation
+            recommended admission or the visit is EMERGENCY; the patient is
+            optionally routed to a ward and bed allocation is completed in the
+            Admissions module.
+        """
+        from app.core.enums import ServicePointType
+        from app.models.all_models import Consultation, ServiceDeliveryPoint
+        from app.utils.visit_routing import end_visit, route_visit_to_next_sdp
+
+        visit = self.repository.get_detailed_visit_by_id(visit_id)
+        if not visit:
+            raise NotFoundError(message="Visit not found.", detail={"visit_id": visit_id})
+        if visit.status in {VisitStatus.COMPLETED, VisitStatus.CANCELLED}:
+            raise BadRequestError(
+                message="Completed or cancelled visits cannot be dispositioned.",
+                detail={"visit_id": visit_id, "status": str(visit.status)},
+            )
+
+        d = (disposition or "").strip().upper()
+        new_flow_step = None
+        new_queue_ticket = None
+
+        if d in {"DISCHARGED", "FOLLOW_UP"}:
+            close_note = note
+            if d == "FOLLOW_UP":
+                close_note = ("Follow-up review requested. " + (note or "")).strip()
+            end_visit(self.db, visit_id=visit.id, actor_user_id=routed_by_id, note=close_note)
+            message = (
+                "Patient discharged and visit closed."
+                if d == "DISCHARGED"
+                else "Visit closed; follow-up review requested."
+            )
+
+        elif d == "REFERRED":
+            if not target_service_delivery_point_id:
+                raise BadRequestError(
+                    message="A target specialist clinic is required to refer the patient.",
+                    detail={"visit_id": visit.id},
+                )
+            sdp = (
+                self.db.query(ServiceDeliveryPoint)
+                .filter(
+                    ServiceDeliveryPoint.id == target_service_delivery_point_id,
+                    ServiceDeliveryPoint.is_deleted.is_(False),
+                )
+                .first()
+            )
+            if sdp is None:
+                raise NotFoundError(
+                    message="Target service delivery point not found.",
+                    detail={"service_delivery_point_id": target_service_delivery_point_id},
+                )
+            new_flow_step, new_queue_ticket = route_visit_to_next_sdp(
+                self.db,
+                visit_id=visit.id,
+                target_service_delivery_point_id=sdp.id,
+                routed_by_id=routed_by_id,
+                notes=("Referred to specialist clinic. " + (note or "")).strip(),
+            )
+            message = f"Patient referred to {sdp.name}."
+
+        elif d == "ADMITTED":
+            is_emergency = visit.priority == VisitPriority.EMERGENCY
+            has_recommendation = (
+                self.db.query(Consultation)
+                .filter(
+                    Consultation.visit_id == visit.id,
+                    Consultation.recommends_admission.is_(True),
+                    Consultation.is_deleted.is_(False),
+                )
+                .first()
+                is not None
+            )
+            if not (is_emergency or has_recommendation):
+                raise BadRequestError(
+                    message=(
+                        "Admission requires a doctor's recommendation (recorded in a "
+                        "consultation) or an emergency visit."
+                    ),
+                    detail={"visit_id": visit.id},
+                )
+            if target_service_delivery_point_id:
+                sdp = (
+                    self.db.query(ServiceDeliveryPoint)
+                    .filter(
+                        ServiceDeliveryPoint.id == target_service_delivery_point_id,
+                        ServiceDeliveryPoint.is_deleted.is_(False),
+                    )
+                    .first()
+                )
+                if sdp is None:
+                    raise NotFoundError(
+                        message="Target service delivery point not found.",
+                        detail={"service_delivery_point_id": target_service_delivery_point_id},
+                    )
+                new_flow_step, new_queue_ticket = route_visit_to_next_sdp(
+                    self.db,
+                    visit_id=visit.id,
+                    target_service_delivery_point_id=sdp.id,
+                    routed_by_id=routed_by_id,
+                    notes=("Admission authorised. " + (note or "")).strip(),
+                )
+                message = (
+                    f"Admission authorised — patient routed to {sdp.name}. "
+                    "Complete bed allocation in the Admissions module."
+                )
+            else:
+                message = (
+                    "Admission authorised — complete bed allocation in the Admissions module."
+                )
+        else:
+            raise BadRequestError(
+                message="Unsupported disposition.",
+                detail={"disposition": disposition},
+            )
+
+        self.db.commit()
+        detailed_visit = self.repository.get_detailed_visit_by_id(visit.id)
+        return {
+            "success": True,
+            "message": message,
+            "disposition": d,
+            "visit": detailed_visit,
+            "new_flow_step": new_flow_step,
+            "new_queue_ticket": new_queue_ticket,
+        }
+
     def return_to_consultation(
         self,
         visit_id: int,

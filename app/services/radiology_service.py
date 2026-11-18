@@ -64,9 +64,9 @@ from app.utils.charge_capture import (
     resolve_billable_service,
     get_or_create_open_billing,
 )
-from app.utils.payment_policy import requires_pre_payment
+from app.utils.payment_policy import visit_requires_pre_payment
 from app.utils.security_event_util import record_security_event
-from app.utils.visit_routing import route_visit_to_next_sdp
+from app.utils.visit_routing import maybe_route_back_to_consultation, route_visit_to_next_sdp
 
 
 # ============================================================
@@ -220,8 +220,8 @@ class RadiologyOrderService:
 
         # Routing — cashier first when pre-payment is required.
         next_sdp_id: Optional[int] = None
-        if requires_pre_payment(source="LAB"):
-            # Radiology behaves like lab for the gate decision.
+        if visit_requires_pre_payment(self.db, visit_id=visit.id, source="RADIOLOGY"):
+            # Radiology is cash-and-carry: send to the cashier before imaging.
             next_sdp_id = (
                 payload.route_to_cashier_service_delivery_point_id
                 or payload.route_to_radiology_service_delivery_point_id
@@ -594,6 +594,20 @@ class RadiologyReportService:
             event_detail=f"Radiology report {report.id} released.",
             event_metadata={"report_id": report.id, "exam_id": exam.id},
         )
+
+        # Investigation return-loop: once every ordered investigation is
+        # complete, send the patient back to the ordering consulting room.
+        if order.visit_id is not None:
+            try:
+                maybe_route_back_to_consultation(
+                    self.db,
+                    visit_id=order.visit_id,
+                    routed_by_id=actor_user_id,
+                )
+            except Exception:
+                # Routing failure must not block the report release.
+                pass
+
         self.db.commit()
         return self.repository.get_required_by_id(report.id)
 

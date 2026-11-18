@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 
 from app.core.database import get_master_db
 from app.core.dependencies import CurrentSaaSAdmin
+from app.core.exceptions import ForbiddenError
 from app.core.multitenancy import get_current_tenant_id
 from app.dependencies.auth import get_current_active_user
 from app.models.all_models import User
@@ -61,6 +62,28 @@ class BulkModuleSetSchema(BaseModel):
         return data
 
 
+class FacilityProfileSchema(BaseModel):
+    code: str
+    label: str
+    workspace_name: str
+    home: str
+    description: str
+    modules: list[str] = []
+    is_default: bool = False
+
+
+class CurrentProfileSchema(BaseModel):
+    code: str
+    label: str
+    workspace_name: str
+    home: str
+    description: str
+
+
+class ApplyProfileSchema(BaseModel):
+    profile: str = Field(..., examples=["DENTAL"])
+
+
 # ---------------------------------------------------------------------------
 # Catalog
 # ---------------------------------------------------------------------------
@@ -74,6 +97,31 @@ def list_module_catalog():
     return {
         "modules": [{"code": code, "label": label} for code, label in SUPPORTED_MODULES],
     }
+
+
+@router.get(
+    "/profiles",
+    summary="List selectable facility profiles (verticals)",
+    response_model=list[FacilityProfileSchema],
+)
+def list_facility_profiles(
+    _current_user: Annotated[User, Depends(get_current_active_user)],
+):
+    return TenantModuleService.list_profiles()
+
+
+@router.put(
+    "/{tenant_id}/profile",
+    summary="Apply a facility profile to a tenant (SaaS admin)",
+)
+def apply_facility_profile_for_tenant(
+    tenant_id: int,
+    payload: ApplyProfileSchema,
+    _: CurrentSaaSAdmin,
+    service: Annotated[TenantModuleService, Depends(_service)],
+):
+    result = service.apply_profile(tenant_id, payload.profile)
+    return {"success": True, **result}
 
 
 # ---------------------------------------------------------------------------
@@ -175,3 +223,26 @@ def list_my_tenant_modules(
     if tenant_id is None:
         return []
     return service.list_modules_for_tenant(tenant_id)
+
+
+@router.get(
+    "/me/profile",
+    summary="Current tenant's facility profile",
+    response_model=CurrentProfileSchema,
+)
+def get_my_facility_profile(
+    _current_user: Annotated[User, Depends(get_current_active_user)],
+    service: Annotated[TenantModuleService, Depends(_service)],
+):
+    tenant_id = get_current_tenant_id()
+    if tenant_id is None:
+        # No tenant context (e.g. SaaS admin) -> report the default profile.
+        return {
+            "code": "HOSPITAL",
+            "label": "Integrated Hospital",
+            "workspace_name": "Hospital Workspace",
+            "home": "dashboard",
+            "description": "Full multi-department hospital.",
+        }
+    return service.get_profile_for_tenant(tenant_id)
+

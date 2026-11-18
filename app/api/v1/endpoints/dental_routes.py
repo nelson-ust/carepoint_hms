@@ -82,10 +82,12 @@ class ProcedureCreateSchema(BaseModel):
     patient_id: int
     visit_id: Optional[int] = None
     chart_id: Optional[int] = None
+    catalog_id: Optional[int] = None
     tooth_number: Optional[int] = None
     surfaces: Optional[str] = None
     procedure_code: Optional[str] = None
-    procedure_name: str
+    # Optional when a catalogue entry is selected (name is copied from it).
+    procedure_name: Optional[str] = None
     status: Optional[str] = "PLANNED"
     cost: Optional[Decimal] = Field(None, ge=0)
     planned_date: Optional[date] = None
@@ -170,3 +172,126 @@ def worklist(actor: Reader, db: Db, limit: int = Query(50, ge=1, le=200)):
 @router.get("/stats", summary="Dental dashboard aggregates")
 def stats(actor: Reader, db: Db):
     return {"success": True, "data": DentalService(db).stats()}
+
+
+# ======================================================================
+# PROCEDURE CATALOGUE (price list)
+# ======================================================================
+
+
+class CatalogCreateSchema(BaseModel):
+    code: Optional[str] = None
+    name: str
+    category: Optional[str] = None
+    default_cost: Decimal = Field(0, ge=0)
+    tooth_specific: bool = False
+    billable_service_id: Optional[int] = None
+    is_active: bool = True
+    description: Optional[str] = None
+
+
+class CatalogUpdateSchema(BaseModel):
+    code: Optional[str] = None
+    name: Optional[str] = None
+    category: Optional[str] = None
+    default_cost: Optional[Decimal] = Field(None, ge=0)
+    tooth_specific: Optional[bool] = None
+    billable_service_id: Optional[int] = None
+    is_active: Optional[bool] = None
+    description: Optional[str] = None
+
+
+@router.get("/catalog", summary="List dental procedure catalogue (price list)")
+def list_catalog(actor: Reader, db: Db,
+                 search: Optional[str] = Query(None),
+                 category: Optional[str] = Query(None),
+                 active_only: bool = Query(False),
+                 skip: int = Query(0, ge=0), limit: int = Query(200, ge=1, le=500)):
+    items, total = DentalService(db).list_catalog(
+        search=search, category=category, active_only=active_only, skip=skip, limit=limit)
+    return paginate_response(items=items, total=total, skip=skip, limit=limit,
+                             message="Dental catalogue retrieved.")
+
+
+@router.post("/catalog", status_code=status.HTTP_201_CREATED, summary="Add catalogue procedure")
+def create_catalog(payload: CatalogCreateSchema, actor: Manager, db: Db):
+    data = DentalService(db).create_catalog(payload.model_dump())
+    return {"success": True, "message": "Catalogue procedure added.", "data": data}
+
+
+@router.patch("/catalog/{cat_id}", summary="Update catalogue procedure")
+def update_catalog(cat_id: int, payload: CatalogUpdateSchema, actor: Manager, db: Db):
+    data = DentalService(db).update_catalog(cat_id, payload.model_dump(exclude_unset=True))
+    return {"success": True, "message": "Catalogue procedure updated.", "data": data}
+
+
+@router.delete("/catalog/{cat_id}", summary="Remove catalogue procedure")
+def delete_catalog(cat_id: int, actor: Manager, db: Db):
+    DentalService(db).delete_catalog(cat_id)
+    return {"success": True, "message": "Catalogue procedure removed."}
+
+
+# ======================================================================
+# RECALLS (preventive-care follow-ups)
+# ======================================================================
+
+
+class RecallCreateSchema(BaseModel):
+    patient_id: int
+    chart_id: Optional[int] = None
+    recall_type: Optional[str] = None
+    due_date: date
+    interval_months: Optional[int] = Field(None, ge=0, le=120)
+    status: Optional[str] = "DUE"
+    note: Optional[str] = None
+
+
+class RecallUpdateSchema(BaseModel):
+    recall_type: Optional[str] = None
+    due_date: Optional[date] = None
+    interval_months: Optional[int] = Field(None, ge=0, le=120)
+    status: Optional[str] = None
+    note: Optional[str] = None
+    chart_id: Optional[int] = None
+
+
+@router.get("/recalls", summary="List dental recalls")
+def list_recalls(actor: Reader, db: Db,
+                 patient_id: Optional[int] = Query(None),
+                 status_filter: Optional[str] = Query(None, alias="status"),
+                 due_before: Optional[date] = Query(None),
+                 skip: int = Query(0, ge=0), limit: int = Query(100, ge=1, le=500)):
+    items, total = DentalService(db).list_recalls(
+        patient_id=patient_id, status=status_filter, due_before=due_before,
+        skip=skip, limit=limit)
+    return paginate_response(items=items, total=total, skip=skip, limit=limit,
+                             message="Dental recalls retrieved.")
+
+
+@router.post("/recalls", status_code=status.HTTP_201_CREATED, summary="Create dental recall")
+def create_recall(payload: RecallCreateSchema, actor: Manager, db: Db):
+    data = DentalService(db).create_recall(payload.model_dump(), actor)
+    return {"success": True, "message": "Recall created.", "data": data}
+
+
+@router.patch("/recalls/{recall_id}", summary="Update dental recall")
+def update_recall(recall_id: int, payload: RecallUpdateSchema, actor: Manager, db: Db):
+    data = DentalService(db).update_recall(recall_id, payload.model_dump(exclude_unset=True))
+    return {"success": True, "message": "Recall updated.", "data": data}
+
+
+# ======================================================================
+# TREATMENT-PLAN BILLING
+# ======================================================================
+
+
+class BillChartSchema(BaseModel):
+    procedure_ids: Optional[list[int]] = None
+
+
+@router.post("/charts/{chart_id}/bill", summary="Bill a chart's procedures to the visit charge sheet")
+def bill_chart(chart_id: int, payload: BillChartSchema, actor: Manager, db: Db):
+    data = DentalService(db).bill_chart(
+        chart_id, procedure_ids=payload.procedure_ids, actor=actor)
+    return {"success": True,
+            "message": f"{data['billed_count']} procedure(s) billed.", "data": data}

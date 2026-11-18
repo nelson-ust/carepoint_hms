@@ -28,7 +28,7 @@ from app.utils.charge_capture import (
     resolve_billable_service,
     get_or_create_open_billing,
 )
-from app.utils.payment_policy import requires_pre_payment
+from app.utils.payment_policy import visit_requires_pre_payment
 from app.utils.security_event_util import record_security_event
 from app.utils.visit_routing import route_visit_to_next_sdp, validate_visit_sdp_activity
 
@@ -133,7 +133,7 @@ class PrescriptionService:
 
         # Routing.
         next_sdp_id: Optional[int] = None
-        if requires_pre_payment(source="PHARMACY"):
+        if visit_requires_pre_payment(self.db, visit_id=visit.id, source="PHARMACY"):
             next_sdp_id = (
                 payload.route_to_cashier_service_delivery_point_id
                 or payload.route_to_pharmacy_service_delivery_point_id
