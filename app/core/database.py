@@ -208,6 +208,66 @@ def get_engine_for_url(url: str) -> Engine:
             pass
     return eng
 
+def dispose_engines_for_tenant(db_name, url=None) -> int:
+    """Dispose and evict every cached tenant engine that belongs to the tenant
+    whose database/schema is ``db_name`` (or whose exact connection ``url`` is
+    supplied), closing their pooled connections.
+
+    This MUST run before dropping a tenant database: PostgreSQL refuses to
+    ``DROP DATABASE`` while any session (including an idle pooled one held by
+    this process) is still connected to it. Pinned engines — the master and
+    default engines — are never touched. Returns the number of engines
+    disposed.
+    """
+    from sqlalchemy.engine import make_url
+
+    master_db_name = None
+    master_url = getattr(settings, "MASTER_DATABASE_URL", None) if settings else None
+    try:
+        if master_url:
+            master_db_name = make_url(master_url).database
+    except Exception:
+        master_db_name = None
+
+    pinned = _pinned_urls()
+    targets: list[str] = []
+    with _tenant_engines_lock:
+        for cached_url in list(_tenant_engines.keys()):
+            if cached_url in pinned:
+                continue
+            match = False
+            if url and cached_url == url:
+                match = True
+            elif db_name and db_name != master_db_name:
+                try:
+                    u = make_url(cached_url)
+                    if u.database and u.database == db_name:
+                        match = True
+                    else:
+                        opts = u.query.get("options") if u.query else None
+                        if isinstance(opts, (list, tuple)):
+                            opts = " ".join(opts)
+                        opts = opts or ""
+                        if f"search_path={db_name}" in opts:
+                            match = True
+                except Exception:
+                    if db_name in cached_url:
+                        match = True
+            if match:
+                targets.append(cached_url)
+        disposed = []
+        for t in targets:
+            eng = _tenant_engines.pop(t, None)
+            if eng is not None:
+                disposed.append(eng)
+    for eng in disposed:
+        try:
+            eng.dispose()
+        except Exception:
+            pass
+    return len(disposed)
+
+
 def get_master_engine() -> Engine:
     """Return the master database engine."""
     master_url = settings.MASTER_DATABASE_URL or DATABASE_URL

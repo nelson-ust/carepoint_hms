@@ -192,6 +192,19 @@ class TenantUpdateStatusSchema(BaseModel):
     status: str
 
 
+class TenantDropSchema(BaseModel):
+    """Confirmation payload for permanently dropping a tenant from the platform.
+
+    ``confirm_code`` must equal the tenant's own code (case-insensitive). This
+    is a deliberate guard: a destructive drop (database + object storage +
+    platform records) must never be triggerable by a stray click."""
+
+    confirm_code: str = Field(
+        ..., min_length=1,
+        description="Must exactly match the target tenant's code to confirm the drop.",
+    )
+
+
 class TenantChangePlanSchema(BaseModel):
     plan_code: str
     # Billing cycle for the new subscription. Coerced to MONTHLY/YEARLY

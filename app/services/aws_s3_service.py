@@ -217,6 +217,98 @@ class S3Service:
             logger.error(f"Failed to create S3 bucket {bucket_name}: {e}")
             return None
 
+    def delete_tenant_bucket(self, bucket_name: Optional[str]) -> tuple[bool, str]:
+        """
+        Permanently delete a tenant's object-storage bucket and everything in it.
+
+        Teardown counterpart of :meth:`create_tenant_bucket`, used when a SaaS
+        super-admin drops a tenant from the platform. A bucket cannot be removed
+        while it still holds objects, so we first empty it — including every
+        non-current version and delete-marker on a versioned bucket — in bulk
+        (1000 keys per request), then issue ``delete_bucket``.
+
+        Idempotent and best-effort: a missing bucket (or disabled storage) is
+        reported as success so a retried drop does not fail on an
+        already-removed bucket. Returns ``(ok, message)``.
+        """
+        if not bucket_name:
+            return True, "No bucket was provisioned for this tenant — nothing to delete."
+        if not self.is_enabled:
+            # Storage is disabled in this environment; we cannot reach the
+            # backend to delete. Report so the caller can surface a warning.
+            return False, (
+                "Object storage is disabled in this environment, so the bucket "
+                f"'{bucket_name}' could not be deleted automatically. Remove it manually."
+            )
+
+        try:
+            # 1. Empty the bucket. Prefer the versions listing so we also clear
+            #    non-current versions and delete markers (a versioned bucket is
+            #    otherwise un-deletable even after delete_objects on the keys).
+            self._empty_bucket(bucket_name)
+
+            # 2. Remove the now-empty bucket.
+            self.s3_client.delete_bucket(Bucket=bucket_name)
+            logger.info("Deleted tenant S3 bucket %s", bucket_name)
+            self.last_error = None
+            return True, f"Bucket '{bucket_name}' and all its objects were deleted."
+        except ClientError as e:
+            code = (e.response or {}).get("Error", {}).get("Code", "")
+            if code in ("NoSuchBucket", "404"):
+                logger.info("Bucket %s already absent — treating as deleted.", bucket_name)
+                self.last_error = None
+                return True, f"Bucket '{bucket_name}' was already absent."
+            message = (e.response or {}).get("Error", {}).get("Message", str(e))
+            self.last_error = f"{code or 'S3 error'}: {message}"
+            logger.error("Failed to delete S3 bucket %s: %s", bucket_name, e)
+            return False, self.last_error
+        except Exception as e:  # network/endpoint problems
+            self.last_error = f"Could not reach storage to delete bucket '{bucket_name}': {e}"
+            logger.error("Failed to delete S3 bucket %s: %s", bucket_name, e)
+            return False, self.last_error
+
+    def _empty_bucket(self, bucket_name: str) -> None:
+        """Delete every object (and object version / delete-marker) in a bucket,
+        in batches of up to 1000 keys. Falls back to the unversioned listing
+        when the backend does not support ``list_object_versions`` (e.g. some
+        MinIO configurations)."""
+        def _delete_batch(objects: list[dict]) -> None:
+            if not objects:
+                return
+            self.s3_client.delete_objects(
+                Bucket=bucket_name,
+                Delete={"Objects": objects, "Quiet": True},
+            )
+
+        emptied_via_versions = False
+        try:
+            paginator = self.s3_client.get_paginator("list_object_versions")
+            for page in paginator.paginate(Bucket=bucket_name):
+                emptied_via_versions = True
+                batch: list[dict] = []
+                for item in (page.get("Versions") or []) + (page.get("DeleteMarkers") or []):
+                    batch.append({"Key": item["Key"], "VersionId": item["VersionId"]})
+                    if len(batch) >= 1000:
+                        _delete_batch(batch)
+                        batch = []
+                _delete_batch(batch)
+        except Exception as exc:  # pragma: no cover - backend without versioning
+            logger.info(
+                "list_object_versions unavailable for %s (%s); falling back to object listing.",
+                bucket_name, exc,
+            )
+            emptied_via_versions = False
+
+        if emptied_via_versions:
+            return
+
+        # Unversioned fallback.
+        paginator = self.s3_client.get_paginator("list_objects_v2")
+        for page in paginator.paginate(Bucket=bucket_name):
+            batch = [{"Key": o["Key"]} for o in (page.get("Contents") or [])]
+            for i in range(0, len(batch), 1000):
+                _delete_batch(batch[i:i + 1000])
+
     def ensure_tenant_bucket(self, master_db, tenant) -> Optional[str]:
         """
         Return the tenant's bucket, provisioning + persisting it on demand.

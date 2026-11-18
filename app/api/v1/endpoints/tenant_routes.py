@@ -11,6 +11,7 @@ from app.schemas.tenant_schemas import (
     TenantReadSchema, 
     TenantListResponseSchema, 
     TenantUpdateStatusSchema,
+    TenantDropSchema,
     TenantChangePlanSchema,
     ExtendSubscriptionSchema,
     GrantFreeSubscriptionSchema,
@@ -299,6 +300,35 @@ def update_tenant_status(
     Requires SaaS Superuser access.
     """
     return service.update_tenant_status(tenant_id, new_status=payload.status)
+
+
+@router.post(
+    "/{tenant_id}/drop",
+    response_model=dict,
+    status_code=status.HTTP_200_OK,
+    summary="Permanently drop a tenant: database + object storage + records (SaaS superuser)",
+)
+def drop_tenant(
+    tenant_id: int,
+    payload: TenantDropSchema,
+    actor: CurrentSaaSSuperuser,
+    service: Annotated[TenantService, Depends(get_tenant_service)],
+):
+    """
+    Permanently remove a tenant from the platform. **Irreversible.**
+
+    Drops the tenant's isolated database (or schema on managed Postgres),
+    deletes its object-storage bucket and everything in it, and purges its
+    master-database footprint (billing, usage, domains, cross-facility links,
+    and the tenant row itself).
+
+    Requires SaaS Superuser access. As a safeguard the caller must echo the
+    tenant's own code in ``confirm_code``; a mismatch is rejected before
+    anything is torn down.
+    """
+    return service.drop_tenant(
+        tenant_id, confirm_code=payload.confirm_code, actor=actor
+    )
 
 
 @router.get(

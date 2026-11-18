@@ -1178,6 +1178,290 @@ class TenantService:
             tenant_db.add(UserRoleAssociation(user_id=admin_user.id, role_id=admin_role.id))
             tenant_db.commit()
 
+    # ------------------------------------------------------------------
+    # Tenant teardown (drop a tenant from the platform)
+    # ------------------------------------------------------------------
+    def drop_tenant(self, tenant_id: int, *, confirm_code: str, actor=None) -> dict:
+        """
+        Permanently remove a tenant from the platform.
+
+        This is the irreversible counterpart of registration + provisioning.
+        In order, it:
+
+          1. verifies the operator retyped the tenant code (guard against
+             accidental drops),
+          2. drops the tenant's isolated database (or schema),
+          3. deletes the tenant's object-storage bucket and all its objects,
+          4. purges the tenant's master-database footprint (billing, usage,
+             domains, cross-facility links, …) and the tenant row itself,
+          5. invalidates caches and writes a SaaS audit record.
+
+        The database drop runs first so that, if it fails, nothing else is
+        touched and the operation is safely retryable. Storage deletion is
+        best-effort: a storage failure is reported as a warning but does not
+        abort the drop (the database is already gone, so the tenant is dead).
+        """
+        tenant = self.get_tenant(tenant_id)  # raises NotFoundError if missing
+
+        typed = (confirm_code or "").strip()
+        if not typed or typed.lower() != (tenant.code or "").strip().lower():
+            raise BadRequestError(
+                message=(
+                    "Confirmation code does not match the tenant code. Type the "
+                    "tenant's code exactly to confirm the drop."
+                )
+            )
+
+        # Capture identity BEFORE teardown — needed for infra deletion + audit.
+        info = {
+            "tenant_id": tenant.id,
+            "code": tenant.code,
+            "name": tenant.name,
+            "db_name": tenant.db_name,
+            "bucket_name": tenant.aws_s3_bucket_name,
+            "deployment_model": tenant.deployment_model,
+        }
+        conn_str = tenant.db_connection_string
+        warnings: list[str] = []
+        steps: list[dict] = []
+
+        # 1. Drop the tenant database/schema (core, irreversible step).
+        db_detail = self._drop_tenant_database(info["db_name"], conn_str)
+        steps.append({"step": "Drop database", "detail": db_detail, "status": "DONE"})
+
+        # 2. Delete the tenant's object-storage bucket (best-effort).
+        try:
+            s3 = S3Service.for_tenant(tenant)
+            ok, msg = s3.delete_tenant_bucket(info["bucket_name"])
+        except Exception as exc:  # never let storage abort the drop
+            ok, msg = False, f"Bucket deletion raised: {exc}"
+        steps.append({"step": "Delete object storage", "detail": msg,
+                      "status": "DONE" if ok else "WARNING"})
+        if not ok:
+            warnings.append(msg)
+
+        # 3. Purge the master-DB footprint and the tenant row.
+        purged = self._purge_master_tenant_records(info["tenant_id"])
+        steps.append({"step": "Purge platform records",
+                      "detail": f"Removed {purged} master record(s).", "status": "DONE"})
+
+        # 4. Invalidate caches.
+        try:
+            from app.core import tenant_cache
+            tenant_cache.invalidate(tenant_id=info["tenant_id"], code=info["code"])
+        except Exception:
+            pass
+
+        # 5. Audit.
+        try:
+            from app.services.audit_service import write_saas_audit_autocommit
+            write_saas_audit_autocommit(
+                action="TENANT_DROPPED",
+                entity_name="Tenant",
+                entity_id=info["tenant_id"],
+                actor_admin_id=getattr(actor, "id", None),
+                actor_label=(getattr(actor, "email", None) or getattr(actor, "username", None)),
+                target_tenant_id=info["tenant_id"],
+                target_tenant_code=info["code"],
+                before_data=info,
+                extra_metadata={"warnings": warnings, "steps": steps},
+            )
+        except Exception:
+            pass
+
+        logger.warning(
+            "Tenant %s (id=%s) dropped by admin=%s. db=%s bucket=%s warnings=%s",
+            info["code"], info["tenant_id"], getattr(actor, "id", "?"),
+            info["db_name"], info["bucket_name"], warnings,
+        )
+
+        message = (
+            f"Tenant '{info['name']}' ({info['code']}) has been dropped: its "
+            "database, object storage and platform records were removed."
+        )
+        if warnings:
+            message += " Warning: " + " ".join(warnings)
+
+        return {
+            "success": True,
+            "message": message,
+            "tenant_id": info["tenant_id"],
+            "code": info["code"],
+            "dropped_database": info["db_name"],
+            "dropped_bucket": info["bucket_name"],
+            "warnings": warnings,
+            "steps": steps,
+        }
+
+    def _drop_tenant_database(self, db_name, conn_str=None) -> str:
+        """Drop the tenant's physical database, or its schema on managed
+        Postgres. Pooled connections are released first (Postgres refuses to
+        drop a database with live sessions). Refuses to drop the platform /
+        system databases. Idempotent: an already-absent database/schema is
+        reported, not an error."""
+        from sqlalchemy.engine import make_url
+        from app.init_db import _quote_identifier, _build_postgres_admin_uri
+        from app.core.database import dispose_engines_for_tenant
+
+        if not db_name or not str(db_name).strip():
+            return "No tenant database name on record — nothing to drop."
+        db_name = str(db_name).strip()
+
+        master_url = settings.MASTER_DATABASE_URL
+        if not master_url:
+            raise BadRequestError(message="MASTER_DATABASE_URL is not configured.")
+
+        # Hard safety: never drop the platform/master/system databases.
+        try:
+            master_db_name = make_url(master_url).database
+        except Exception:
+            master_db_name = None
+        if db_name in {"postgres", "template0", "template1"} or (
+            master_db_name and db_name == master_db_name
+        ):
+            raise BadRequestError(
+                message=(
+                    f"Refusing to drop '{db_name}': it is the platform/system "
+                    "database, not a tenant database."
+                )
+            )
+
+        # Decrypt the stored connection URL for precise engine disposal.
+        conn_url = None
+        if conn_str:
+            try:
+                conn_url = decrypt_string(conn_str)
+            except Exception:
+                conn_url = conn_str
+
+        disposed = dispose_engines_for_tenant(db_name, conn_url)
+
+        # Physical database vs schema-per-tenant: probe pg_database.
+        admin_engine = create_engine(
+            master_url, isolation_level="AUTOCOMMIT", future=True,
+            connect_args={"connect_timeout": 10},
+        )
+        try:
+            with admin_engine.connect() as conn:
+                is_physical = conn.execute(
+                    text("SELECT 1 FROM pg_database WHERE datname = :d"),
+                    {"d": db_name},
+                ).first() is not None
+        finally:
+            admin_engine.dispose()
+
+        quoted = _quote_identifier(db_name)
+
+        if is_physical:
+            admin_uri = _build_postgres_admin_uri(master_url)
+            maint = create_engine(
+                admin_uri, isolation_level="AUTOCOMMIT", future=True,
+                connect_args={"connect_timeout": 10},
+            )
+            try:
+                with maint.connect() as conn:
+                    conn.execute(
+                        text(
+                            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                            "WHERE datname = :d AND pid <> pg_backend_pid()"
+                        ),
+                        {"d": db_name},
+                    )
+                    conn.execute(text(f"DROP DATABASE IF EXISTS {quoted}"))
+            finally:
+                maint.dispose()
+            return (
+                f"Physical database '{db_name}' dropped "
+                f"(released {disposed} pooled engine(s))."
+            )
+
+        # Schema-per-tenant fallback (managed Postgres).
+        master_engine = create_engine(
+            master_url, isolation_level="AUTOCOMMIT", future=True,
+            connect_args={"connect_timeout": 10},
+        )
+        try:
+            with master_engine.connect() as conn:
+                schema_exists = conn.execute(
+                    text(
+                        "SELECT 1 FROM information_schema.schemata "
+                        "WHERE schema_name = :d"
+                    ),
+                    {"d": db_name},
+                ).first() is not None
+                if schema_exists:
+                    conn.execute(text(f"DROP SCHEMA IF EXISTS {quoted} CASCADE"))
+                    return (
+                        f"Tenant schema '{db_name}' dropped "
+                        f"(released {disposed} pooled engine(s))."
+                    )
+            return f"No database or schema named '{db_name}' found — already absent."
+        finally:
+            master_engine.dispose()
+
+    def _purge_master_tenant_records(self, tenant_id: int) -> int:
+        """Delete every master-database row linked to the tenant (by any foreign
+        key referencing the ``tenant`` table) in child-before-parent order, then
+        the tenant row itself. Auto-adapts to new master tables. Runs in the
+        caller's master session; commits once at the end."""
+        from app.models.base import MasterBase
+
+        metadata = MasterBase.metadata
+        tenant_table = metadata.tables.get("tenant")
+        if tenant_table is None:
+            obj = self.db.query(Tenant).filter(Tenant.id == tenant_id).first()
+            if obj:
+                self.db.delete(obj)
+                self.db.commit()
+                return 1
+            return 0
+
+        # Only touch tables that physically exist (older DBs may lag the models).
+        try:
+            existing = {
+                r[0]
+                for r in self.db.execute(
+                    text("SELECT tablename FROM pg_tables WHERE schemaname = 'public'")
+                )
+            }
+        except Exception:
+            existing = None  # cannot determine — attempt all, guarded below
+
+        # Deletion order: reverse of parents-first topological order so
+        # inter-table FKs within the master schema are satisfied.
+        try:
+            ordered = list(reversed(metadata.sorted_tables))
+        except Exception:
+            ordered = list(metadata.tables.values())
+
+        total = 0
+        for table in ordered:
+            if table is tenant_table:
+                continue
+            if existing is not None and table.name not in existing:
+                continue
+            fk_cols = {
+                fk.parent.name
+                for fk in table.foreign_keys
+                if fk.column.table is tenant_table
+            }
+            if not fk_cols:
+                continue
+            clause = " OR ".join(f'"{c}" = :tid' for c in sorted(fk_cols))
+            res = self.db.execute(
+                text(f'DELETE FROM "{table.name}" WHERE {clause}'),
+                {"tid": tenant_id},
+            )
+            total += res.rowcount or 0
+
+        res = self.db.execute(
+            text(f'DELETE FROM "{tenant_table.name}" WHERE id = :tid'),
+            {"tid": tenant_id},
+        )
+        total += res.rowcount or 0
+        self.db.commit()
+        return total
+
     def get_tenants(self, page: int = 1, page_size: int = 20, status: Optional[str] = None):
         query = self.db.query(Tenant)
         if status:
