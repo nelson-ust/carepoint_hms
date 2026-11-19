@@ -1226,8 +1226,14 @@ class TenantService:
         steps: list[dict] = []
 
         # 1. Drop the tenant database/schema (core, irreversible step).
-        db_detail = self._drop_tenant_database(info["db_name"], conn_str)
-        steps.append({"step": "Drop database", "detail": db_detail, "status": "DONE"})
+        db_dropped, db_detail = self._drop_tenant_database(info["db_name"], conn_str)
+        steps.append({"step": "Drop database", "detail": db_detail,
+                      "status": "DONE" if db_dropped else "SKIPPED"})
+        if not db_dropped:
+            # The tenant had no dedicated database/schema to drop (it shares the
+            # platform database). Surface that, but DO NOT abort — the record and
+            # storage are still removed below.
+            warnings.append(db_detail)
 
         # 2. Delete the tenant's object-storage bucket (best-effort).
         try:
@@ -1293,40 +1299,45 @@ class TenantService:
             "steps": steps,
         }
 
-    def _drop_tenant_database(self, db_name, conn_str=None) -> str:
-        """Drop the tenant's physical database, or its schema on managed
-        Postgres. Pooled connections are released first (Postgres refuses to
-        drop a database with live sessions). Refuses to drop the platform /
-        system databases. Idempotent: an already-absent database/schema is
-        reported, not an error."""
+    def _drop_tenant_database(self, db_name, conn_str=None) -> tuple[bool, str]:
+        """Drop the tenant's dedicated storage, deriving what that is from the
+        tenant's real (decrypted) connection string — the source of truth for
+        how the tenant is isolated:
+
+          * **Dedicated physical database** (its own DB, != the platform DB) ->
+            terminate connections and ``DROP DATABASE``.
+          * **Dedicated schema** inside the platform database (managed Postgres
+            / Neon: ``search_path=<schema>``) -> ``DROP SCHEMA ... CASCADE``.
+          * **Shared platform database** (the tenant points at the master DB's
+            public schema with no dedicated schema — e.g. ``db_name`` is the
+            master DB name itself) -> there is nothing safe to drop, so the
+            database step is SKIPPED (never the platform/master/system DB).
+
+        Returns ``(dropped, detail)``: ``dropped`` is True when a dedicated
+        database/schema was dropped (or was already absent), and False only for
+        the shared-platform case, so the caller can warn without aborting.
+        Idempotent and never raises for the shared/system case.
+        """
         from sqlalchemy.engine import make_url
         from app.init_db import _quote_identifier, _build_postgres_admin_uri
         from app.core.database import dispose_engines_for_tenant
 
-        if not db_name or not str(db_name).strip():
-            return "No tenant database name on record — nothing to drop."
-        db_name = str(db_name).strip()
-
         master_url = settings.MASTER_DATABASE_URL
         if not master_url:
             raise BadRequestError(message="MASTER_DATABASE_URL is not configured.")
-
-        # Hard safety: never drop the platform/master/system databases.
         try:
             master_db_name = make_url(master_url).database
         except Exception:
             master_db_name = None
-        if db_name in {"postgres", "template0", "template1"} or (
-            master_db_name and db_name == master_db_name
-        ):
-            raise BadRequestError(
-                message=(
-                    f"Refusing to drop '{db_name}': it is the platform/system "
-                    "database, not a tenant database."
-                )
-            )
 
-        # Decrypt the stored connection URL for precise engine disposal.
+        # Databases we must NEVER drop.
+        system_dbs = {"postgres", "template0", "template1"}
+        if master_db_name:
+            system_dbs.add(master_db_name)
+
+        db_name = str(db_name).strip() if db_name else ""
+
+        # Decrypt the real provisioned connection (source of truth).
         conn_url = None
         if conn_str:
             try:
@@ -1334,70 +1345,127 @@ class TenantService:
             except Exception:
                 conn_url = conn_str
 
-        disposed = dispose_engines_for_tenant(db_name, conn_url)
+        tenant_db = None
+        tenant_schema = None
+        if conn_url:
+            try:
+                u = make_url(conn_url)
+                tenant_db = u.database
+                opts = u.query.get("options") if u.query else None
+                if isinstance(opts, (list, tuple)):
+                    opts = " ".join(opts)
+                if opts:
+                    m = re.search(r"search_path=([^,\s]+)", opts)
+                    if m:
+                        cand = m.group(1).strip().strip('"')
+                        if cand and cand.lower() != "public":
+                            tenant_schema = cand
+            except Exception:
+                pass
 
-        # Physical database vs schema-per-tenant: probe pg_database.
-        admin_engine = create_engine(
-            master_url, isolation_level="AUTOCOMMIT", future=True,
-            connect_args={"connect_timeout": 10},
-        )
-        try:
-            with admin_engine.connect() as conn:
-                is_physical = conn.execute(
-                    text("SELECT 1 FROM pg_database WHERE datname = :d"),
-                    {"d": db_name},
-                ).first() is not None
-        finally:
-            admin_engine.dispose()
+        # Release pooled connections this process holds to the tenant.
+        disposed = dispose_engines_for_tenant(db_name or (tenant_db or ""), conn_url)
 
-        quoted = _quote_identifier(db_name)
+        # ---- 1. Dedicated physical database? -----------------------------
+        phys_candidate = None
+        for cand in (tenant_db, db_name):
+            if cand and cand not in system_dbs:
+                phys_candidate = cand
+                break
 
-        if is_physical:
-            admin_uri = _build_postgres_admin_uri(master_url)
-            maint = create_engine(
-                admin_uri, isolation_level="AUTOCOMMIT", future=True,
+        if phys_candidate:
+            admin_engine = create_engine(
+                master_url, isolation_level="AUTOCOMMIT", future=True,
                 connect_args={"connect_timeout": 10},
             )
             try:
-                with maint.connect() as conn:
-                    conn.execute(
-                        text(
-                            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
-                            "WHERE datname = :d AND pid <> pg_backend_pid()"
-                        ),
-                        {"d": db_name},
-                    )
-                    conn.execute(text(f"DROP DATABASE IF EXISTS {quoted}"))
+                with admin_engine.connect() as conn:
+                    exists = conn.execute(
+                        text("SELECT 1 FROM pg_database WHERE datname = :d"),
+                        {"d": phys_candidate},
+                    ).first() is not None
             finally:
-                maint.dispose()
-            return (
-                f"Physical database '{db_name}' dropped "
-                f"(released {disposed} pooled engine(s))."
+                admin_engine.dispose()
+            if exists:
+                admin_uri = _build_postgres_admin_uri(master_url)
+                maint = create_engine(
+                    admin_uri, isolation_level="AUTOCOMMIT", future=True,
+                    connect_args={"connect_timeout": 10},
+                )
+                try:
+                    with maint.connect() as conn:
+                        conn.execute(
+                            text(
+                                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                                "WHERE datname = :d AND pid <> pg_backend_pid()"
+                            ),
+                            {"d": phys_candidate},
+                        )
+                        conn.execute(
+                            text(f"DROP DATABASE IF EXISTS {_quote_identifier(phys_candidate)}")
+                        )
+                finally:
+                    maint.dispose()
+                return True, (
+                    f"Physical database '{phys_candidate}' dropped "
+                    f"(released {disposed} pooled engine(s))."
+                )
+
+        # ---- 2. Dedicated schema inside the platform database? -----------
+        schema_candidate = tenant_schema
+        if (
+            not schema_candidate
+            and db_name
+            and db_name not in system_dbs
+            and db_name.lower() != "public"
+        ):
+            schema_candidate = db_name
+
+        if (
+            schema_candidate
+            and schema_candidate.lower() != "public"
+            and schema_candidate not in system_dbs
+        ):
+            master_engine = create_engine(
+                master_url, isolation_level="AUTOCOMMIT", future=True,
+                connect_args={"connect_timeout": 10},
+            )
+            try:
+                with master_engine.connect() as conn:
+                    schema_exists = conn.execute(
+                        text(
+                            "SELECT 1 FROM information_schema.schemata "
+                            "WHERE schema_name = :d"
+                        ),
+                        {"d": schema_candidate},
+                    ).first() is not None
+                    if schema_exists:
+                        conn.execute(
+                            text(
+                                f"DROP SCHEMA IF EXISTS {_quote_identifier(schema_candidate)} CASCADE"
+                            )
+                        )
+                        return True, (
+                            f"Tenant schema '{schema_candidate}' dropped "
+                            f"(released {disposed} pooled engine(s))."
+                        )
+            finally:
+                master_engine.dispose()
+            # A dedicated schema was expected but is already gone — idempotent.
+            return True, (
+                f"No schema '{schema_candidate}' found — the tenant's dedicated "
+                "schema was already absent."
             )
 
-        # Schema-per-tenant fallback (managed Postgres).
-        master_engine = create_engine(
-            master_url, isolation_level="AUTOCOMMIT", future=True,
-            connect_args={"connect_timeout": 10},
+        # ---- 3. Shared platform database — nothing dedicated to drop -----
+        shared = db_name or tenant_db or master_db_name or "the platform database"
+        return False, (
+            f"This tenant uses the shared platform database ('{shared}') with no "
+            "dedicated database or schema, so there was nothing to drop at the "
+            "database level — the platform database is never dropped. The tenant "
+            "record and its storage are still removed. If this tenant was expected "
+            "to have its own database/schema, check its provisioning."
         )
-        try:
-            with master_engine.connect() as conn:
-                schema_exists = conn.execute(
-                    text(
-                        "SELECT 1 FROM information_schema.schemata "
-                        "WHERE schema_name = :d"
-                    ),
-                    {"d": db_name},
-                ).first() is not None
-                if schema_exists:
-                    conn.execute(text(f"DROP SCHEMA IF EXISTS {quoted} CASCADE"))
-                    return (
-                        f"Tenant schema '{db_name}' dropped "
-                        f"(released {disposed} pooled engine(s))."
-                    )
-            return f"No database or schema named '{db_name}' found — already absent."
-        finally:
-            master_engine.dispose()
 
     def _purge_master_tenant_records(self, tenant_id: int) -> int:
         """Delete every master-database row linked to the tenant (by any foreign
